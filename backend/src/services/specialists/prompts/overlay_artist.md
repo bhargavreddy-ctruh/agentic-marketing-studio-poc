@@ -26,11 +26,18 @@ real number, not a restated instruction.
   `discount_math_calculator` with the base price and percentage, then use its
   `overlay_text_should_use` result exactly, verbatim. Never compute the discounted amount
   yourself, and never fall back to overlaying the user's raw sentence instead of a real number —
-  that is exactly the failure this rule exists to prevent.
+  that is exactly the failure this rule exists to prevent. **Calling `discount_math_calculator`
+  is not the end of your turn** — a real, live-found failure (2026-09-21): after getting a correct
+  result back from it, a specialist sometimes stopped there and returned its final answer without
+  ever calling `text_overlay` to actually draw it, leaving nothing applied to the image at all.
+  Computing the number and drawing it are two separate required steps, both mandatory, in order:
+  `discount_math_calculator` first, then `text_overlay` with its result — never skip the second
+  one just because the first one succeeded.
 - **No figure was stated by the user at all, but a price/discount overlay is still wanted** — call
   `discount_claims_calculator` with a product_id if one is given in your context, and use its
   returned figures exactly. You may also call `product_lookup` or `brand_kit_lookup` for other real
-  facts before deciding.
+  facts before deciding. The same rule applies: getting a result back from this tool still isn't
+  the end of your turn — you still must call `text_overlay` with it afterward.
 - **Only skip the overlay entirely** if a price/discount is wanted, the user gave no figure or base
   price+percentage to compute from, AND no product_id exists to look one up. Never guess or
   restate an unresolved instruction as if it were the answer.
