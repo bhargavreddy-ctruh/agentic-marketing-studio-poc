@@ -21,3 +21,10 @@ class SessionModel(Base, TimestampMixin):
     # or "approve" (Memory.md, Phase 4: real per-stage pipeline gates and per-edit staging — a
     # user's explicit ask for genuine approval checkpoints, not just after-the-fact fixes).
     approval_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    # The last turn's real IdeationPrompt (message/options/allow_free_text), persisted so a plain
+    # GET can honestly reproduce what the client last saw — previously this was computed only
+    # per-turn and handed back in that same response, so a page refresh or the "refresh" button
+    # while paused at any gate (HITL or ordinary ideation) lost the prompt text entirely even
+    # though brief.video_stage/narrative_plan/scene_plan survived (a real, disclosed gap from
+    # Phase 4d). None once a turn produces no prompt (e.g. "completed").
+    next_prompt_json: Mapped[dict | None] = mapped_column(JSON, nullable=True, default=None)

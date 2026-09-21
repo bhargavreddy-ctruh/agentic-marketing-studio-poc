@@ -7,9 +7,14 @@ from ..schemas.sessions.responses import IdeationPrompt, SessionResponse
 
 class SessionMapper:
     @staticmethod
-    def to_response(
-        entity: SessionModel, *, next_prompt: IdeationPrompt | None = None
-    ) -> SessionResponse:
+    def to_response(entity: SessionModel) -> SessionResponse:
+        # Reconstructed from the persisted column, not recomputed — so a plain GET (a page refresh,
+        # the "refresh" button) reproduces exactly what the last real turn actually returned,
+        # instead of always coming back null (a real, disclosed gap until now: see the field's own
+        # docstring in models/session.py).
+        next_prompt = (
+            IdeationPrompt(**entity.next_prompt_json) if entity.next_prompt_json else None
+        )
         return SessionResponse(
             id=entity.id,
             status=entity.status,

@@ -160,9 +160,10 @@ class SessionService:
             session.status = "error" if result_state.get("error") else "pending"
             prompt = IdeationPrompt(message=result.get("message", ""), options=[], allow_free_text=True)
 
+        session.next_prompt_json = prompt.model_dump() if prompt else None
         session = await self._sessions.update(session)
         emit("turn_completed", status=session.status)
-        return SessionMapper.to_response(session, next_prompt=prompt)
+        return SessionMapper.to_response(session)
 
     async def _add_new_element(self, session_id: str, result: dict) -> None:
         element = CanvasElementModel(
