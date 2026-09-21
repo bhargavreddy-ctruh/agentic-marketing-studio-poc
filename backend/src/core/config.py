@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     langsmith_project: str = "agentic-marketing-studio-poc"
     langsmith_tracing: bool = True
 
+    # --- Compliance QA gate (compliance_gate.py) — runs automatically after every generation/edit
+    # (session_service.py). A real, extra round of LLM/vision calls per generation; set to false
+    # for faster/cheaper local iteration. When off, an element's compliance_status is set straight
+    # to "disabled" rather than the default "running" — an honest "not checked", never a fabricated
+    # "passed".
+    compliance_qa_enabled: bool = True
+
     # --- Reasoning (OpenRouter) ---
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

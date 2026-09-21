@@ -30,8 +30,9 @@ export interface CanvasTile {
   versionCount?: number;
   /** The real compliance gate's status (compliance_gate.py), run as a real background task right
    * after generation — "running" shows a small pulsing badge while QA is genuinely in progress,
-   * "failed" a red cross, "passed"/undefined render nothing. */
-  complianceStatus?: "running" | "passed" | "failed";
+   * "failed" a red cross. "passed"/"disabled" (COMPLIANCE_QA_ENABLED=false)/undefined render
+   * nothing — "disabled" is an honest "not checked", never shown as if it passed. */
+  complianceStatus?: "running" | "passed" | "failed" | "disabled";
 }
 
 export interface CanvasEngineProps {

@@ -15,6 +15,7 @@ from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
+from ...providers.observability.langsmith import traceable
 from ..specialists.registry import SPECIALIST_REGISTRY
 
 log = get_logger(__name__)
@@ -49,6 +50,7 @@ def describe_specialists() -> str:
     )
 
 
+@traceable(name="specialist_classifier_node")
 async def classify_target_specialist(message: str, *, extra_context: str = "") -> str | None:
     """Returns a real, registered specialist name, or None if the model couldn't confidently
     pick one (or both LLM gateways are down) — never a hallucinated or invalid name."""

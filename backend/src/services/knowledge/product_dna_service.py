@@ -20,6 +20,7 @@ from ...models.product_profile import ProductProfileModel
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
+from ...providers.observability.langsmith import traceable
 from ...repositories.base import ProductRepository
 
 log = get_logger(__name__)
@@ -65,6 +66,7 @@ class ProductDnaService:
     def __init__(self, products: ProductRepository):
         self._products = products
 
+    @traceable(name="product_dna_service")
     async def onboard_product(
         self, *, name: str, description: str, price: float | None, discount_percent: float | None
     ) -> ProductProfileModel:

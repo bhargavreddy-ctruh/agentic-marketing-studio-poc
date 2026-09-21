@@ -125,7 +125,10 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="overlay_artist",
         prompt_file="overlay_artist.md",
-        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup", "text_overlay"),
+        allowed_tools=(
+            "product_lookup", "discount_claims_calculator", "discount_math_calculator",
+            "brand_kit_lookup", "text_overlay",
+        ),
         tier=ModelTier.TIER_1,
     ))
     register_specialist(SpecialistSpec(

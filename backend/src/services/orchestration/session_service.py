@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from ...core.config import settings
 from ...core.events import emit, mark_turn_done, set_current_session, start_new_turn
 from ...core.exceptions import NotFoundError, ValidationFailed
 from ...mappers.session_mapper import SessionMapper
@@ -176,7 +177,18 @@ class SessionService:
             # `compliance_status: "running"` by the model's own default) while QA runs
             # afterward, rather than the whole turn waiting on it and only showing the element
             # once QA has already finished.
-            self._schedule_compliance_check(element_id)
+            #
+            # `COMPLIANCE_QA_ENABLED=false` (config.py) skips this entirely — a real extra round
+            # of LLM/vision calls per generation, worth turning off for fast local iteration. The
+            # element is marked "disabled", not "passed" — an honest "not checked", never a
+            # fabricated verdict.
+            if settings.compliance_qa_enabled:
+                self._schedule_compliance_check(element_id)
+            else:
+                element = await self._canvas.get_element(element_id)
+                if element is not None:
+                    element.compliance_status = "disabled"
+                    await self._canvas.update_element(element)
         elif result:
             # A placeholder or error result — surface the message, nothing to persist yet.
             session.status = "error" if result_state.get("error") else "pending"

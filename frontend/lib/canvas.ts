@@ -26,7 +26,7 @@ export interface CanvasElement {
   // The real compliance gate's status for this element's current version — runs as a real
   // background task right after generation, so an element can genuinely be "running" for a few
   // seconds after it first appears on canvas, not just eventually "passed"/"failed".
-  compliance_status: "running" | "passed" | "failed";
+  compliance_status: "running" | "passed" | "failed" | "disabled";
 }
 
 export interface CanvasElementVersion {

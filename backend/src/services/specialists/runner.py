@@ -25,6 +25,7 @@ from ...core.exceptions import ProviderUnavailable, SpecialistFailed, ToolNotFou
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...providers.llm.router import get_llm_provider
+from ...providers.observability.langsmith import trace
 from ..tools.registry import get_tool, to_openai_tool_schema
 from .registry import get_specialist
 
@@ -102,93 +103,108 @@ async def run_specialist_agentic(
     messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
     tool_calls: list[ToolCallRecord] = []
 
-    for iteration in range(max_iterations):
-        try:
-            result = await llm.complete(
-                tier=spec.tier,
-                system=system_prompt,
-                messages=messages,
-                tools=tool_schemas or None,
-                # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
-                # finding as ideation_service.py, and again with Groq's gpt-oss models.
-                max_tokens=2048,
-                # Per-specialist opt-in (registry.py's SpecialistSpec.prefer_local, default False)
-                # — a real, live-found regression (2026-09-21) showed the local model isn't safe to
-                # assume for every specialist just because one (Reference Curator) tested fine.
-                prefer_local=spec.prefer_local,
-            )
-        except ProviderUnavailable as exc:
-            emit("specialist_failed", specialist=specialist_name, reason=exc.message)
-            raise SpecialistFailed(specialist_name, exc.message) from exc
-
-        if result.tool_calls:
-            messages.append(
-                {"role": "assistant", "content": result.text or None, "tool_calls": result.tool_calls}
-            )
-            for call in result.tool_calls:
-                fn = call.get("function", {})
-                tool_name = fn.get("name", "")
-                try:
-                    args = json.loads(fn.get("arguments") or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-
-                if tool_name not in spec.allowed_tools:
-                    record = ToolCallRecord(
-                        tool_name=tool_name, args=args, ok=False, data={},
-                        error=f"'{tool_name}' is not in {specialist_name}'s allowed_tools",
-                    )
-                else:
-                    try:
-                        tool_result = await get_tool(tool_name).run(args)
-                        record = ToolCallRecord(
-                            tool_name=tool_name, args=args, ok=tool_result.ok,
-                            data=tool_result.data, error=tool_result.error,
-                        )
-                    except ToolNotFound as exc:
-                        record = ToolCallRecord(
-                            tool_name=tool_name, args=args, ok=False, data={}, error=str(exc)
-                        )
-                tool_calls.append(record)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.get("id", ""),
-                    "content": json.dumps({"ok": record.ok, "data": record.data, "error": record.error}),
-                })
-                log.info(
-                    "specialist_tool_call",
-                    extra={
-                        "_extra_specialist": specialist_name,
-                        "_extra_tool": tool_name,
-                        "_extra_ok": record.ok,
-                        "_extra_iteration": iteration + 1,
-                    },
+    # A dynamic per-call trace name (`trace()`, not `@traceable`) — this one function runs every
+    # specialist, so a static decorator name would make all of them look identical in LangSmith. A
+    # real, live-found gap (2026-09-21): most graph-level nodes were already traced, but individual
+    # specialists and the tool calls underneath them were invisible, collapsed into whichever Lead
+    # node called them.
+    async with trace(
+        name=f"specialist:{specialist_name}", run_type="chain", inputs={"context": context}
+    ) as specialist_run:
+        for iteration in range(max_iterations):
+            try:
+                result = await llm.complete(
+                    tier=spec.tier,
+                    system=system_prompt,
+                    messages=messages,
+                    tools=tool_schemas or None,
+                    # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
+                    # finding as ideation_service.py, and again with Groq's gpt-oss models.
+                    max_tokens=2048,
+                    # Per-specialist opt-in (registry.py's SpecialistSpec.prefer_local, default
+                    # False) — a real, live-found regression (2026-09-21) showed the local model
+                    # isn't safe to assume for every specialist just because one (Reference
+                    # Curator) tested fine.
+                    prefer_local=spec.prefer_local,
                 )
-                emit("tool_call", specialist=specialist_name, tool=tool_name, ok=record.ok)
-            continue  # let the model see the real tool results before deciding what's next
+            except ProviderUnavailable as exc:
+                emit("specialist_failed", specialist=specialist_name, reason=exc.message)
+                raise SpecialistFailed(specialist_name, exc.message) from exc
 
-        # No tool calls this turn -> the model considers itself done; parse its final decision.
-        try:
-            parsed = extract_json(result.text)
-        except ValueError as exc:
-            raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
+            if result.tool_calls:
+                messages.append(
+                    {"role": "assistant", "content": result.text or None, "tool_calls": result.tool_calls}
+                )
+                for call in result.tool_calls:
+                    fn = call.get("function", {})
+                    tool_name = fn.get("name", "")
+                    try:
+                        args = json.loads(fn.get("arguments") or "{}")
+                    except json.JSONDecodeError:
+                        args = {}
 
-        log.info(
-            "specialist_step_ok",
-            extra={
-                "_extra_specialist": specialist_name,
-                "_extra_tier": spec.tier.name,
-                "_extra_model": result.model,
-                "_extra_iterations": iteration + 1,
-                "_extra_tool_calls": len(tool_calls),
-            },
+                    if tool_name not in spec.allowed_tools:
+                        record = ToolCallRecord(
+                            tool_name=tool_name, args=args, ok=False, data={},
+                            error=f"'{tool_name}' is not in {specialist_name}'s allowed_tools",
+                        )
+                    else:
+                        # Its own trace span, nested under this specialist's — real per-tool
+                        # visibility (name, real args, real result), not just a line in the
+                        # specialist's own log.
+                        async with trace(name=f"tool:{tool_name}", run_type="tool", inputs=args) as tool_run:
+                            try:
+                                tool_result = await get_tool(tool_name).run(args)
+                                record = ToolCallRecord(
+                                    tool_name=tool_name, args=args, ok=tool_result.ok,
+                                    data=tool_result.data, error=tool_result.error,
+                                )
+                            except ToolNotFound as exc:
+                                record = ToolCallRecord(
+                                    tool_name=tool_name, args=args, ok=False, data={}, error=str(exc)
+                                )
+                            tool_run.add_outputs({"ok": record.ok, "data": record.data, "error": record.error})
+                    tool_calls.append(record)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.get("id", ""),
+                        "content": json.dumps({"ok": record.ok, "data": record.data, "error": record.error}),
+                    })
+                    log.info(
+                        "specialist_tool_call",
+                        extra={
+                            "_extra_specialist": specialist_name,
+                            "_extra_tool": tool_name,
+                            "_extra_ok": record.ok,
+                            "_extra_iteration": iteration + 1,
+                        },
+                    )
+                    emit("tool_call", specialist=specialist_name, tool=tool_name, ok=record.ok)
+                continue  # let the model see the real tool results before deciding what's next
+
+            # No tool calls this turn -> the model considers itself done; parse its final decision.
+            try:
+                parsed = extract_json(result.text)
+            except ValueError as exc:
+                raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
+
+            log.info(
+                "specialist_step_ok",
+                extra={
+                    "_extra_specialist": specialist_name,
+                    "_extra_tier": spec.tier.name,
+                    "_extra_model": result.model,
+                    "_extra_iterations": iteration + 1,
+                    "_extra_tool_calls": len(tool_calls),
+                },
+            )
+            emit("specialist_completed", specialist=specialist_name, tool_call_count=len(tool_calls))
+            specialist_run.add_outputs({"data": parsed, "tool_call_count": len(tool_calls)})
+            return AgenticStepResult(
+                specialist_name=specialist_name, model=result.model, data=parsed, tool_calls=tool_calls
+            )
+
+        emit("specialist_failed", specialist=specialist_name, reason="max_iterations_exceeded")
+        raise SpecialistFailed(
+            specialist_name, f"did not produce a final answer after {max_iterations} tool-calling iterations"
         )
-        emit("specialist_completed", specialist=specialist_name, tool_call_count=len(tool_calls))
-        return AgenticStepResult(
-            specialist_name=specialist_name, model=result.model, data=parsed, tool_calls=tool_calls
-        )
-
-    emit("specialist_failed", specialist=specialist_name, reason="max_iterations_exceeded")
-    raise SpecialistFailed(
-        specialist_name, f"did not produce a final answer after {max_iterations} tool-calling iterations"
-    )

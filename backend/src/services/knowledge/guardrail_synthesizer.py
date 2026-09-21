@@ -15,6 +15,7 @@ from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
+from ...providers.observability.langsmith import traceable
 
 log = get_logger(__name__)
 
@@ -34,6 +35,7 @@ Return ONLY JSON:
 """
 
 
+@traceable(name="guardrail_synthesizer")
 async def synthesize_guardrails(*, raw_facts: dict) -> dict:
     """Runs one LLM call to synthesize a trimmed guardrail set from raw brand facts. Raises
     SpecialistFailed on provider/parse failure, matching every other LLM-backed service in this

@@ -17,6 +17,7 @@ from ...core.json_extract import extract_json
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
 from ...providers.llm.vision import complete_with_vision
+from ...providers.observability.langsmith import traceable
 from ..tools.product_lookup import ProductLookupTool
 
 _VISION_SYSTEM_PROMPT = """You are the Visual Fidelity Checker for a marketing asset. You are given
@@ -48,6 +49,7 @@ Return ONLY JSON:
 """
 
 
+@traceable(name="visual_fidelity_checker")
 async def check_visual_fidelity(
     *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None
 ) -> dict:

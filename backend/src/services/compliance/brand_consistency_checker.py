@@ -15,6 +15,7 @@ from ...core.json_extract import extract_json
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
 from ...providers.llm.vision import complete_with_vision
+from ...providers.observability.langsmith import traceable
 from ..tools.brand_kit_lookup import BrandKitLookupTool
 
 _VISION_SYSTEM_PROMPT = """You are the Brand Consistency Checker for a marketing asset. You are
@@ -47,6 +48,7 @@ Return ONLY JSON:
 """
 
 
+@traceable(name="brand_consistency_checker")
 async def check_brand_consistency(
     *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None
 ) -> dict:

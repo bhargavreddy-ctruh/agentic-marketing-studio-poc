@@ -23,6 +23,7 @@ from ...core.middleware.logging import get_logger
 from ...models.base import async_session_factory
 from ...models.canvas_element import CanvasElementModel
 from ...repositories.base import CanvasRepository
+from ...providers.observability.langsmith import trace, traceable
 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from ..tools.registry import get_tool
 from .brand_consistency_checker import check_brand_consistency
@@ -99,6 +100,7 @@ async def _real_overlay_text() -> str | None:
     return " — ".join(parts) if parts else None
 
 
+@traceable(name="compliance_gate")
 async def run_compliance_gate(
     *, canvas: CanvasRepository, element_id: str, allow_remediation: bool = True
 ) -> dict:
@@ -127,9 +129,12 @@ async def run_compliance_gate(
         if price_violations:
             overlay_text = await _real_overlay_text()
             if overlay_text:
-                overlay_result = await get_tool("text_overlay").run(
-                    {"storage_ref": current_ref, "text": overlay_text, "placement": "lower third"}
-                )
+                overlay_args = {"storage_ref": current_ref, "text": overlay_text, "placement": "lower third"}
+                async with trace(name="tool:text_overlay", run_type="tool", inputs=overlay_args) as tool_run:
+                    overlay_result = await get_tool("text_overlay").run(overlay_args)
+                    tool_run.add_outputs(
+                        {"ok": overlay_result.ok, "data": overlay_result.data, "error": overlay_result.error}
+                    )
                 if overlay_result.ok and overlay_result.data.get("storage_ref"):
                     current_ref = overlay_result.data["storage_ref"]
                     applied_steps.append(f"text_overlay: drew '{overlay_text}'")
@@ -140,9 +145,12 @@ async def run_compliance_gate(
         # plausibly make.
         if other_violations and edit_error is None:
             instruction = "Adjust the image to address: " + "; ".join(other_violations)
-            edit_result = await get_tool("image_editor").run(
-                {"storage_ref": current_ref, "instruction": instruction}
-            )
+            edit_args = {"storage_ref": current_ref, "instruction": instruction}
+            async with trace(name="tool:image_editor", run_type="tool", inputs=edit_args) as tool_run:
+                edit_result = await get_tool("image_editor").run(edit_args)
+                tool_run.add_outputs(
+                    {"ok": edit_result.ok, "data": edit_result.data, "error": edit_result.error}
+                )
             if edit_result.ok and edit_result.data.get("storage_ref"):
                 current_ref = edit_result.data["storage_ref"]
                 applied_steps.append(f"image_editor: {instruction}")

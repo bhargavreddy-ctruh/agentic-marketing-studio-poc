@@ -16,6 +16,7 @@ from PIL import Image
 
 from ...core.local_storage import load_asset
 from ...core.middleware.logging import get_logger
+from ...providers.observability.langsmith import traceable
 
 log = get_logger(__name__)
 
@@ -49,6 +50,7 @@ async def _probe_video_dimensions(data: bytes) -> tuple[int | None, int | None]:
             return None, None
 
 
+@traceable(name="format_technical_qa")
 async def check_format_technical(*, storage_ref: str, expected_aspect_ratio: str | None) -> dict:
     loaded = load_asset(storage_ref)
     if loaded is None:

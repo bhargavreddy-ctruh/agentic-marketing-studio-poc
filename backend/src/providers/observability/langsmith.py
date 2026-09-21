@@ -2,15 +2,23 @@
 THE ONLY file that imports the langsmith SDK.
 
 Traces every LangGraph node/tool/provider call with cost/latency — Architecture.md section 3:
-this is the actual evidence for "good, cheap, fast," not a claim. `traceable` is re-exported here
-so services decorate their node functions with `from providers.observability.langsmith import
-traceable` rather than importing langsmith directly (genai_build's rule).
-"""
+this is the actual evidence for "good, cheap, fast," not a claim. `traceable`/`trace` are
+re-exported here so services use `from providers.observability.langsmith import traceable, trace`
+rather than importing langsmith directly (genai_build's rule).
+
+`traceable` decorates a fixed function with a static trace name — right for the graph's own
+top-level nodes (one name per node, known at definition time). `trace` is the same underlying
+tracer used as a context manager instead, needed wherever the real name to show in LangSmith is
+only known at call time — e.g. `run_specialist_agentic`/`runner.py` is ONE shared function every
+specialist runs through, so it needs `trace(name=f"specialist:{specialist_name}")`, not one static
+decorator name that would make every specialist look identical in a trace tree (a real, live-found
+gap: 2026-09-21 — most graph-level nodes were already traced, but individual specialists and tool
+calls underneath them were invisible, all collapsed into whichever Lead node called them)."""
 from __future__ import annotations
 
 import os
 
-from langsmith import Client, traceable  # noqa: F401 — re-exported for services to use
+from langsmith import Client, trace, traceable  # noqa: F401 — re-exported for services to use
 
 from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable

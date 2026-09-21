@@ -60,6 +60,7 @@ def load_all_tools() -> None:
         brand_kit_lookup,
         color_palette_extractor,
         discount_claims_calculator,
+        discount_math_calculator,
         image_editor,
         product_lookup,
         text_overlay,
