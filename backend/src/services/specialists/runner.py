@@ -112,6 +112,10 @@ async def run_specialist_agentic(
                 # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
                 # finding as ideation_service.py, and again with Groq's gpt-oss models.
                 max_tokens=2048,
+                # Per-specialist opt-in (registry.py's SpecialistSpec.prefer_local, default False)
+                # — a real, live-found regression (2026-09-21) showed the local model isn't safe to
+                # assume for every specialist just because one (Reference Curator) tested fine.
+                prefer_local=spec.prefer_local,
             )
         except ProviderUnavailable as exc:
             emit("specialist_failed", specialist=specialist_name, reason=exc.message)

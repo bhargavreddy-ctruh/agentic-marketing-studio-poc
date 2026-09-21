@@ -26,6 +26,14 @@ class SpecialistSpec:
     prompt_file: str  # relative to services/specialists/prompts/
     allowed_tools: tuple[str, ...]
     tier: ModelTier
+    # Opt-in, not opt-out: real, live-found regressions (2026-09-21, Memory.md) showed the
+    # self-hosted TIER_1 model failing badly on every task tested EXCEPT Reference Curator's
+    # (gathering references has no hard constraint to violate) — Overlay Artist specifically
+    # fabricated a $250,000 price with zero grounding, directly disobeying its own prompt's
+    # explicit "never invent a price" guardrail. Defaults to False (Groq-first, the same reliable
+    # path every other tier already uses) until a specialist is individually verified safe the
+    # same rigorous way Reference Curator was — never assumed safe by category alone.
+    prefer_local: bool = False
 
     def load_prompt(self) -> str:
         """The specialist's own prompt, with the shared security-boundary block appended —
@@ -72,6 +80,9 @@ def load_all_specialists() -> None:
         prompt_file="reference_curator.md",
         allowed_tools=("web_trend_search", "asset_mood_board_search", "brand_kit_lookup"),
         tier=ModelTier.TIER_1,
+        # The one specialist actually verified live against the local model (Memory.md,
+        # 2026-09-21): real tool calls, real results, correct final reasoning — not assumed safe.
+        prefer_local=True,
     ))
     register_specialist(SpecialistSpec(
         name="palette_strategist",
