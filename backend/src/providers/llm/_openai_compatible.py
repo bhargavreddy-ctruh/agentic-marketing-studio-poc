@@ -151,5 +151,20 @@ async def call_openai_compatible_chat(
                 "llm_http_timeout",
                 extra={"_extra_provider": provider_name, "_extra_model": model, "_extra_attempt": attempt + 1},
             )
+        except httpx.RequestError as exc:
+            # Everything else transport-level (refused connections most of all — e.g. a self-hosted
+            # local_llm server that isn't running) — a real, live-found gap: this used to only catch
+            # TimeoutException, so a plain ConnectError propagated raw instead of becoming a
+            # ProviderUnavailable, breaking router.py's fallback-on-failure catch entirely.
+            last_error = ProviderUnavailable(provider_name, f"{model} request failed: {exc}")
+            log.warning(
+                "llm_http_request_error",
+                extra={
+                    "_extra_provider": provider_name,
+                    "_extra_model": model,
+                    "_extra_attempt": attempt + 1,
+                    "_extra_error": str(exc),
+                },
+            )
 
     raise last_error or ProviderUnavailable(provider_name, f"{model} failed after retries")

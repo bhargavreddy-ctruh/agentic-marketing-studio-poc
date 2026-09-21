@@ -56,6 +56,24 @@ class Settings(BaseSettings):
     # (Memory.md, Phase 4): a real image correctly described, including spotting a watermark.
     groq_vision_model: str = "qwen/qwen3.8-27b"
 
+    # Self-hosted (Ollama) — Tier 1's new primary (router.py), ahead of Groq/OpenRouter: genuinely
+    # $0 and rate-limit-free since it runs on this machine, matching ModelTier.TIER_1's own
+    # "small/fast model (Gemma-class)" docstring in providers/llm/base.py. Ollama exposes the same
+    # OpenAI-compatible /chat/completions shape Groq/OpenRouter already use, so it reuses
+    # _openai_compatible.py rather than a new HTTP client.
+    #
+    # NOT actually Gemma: `gemma3:4b` was tried first (per the original ask) and confirmed via a
+    # real call to have zero tool-calling support (`ollama show gemma3:4b` lists only
+    # `completion`/`vision` capabilities; a live call with `tools` attached returned "does not
+    # support tools"). Two of Tier 1's four specialists (Reference Curator, Palette Strategist)
+    # genuinely call tools (`brand_kit_lookup`, `web_trend_search`), so a model that can't tool-call
+    # can't actually serve as Tier 1's primary. `qwen2.5:3b` was swapped in instead — confirmed via
+    # `ollama show` (`tools` capability listed) and a real tool-call round-trip that correctly
+    # returned a `brand_kit_lookup` call with real arguments.
+    local_llm_base_url: str = "http://localhost:11434/v1"
+    local_llm_api_key: str = "ollama"  # unauthenticated local server; never checked by Ollama
+    local_llm_model_tier_1: str = "qwen2.5:3b"
+
     # --- Image generation ---
     pollinations_base_url: str = "https://image.pollinations.ai"
     huggingface_api_token: str | None = None
