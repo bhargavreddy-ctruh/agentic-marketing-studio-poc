@@ -10,6 +10,7 @@ caller already knows it's an element-scoped action and just needs to know WHO sh
 """
 from __future__ import annotations
 
+from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
@@ -69,6 +70,8 @@ async def classify_target_specialist(message: str, *, extra_context: str = "") -
             # classification (2026-09-21): a wrong specialist choice here misroutes a real edit,
             # so this exact-choice classification skips local-first routing too.
             prefer_local=False,
+            # Real live "thinking" text, per the user's explicit ask (2026-09-21).
+            on_delta=lambda delta: emit("llm_delta", node="specialist_classifier", text=delta),
         )
         parsed = extract_json(result.text)
         target = str(parsed.get("target_specialist") or "").strip()

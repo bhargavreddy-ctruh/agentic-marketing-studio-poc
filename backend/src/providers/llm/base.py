@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 
 class ModelTier(IntEnum):
@@ -41,6 +41,7 @@ class LLMProvider(Protocol):
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         prefer_local: bool = True,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         """`prefer_local` only means anything to `LLMRouter` (router.py) — whether a TIER_1 call
         should try the self-hosted model first. Real, live-found reason it exists (2026-09-21):
@@ -49,5 +50,15 @@ class LLMProvider(Protocol):
         synthesis of it" decision — a side-by-side test on the exact same input ("A red Ferrari")
         showed the local model return `ready: false` and silently drop "red Ferrari" from its own
         brief synthesis entirely, while Groq correctly returned `ready: true` with the detail
-        intact. Every other provider ignores this parameter; only the router acts on it."""
+        intact. Every other provider ignores this parameter; only the router acts on it.
+
+        `on_delta`, when given, is called with each real streamed text fragment as it arrives from
+        the provider (2026-09-21, per the user's explicit ask to show real LLM "thinking" live,
+        not just a final result) — the caller (`runner.py`, `ideation_service.py`, etc.) already
+        knows which node/specialist is running and is responsible for attributing the fragment
+        (e.g. `emit("llm_delta", node=specialist_name, text=fragment)`); this layer only ever
+        forwards raw text, never decides what it means. A no-op when the provider or
+        `STREAM_LLM_THINKING_ENABLED` doesn't support/allow streaming — the final `LLMResult` is
+        always complete and correct either way, streaming only affects when the text becomes
+        visible, never what the caller ultimately gets back."""
         ...

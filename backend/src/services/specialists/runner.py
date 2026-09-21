@@ -126,6 +126,10 @@ async def run_specialist_agentic(
                     # isn't safe to assume for every specialist just because one (Reference
                     # Curator) tested fine.
                     prefer_local=spec.prefer_local,
+                    # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
+                    # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
+                    # streams (see base.py's own docstring on this parameter).
+                    on_delta=lambda delta: emit("llm_delta", node=specialist_name, text=delta),
                 )
             except ProviderUnavailable as exc:
                 emit("specialist_failed", specialist=specialist_name, reason=exc.message)

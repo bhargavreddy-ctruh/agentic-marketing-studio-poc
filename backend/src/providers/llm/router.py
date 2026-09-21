@@ -30,7 +30,7 @@ a caller always learns the real reason the whole call failed.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
@@ -57,11 +57,13 @@ class LLMRouter(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         prefer_local: bool = True,
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if tier == ModelTier.TIER_1 and prefer_local:
             try:
                 return await self._local.complete(
-                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens
+                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                    on_delta=on_delta,
                 )
             except ProviderUnavailable as exc:
                 log.warning(
@@ -71,7 +73,8 @@ class LLMRouter(LLMProvider):
 
         try:
             return await self._primary.complete(
-                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens
+                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                on_delta=on_delta,
             )
         except ProviderUnavailable as exc:
             log.warning(
@@ -79,7 +82,8 @@ class LLMRouter(LLMProvider):
                 extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
             )
             return await self._fallback.complete(
-                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens
+                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                on_delta=on_delta,
             )
 
 

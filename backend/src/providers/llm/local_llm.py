@@ -14,7 +14,7 @@ for TIER_2/TIER_3 rather than silently running a model it was never sized or ask
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable
@@ -37,6 +37,7 @@ class LocalLLMProvider(LLMProvider):
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
         prefer_local: bool = True,  # unused here — LLMRouter already decided to call this provider
+        on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if tier != ModelTier.TIER_1:
             raise ProviderUnavailable("local_llm", f"only configured for TIER_1, not {tier.name}")
@@ -50,6 +51,7 @@ class LocalLLMProvider(LLMProvider):
             messages=full_messages,
             tools=tools,
             max_tokens=max_tokens,
+            on_delta=on_delta,
         )
 
 

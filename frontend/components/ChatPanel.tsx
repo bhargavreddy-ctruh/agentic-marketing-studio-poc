@@ -13,7 +13,7 @@ import {
 } from "@/lib/api";
 import { assetUrl } from "@/lib/http";
 import { ReferencedElement } from "@/components/CanvasView";
-import { describeEvent, openEventStream } from "@/lib/events";
+import { LiveEvent, describeEvent, openEventStream } from "@/lib/events";
 
 /** `video_stage` values a session's brief can carry while paused at a real pipeline gate
  * (`graph.py`'s `_motion_lead_node`) — used only to pick which proposal detail to render; the
@@ -94,6 +94,11 @@ interface ChatPanelProps {
   onGenerated?: () => void;
   referencedElement?: ReferencedElement | null;
   onClearReference?: () => void;
+  /** Every raw event for the turn currently in flight, forwarded up to `page.tsx` — Node Mode
+   * (`NodeGraphView`) needs the full real event stream, not just the human-readable narration
+   * lines this panel builds for itself. Called once per real event, in order; `page.tsx` resets
+   * its own accumulated list on `turn_started` (the one event every turn always emits first). */
+  onTurnEvent?: (event: LiveEvent) => void;
 }
 
 export default function ChatPanel({
@@ -102,6 +107,7 @@ export default function ChatPanel({
   onGenerated,
   referencedElement,
   onClearReference,
+  onTurnEvent,
 }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -118,6 +124,7 @@ export default function ChatPanel({
     const close = openEventStream(sid, (event) => {
       const line = describeEvent(event);
       if (line) setNarration((n) => [...n, line]);
+      onTurnEvent?.(event);
     });
     try {
       return await fn();

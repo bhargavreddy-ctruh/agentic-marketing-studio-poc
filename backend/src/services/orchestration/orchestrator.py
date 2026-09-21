@@ -127,6 +127,8 @@ async def route(state: GraphState) -> GraphState:
             # while Groq correctly returned "full_image". A wrong route here wastes a whole
             # generation attempt, so this classification skips local-first routing.
             prefer_local=False,
+            # Real live "thinking" text, per the user's explicit ask (2026-09-21).
+            on_delta=lambda delta: emit("llm_delta", node="orchestrator", text=delta),
         )
         parsed = extract_json(result.text)
         chosen_route = str(parsed.get("route") or "")

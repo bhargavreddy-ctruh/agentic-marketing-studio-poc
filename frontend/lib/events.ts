@@ -34,6 +34,117 @@ export function openEventStream(
   return () => es.close();
 }
 
+/** One real pipeline stage, reconstructed purely from the real event stream — Node Mode's whole
+ * data model. Nothing here is invented: every field comes from an event `core/events.py` (and,
+ * for `thinking`, the real streamed `llm_delta` text) genuinely emits. */
+export interface PipelineNode {
+  id: string;
+  label: string;
+  kind: "ideation" | "orchestrator" | "lead" | "specialist";
+  status: "pending" | "running" | "completed" | "failed";
+  /** Real streamed text accumulated live as this node's own LLM call runs (2026-09-21, per the
+   * user's explicit ask to show real LLM "thinking," not a placeholder). Empty until the first
+   * `llm_delta` for this node arrives — never fabricated filler text. */
+  thinking: string;
+  /** A short, real summary once this node completes — e.g. the route it chose, or how many real
+   * tool calls a specialist made. Never present before the node's own completion event. */
+  output?: string;
+  /** Real tool calls this node made, in the order they actually happened. */
+  tools: { tool: string; ok: boolean }[];
+  reason?: string;
+}
+
+function nodeIdentity(nodeName: string): { id: string; label: string; kind: PipelineNode["kind"] } {
+  if (nodeName === "ideation") return { id: "ideation", label: "Ideation", kind: "ideation" };
+  if (nodeName === "orchestrator" || nodeName === "specialist_classifier") {
+    return { id: "orchestrator", label: "Orchestrator", kind: "orchestrator" };
+  }
+  return { id: `specialist:${nodeName}`, label: nodeName, kind: "specialist" };
+}
+
+/** Reconstructs the real pipeline's node-level state from the flat event stream — Node Mode's
+ * only data source. Pure function of `events`, so a caller just re-derives this on every new
+ * event rather than hand-maintaining separate mutable node state. */
+export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
+  const nodes = new Map<string, PipelineNode>();
+  const order: string[] = [];
+
+  function ensure(id: string, label: string, kind: PipelineNode["kind"]): PipelineNode {
+    let node = nodes.get(id);
+    if (!node) {
+      node = { id, label, kind, status: "pending", thinking: "", tools: [] };
+      nodes.set(id, node);
+      order.push(id);
+    }
+    return node;
+  }
+
+  for (const event of events) {
+    switch (event.type) {
+      case "ideation_started":
+        ensure("ideation", "Ideation", "ideation").status = "running";
+        break;
+      case "ideation_completed": {
+        const n = ensure("ideation", "Ideation", "ideation");
+        n.status = "completed";
+        n.output = event.ready ? "Brief ready" : "Needs more detail";
+        break;
+      }
+      case "route_decided": {
+        const n = ensure("orchestrator", "Orchestrator", "orchestrator");
+        n.status = "completed";
+        n.output = event.target_specialist
+          ? `${event.route} → ${event.target_specialist}`
+          : String(event.route ?? "");
+        break;
+      }
+      case "lead_started":
+        ensure(`lead:${event.lead}`, String(event.lead), "lead").status = "running";
+        break;
+      case "lead_completed":
+        ensure(`lead:${event.lead}`, String(event.lead), "lead").status = "completed";
+        break;
+      case "lead_failed": {
+        const n = ensure(`lead:${event.lead}`, String(event.lead), "lead");
+        n.status = "failed";
+        n.reason = String(event.reason ?? "");
+        break;
+      }
+      case "specialist_started":
+        ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist").status = "running";
+        break;
+      case "specialist_completed": {
+        const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
+        n.status = "completed";
+        n.output = `${event.tool_call_count} tool call${event.tool_call_count === 1 ? "" : "s"}`;
+        break;
+      }
+      case "specialist_failed": {
+        const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
+        n.status = "failed";
+        n.reason = String(event.reason ?? "");
+        break;
+      }
+      case "tool_call": {
+        const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
+        n.tools.push({ tool: String(event.tool ?? ""), ok: Boolean(event.ok) });
+        break;
+      }
+      case "llm_delta": {
+        const { id, label, kind } = nodeIdentity(String(event.node ?? ""));
+        const n = ensure(id, label, kind);
+        if (n.status === "pending") n.status = "running";
+        n.thinking += String(event.text ?? "");
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return order.map((id) => nodes.get(id)!);
+}
+
 /** Turns one real backend event into one short, human-readable narration line — no event type
  * invented here that `core/events.py` doesn't actually emit. */
 export function describeEvent(event: LiveEvent): string | null {

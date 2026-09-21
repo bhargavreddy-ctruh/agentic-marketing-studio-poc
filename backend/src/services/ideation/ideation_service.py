@@ -130,6 +130,8 @@ async def run_ideation(state: GraphState) -> GraphState:
             # routing entirely rather than risk that — unlike the tool-calling Tier 1 specialists,
             # which tested fine locally and keep the default.
             prefer_local=False,
+            # Real live "thinking" text, per the user's explicit ask (2026-09-21).
+            on_delta=lambda delta: emit("llm_delta", node="ideation", text=delta),
         )
         parsed = extract_json(result.text)
     except Exception as exc:  # provider or parse failure — fail this turn clearly, don't crash the graph

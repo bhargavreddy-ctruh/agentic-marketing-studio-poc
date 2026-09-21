@@ -6,16 +6,28 @@ DRY, and the genai_build guide's explicit "copying a block that already exists e
 
 Not a vendor SDK itself — each provider file still owns its own base URL, API key, and model-tier
 resolution, and is still the only place that decides which vendor it's really talking to.
+
+Two request modes, both ending in the exact same `LLMResult` shape (2026-09-21, per the user's
+explicit ask to show real LLM "thinking" live): a real streamed request (`stream: true`,
+`STREAM_LLM_THINKING_ENABLED=true` and a caller-supplied `on_delta`) reassembles the response from
+real incremental chunks, calling `on_delta` with each real text fragment as it arrives; otherwise
+the original single-shot request/response call runs unchanged. Streaming reassembly is the
+genuinely riskier path — an OpenAI-compatible streamed tool call arrives as fragments keyed by
+`index` (a partial `id`/`function.name` once, then repeated `function.arguments` string chunks to
+concatenate) rather than one complete object — so `stream_llm_thinking_enabled=false` (or no
+`on_delta` given at all) always falls back to the original, already-proven call path, never a
+half-migrated in-between.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
+from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMResult
@@ -62,6 +74,156 @@ def _try_recover_fake_final_tool_call(error_body: str) -> str | None:
     return None
 
 
+def _merge_streamed_tool_call_delta(accum: dict[int, dict[str, Any]], deltas: list[dict[str, Any]]) -> None:
+    """Folds one streamed chunk's `delta.tool_calls` fragments into the running per-index
+    accumulator — OpenAI-compatible streaming sends a tool call's `id`/`function.name` once (in
+    whichever chunk first mentions that index) and its `function.arguments` as repeated partial
+    string fragments to concatenate, never one complete object like the non-streaming shape."""
+    for fragment in deltas:
+        index = fragment.get("index", 0)
+        call = accum.setdefault(
+            index, {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+        )
+        if fragment.get("id"):
+            call["id"] = fragment["id"]
+        fn_fragment = fragment.get("function") or {}
+        if fn_fragment.get("name"):
+            call["function"]["name"] = fn_fragment["name"]
+        if fn_fragment.get("arguments"):
+            call["function"]["arguments"] += fn_fragment["arguments"]
+
+
+class _RetryableStreamError(ProviderUnavailable):
+    """Distinguishes a 429/5xx (worth backing off and retrying, same policy as the non-streaming
+    path) from a genuine 4xx client error (fatal, raised as plain `ProviderUnavailable` instead —
+    retrying a real bad request blindly would just repeat the same failure)."""
+
+
+async def _stream_one_attempt(
+    *, client: httpx.AsyncClient, url: str, headers: dict[str, str], body: dict[str, Any],
+    provider_name: str, model: str, on_delta: Callable[[str], None], start: float,
+) -> LLMResult:
+    """One real streamed HTTP attempt — raises `_RetryableStreamError` for 429/5xx (the caller's
+    retry loop backs off and tries again) or plain `ProviderUnavailable` for a genuine 4xx
+    (fatal, matching the non-streaming path's exact policy)."""
+    async with client.stream("POST", url, headers=headers, json={**body, "stream": True}) as resp:
+        if resp.status_code == 429:
+            raise _RetryableStreamError(provider_name, f"{model} rate limited")
+        if resp.status_code >= 500:
+            raise _RetryableStreamError(provider_name, f"{model} HTTP {resp.status_code}")
+        if resp.status_code >= 400:
+            error_text = (await resp.aread()).decode(errors="replace")
+            recovered = _try_recover_fake_final_tool_call(error_text)
+            if recovered is not None:
+                log.warning(
+                    "llm_http_fake_tool_call_recovered",
+                    extra={"_extra_provider": provider_name, "_extra_model": model},
+                )
+                return LLMResult(text=recovered, model=model, stop_reason="stop")
+            raise ProviderUnavailable(provider_name, f"{model} HTTP {resp.status_code}: {error_text[:300]}")
+
+        text_parts: list[str] = []
+        tool_call_accum: dict[int, dict[str, Any]] = {}
+        stop_reason: str | None = None
+        usage: dict[str, Any] = {}
+        raw_line_count = 0
+        # A real, live-found bug (2026-09-21): Groq's SSE stream can send a genuine
+        # `event: error` frame mid-stream (confirmed live — a real request under load, not a
+        # guess), immediately followed by a `data: {...}` line carrying the actual error, not a
+        # content chunk. The original parser only ever looked for `data: ` lines and silently
+        # skipped anything else, including this one — so the very next `data:` line got treated
+        # as a normal (empty) chunk instead of a real failure, and the whole call quietly
+        # "succeeded" with zero content and zero tool calls. Reproduced directly: 4 of 5 real
+        # calls failed this exact way under rapid repeated load; 0 of 3 failed with streaming
+        # disabled on the same scenario.
+        pending_error_event = False
+
+        async for line in resp.aiter_lines():
+            raw_line_count += 1
+            if line.startswith(":"):
+                continue  # a real SSE keep-alive comment (e.g. OpenRouter's own ": PROCESSING"
+                # line during a slow generation) — part of the spec, never a real problem, so
+                # never worth a warning; only a genuinely unrecognized line still gets one below.
+            if line.startswith("event: "):
+                pending_error_event = line[len("event: ") :].strip() == "error"
+                continue
+            if not line.startswith("data: "):
+                if line.strip():
+                    log.warning(
+                        "llm_stream_unexpected_line",
+                        extra={"_extra_provider": provider_name, "_extra_model": model, "_extra_line": line[:200]},
+                    )
+                continue
+            payload = line[len("data: ") :].strip()
+            if payload == "[DONE]":
+                break
+            if pending_error_event:
+                pending_error_event = False
+                # The most common real cause, confirmed live: the same "fake tool call named
+                # 'json'" quirk the non-streaming path already recovers from via
+                # `_try_recover_fake_final_tool_call` (Memory.md, Phase 2) — Groq rejects it as a
+                # genuine mid-stream error instead of a plain 4xx here, but the model's real
+                # intended answer is still recoverable from the same `failed_generation` field.
+                # Try that first — free, and avoids a wasted retry — before falling back to a
+                # retryable failure for anything that isn't this specific, already-understood shape.
+                recovered = _try_recover_fake_final_tool_call(payload)
+                if recovered is not None:
+                    log.warning(
+                        "llm_stream_fake_tool_call_recovered",
+                        extra={"_extra_provider": provider_name, "_extra_model": model},
+                    )
+                    return LLMResult(text=recovered, model=model, stop_reason="stop")
+                log.warning(
+                    "llm_stream_error_event",
+                    extra={"_extra_provider": provider_name, "_extra_model": model, "_extra_payload": payload[:300]},
+                )
+                raise _RetryableStreamError(provider_name, f"{model} stream error: {payload[:300]}")
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                continue  # a real, if rare, malformed frame — skip it rather than abort the whole stream
+
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+            if choice.get("finish_reason"):
+                stop_reason = choice["finish_reason"]
+            if delta.get("content"):
+                text_parts.append(delta["content"])
+                on_delta(delta["content"])
+            if delta.get("tool_calls"):
+                _merge_streamed_tool_call_delta(tool_call_accum, delta["tool_calls"])
+
+        log.info(
+            "llm_http_call",
+            extra={
+                "_extra_provider": provider_name,
+                "_extra_model": model,
+                "_extra_tokens_in": usage.get("prompt_tokens"),
+                "_extra_tokens_out": usage.get("completion_tokens"),
+                "_extra_cost": usage.get("cost"),
+                "_extra_ms": round((time.monotonic() - start) * 1000, 1),
+                "_extra_streamed": True,
+                "_extra_raw_lines": raw_line_count,
+                "_extra_text_len": len("".join(text_parts)),
+                "_extra_tool_call_count": len(tool_call_accum),
+                "_extra_stop_reason": stop_reason,
+            },
+        )
+        return LLMResult(
+            text="".join(text_parts),
+            model=model,
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+            tool_calls=[tool_call_accum[i] for i in sorted(tool_call_accum)],
+            stop_reason=stop_reason,
+        )
+
+
 async def call_openai_compatible_chat(
     *,
     provider_name: str,
@@ -72,6 +234,7 @@ async def call_openai_compatible_chat(
     tools: list[dict[str, Any]] | None,
     max_tokens: int,
     retries: int = 2,
+    on_delta: Callable[[str], None] | None = None,
 ) -> LLMResult:
     """Retry-with-backoff on ONE model against an OpenAI-compatible /chat/completions endpoint.
     Raises ProviderUnavailable if this model can't complete the call after its retry budget —
@@ -82,12 +245,19 @@ async def call_openai_compatible_chat(
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     url = f"{base_url.rstrip('/')}/chat/completions"
+    use_streaming = settings.stream_llm_thinking_enabled and on_delta is not None
 
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         start = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=60) as client:
+                if use_streaming:
+                    return await _stream_one_attempt(
+                        client=client, url=url, headers=headers, body=body,
+                        provider_name=provider_name, model=model, on_delta=on_delta, start=start,
+                    )
+
                 resp = await client.post(url, headers=headers, json=body)
 
             if resp.status_code == 429:
@@ -145,6 +315,20 @@ async def call_openai_compatible_chat(
                 tool_calls=msg.get("tool_calls") or [],
                 stop_reason=choice.get("finish_reason"),
             )
+        except _RetryableStreamError as exc:
+            # Raised by _stream_one_attempt only for 429/5xx — same backoff the non-streaming
+            # path applies inline above, so both modes share one retry policy. A genuine 4xx
+            # raises plain ProviderUnavailable instead, which is NOT caught here and propagates
+            # immediately, matching the non-streaming path's own "don't retry a real bad request"
+            # behavior.
+            last_error = exc
+            wait = 1.5 * (attempt + 1)
+            log.warning(
+                "llm_http_stream_retry",
+                extra={"_extra_provider": provider_name, "_extra_model": model, "_extra_reason": exc.message},
+            )
+            await asyncio.sleep(wait)
+            continue
         except httpx.TimeoutException as exc:
             last_error = ProviderUnavailable(provider_name, f"{model} timeout: {exc}")
             log.warning(

@@ -26,6 +26,16 @@ class Settings(BaseSettings):
     # "passed".
     compliance_qa_enabled: bool = True
 
+    # --- Live "LLM thinking" streaming (_openai_compatible.py, per the user's explicit ask,
+    # 2026-09-21) — real streamed text fragments, emitted live via the existing SSE event bus as
+    # they arrive from the provider, instead of only ever seeing a node's final result once it's
+    # done. A real, meaningfully more complex code path (has to reassemble streamed tool-calls
+    # correctly, not just plain text) — set to false to fall back to the original, simpler,
+    # already-proven single-shot request/response call for faster/cheaper local iteration or if
+    # streaming ever misbehaves. The final LLMResult is identical either way; this only changes
+    # whether partial text is visible before a node finishes.
+    stream_llm_thinking_enabled: bool = True
+
     # --- Reasoning (OpenRouter) ---
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
