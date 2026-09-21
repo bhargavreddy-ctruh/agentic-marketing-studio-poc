@@ -28,6 +28,7 @@ function toTiles(elements: CanvasElement[], versionCounts: Map<string, number>):
       hasComment: Boolean(el.last_comment),
       version: el.version,
       versionCount: versionCounts.get(el.id),
+      compliancePassed: el.compliance_passed,
     }));
 }
 
@@ -203,6 +204,9 @@ export default function CanvasView({
                 </span>
                 {el.pending_storage_ref && (
                   <span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">pending approval</span>
+                )}
+                {el.compliance_passed === false && (
+                  <span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-xs text-red-800">✕ failed QA</span>
                 )}
               </div>
               <div className="flex gap-1">

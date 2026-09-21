@@ -19,6 +19,7 @@ class CanvasMapper:
             pending_storage_ref=entity.pending_storage_ref,
             pending_action=entity.pending_action,
             last_comment=(entity.metadata_json or {}).get("comment"),
+            compliance_passed=entity.compliance_passed,
         )
 
     @staticmethod

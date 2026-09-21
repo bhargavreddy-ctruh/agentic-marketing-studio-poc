@@ -28,6 +28,10 @@ export interface CanvasTile {
    * shows a real "vX/Y" strip wired to the actual undo/redo endpoints, not a cosmetic counter. */
   version?: number;
   versionCount?: number;
+  /** The real compliance gate's verdict (compliance_gate.py, now run automatically right after
+   * generation) — false renders a small red cross badge; true/undefined render nothing (a passed
+   * or not-yet-checked element looks the same as before this existed). */
+  compliancePassed?: boolean | null;
 }
 
 export interface CanvasEngineProps {
@@ -335,6 +339,15 @@ export default function CanvasEngine({ tiles, onUndo, onRedo, onSelectTile, refe
                 title="Has a comment"
               >
                 💬
+              </div>
+            )}
+
+            {tile.compliancePassed === false && (
+              <div
+                className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white shadow"
+                title="Failed compliance QA — see the canvas Elements panel for details"
+              >
+                ✕
               </div>
             )}
 

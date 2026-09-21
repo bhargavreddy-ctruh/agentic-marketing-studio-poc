@@ -92,6 +92,23 @@ async def run_ideation(state: GraphState) -> GraphState:
         emit("ideation_completed", ready=False)
         return state
 
+    # A real asset already exists for this session — every further message is the Orchestrator's
+    # job to classify (full_image/full_video/direct_fix), not Ideation's to re-clarify. Real,
+    # live-found reason (2026-09-21): routing every follow-up message through Ideation's "merge
+    # into one clean paragraph" step, turn after turn, is lossy summarization compounding on
+    # itself — a user's exact "15% off on 100k" survived one merge, then eroded into "a simple
+    # discount overlay" after a few more option-picking rounds, so by the time Overlay Artist ran,
+    # the real figures were already gone from the brief (Overlay Artist's own "never invent a
+    # number" guardrail was working correctly — the number just wasn't there to find). The
+    # Orchestrator's classifier already distinguishes "new generation" from "edit this" using the
+    # raw message plus "is an existing element available" — Ideation re-gating that here was
+    # redundant and actively destructive to exact detail. `brief["idea"]` is left as whatever it
+    # already is (the original generation's real description) rather than overwritten.
+    if brief.get("latest_element_storage_ref"):
+        state["route"] = None
+        state["result"] = None
+        return state
+
     llm = get_llm_provider()
     context = f"Running brief so far:\n{brief}\n\nLatest message from the user:\n{user_message}"
 

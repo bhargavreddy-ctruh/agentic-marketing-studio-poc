@@ -23,6 +23,9 @@ export interface CanvasElement {
   pending_storage_ref: string | null;
   pending_action: string | null;
   last_comment: string | null;
+  // The real compliance gate's last verdict for this element's current version (backend now runs
+  // it automatically right after generation) — null until it's actually been checked once.
+  compliance_passed: boolean | null;
 }
 
 export interface CanvasElementVersion {

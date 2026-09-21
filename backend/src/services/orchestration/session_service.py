@@ -14,6 +14,7 @@ from ...models.canvas_element import CanvasElementModel
 from ...models.session import SessionModel
 from ...repositories.base import CanvasRepository, SessionRepository
 from ...schemas.sessions.responses import IdeationOption, IdeationPrompt, SessionResponse
+from ..compliance.compliance_gate import run_compliance_gate
 from .graph import get_graph
 
 
@@ -141,6 +142,7 @@ class SessionService:
             prompt = self._to_ideation_prompt(result)
         elif result and result.get("storage_ref"):
             session.status = "completed"
+            element_id: str | None = None
             if result.get("update_existing_element_id"):
                 # A direct_fix that adjusted the existing element in place — bump its version
                 # rather than creating an unrelated new one (per-element versioning, Architecture.md
@@ -150,11 +152,22 @@ class SessionService:
                     target.storage_ref = result["storage_ref"]
                     target.metadata_json = {**target.metadata_json, **result.get("metadata", {})}
                     target.version += 1
-                    await self._canvas.update_element(target)
+                    target = await self._canvas.update_element(target)
+                    element_id = target.id
                 else:
-                    await self._add_new_element(session.id, result)
+                    element_id = (await self._add_new_element(session.id, result)).id
             else:
-                await self._add_new_element(session.id, result)
+                element_id = (await self._add_new_element(session.id, result)).id
+
+            # Real QA, run automatically right after generation — a live-found gap (2026-09-21):
+            # `run_compliance_gate` already existed, already worked (real vision checks, real
+            # remediation), but nothing in the actual user-facing flow ever called it — it sat as
+            # a manually-triggered-only endpoint the frontend never hit. The gate's own
+            # remediation (a real, targeted image_editor/text_overlay fix + re-check, capped at
+            # one attempt — see compliance_gate.py's own docstring) already does the "try to fix
+            # it, keep the best result" behavior asked for; this just wires it in and persists the
+            # final verdict so the UI has something real to show, never silently dropped.
+            await self._run_compliance_and_persist(element_id)
         elif result:
             # A placeholder or error result — surface the message, nothing to persist yet.
             session.status = "error" if result_state.get("error") else "pending"
@@ -165,7 +178,7 @@ class SessionService:
         emit("turn_completed", status=session.status)
         return SessionMapper.to_response(session)
 
-    async def _add_new_element(self, session_id: str, result: dict) -> None:
+    async def _add_new_element(self, session_id: str, result: dict) -> CanvasElementModel:
         element = CanvasElementModel(
             id=uuid.uuid4().hex,
             session_id=session_id,
@@ -174,7 +187,22 @@ class SessionService:
             storage_ref=result["storage_ref"],
             metadata_json=result.get("metadata", {}),
         )
-        await self._canvas.add_element(element)
+        return await self._canvas.add_element(element)
+
+    async def _run_compliance_and_persist(self, element_id: str) -> None:
+        # Never let a real QA failure (a provider hiccup, a missing asset, etc.) fail the whole
+        # turn — the generation itself already succeeded; a compliance check that can't run is an
+        # honest "unknown," not a reason to break what the user is waiting on.
+        try:
+            gate_result = await run_compliance_gate(canvas=self._canvas, element_id=element_id)
+        except Exception:  # noqa: BLE001 — deliberately broad: QA is best-effort, never turn-fatal
+            return
+        # Remediation (inside the gate) may have already bumped the element's storage_ref/version —
+        # re-fetch rather than trust a stale local copy before writing the final verdict.
+        element = await self._canvas.get_element(element_id)
+        if element is not None:
+            element.compliance_passed = bool(gate_result.get("overall_passed"))
+            await self._canvas.update_element(element)
 
     @staticmethod
     def _to_ideation_prompt(result: dict) -> IdeationPrompt:

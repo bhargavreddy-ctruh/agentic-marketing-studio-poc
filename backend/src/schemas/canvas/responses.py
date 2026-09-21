@@ -22,6 +22,10 @@ class CanvasElementResponse(BaseModel):
     # surfaced here so a client can show a comment indicator without needing metadata_json's full
     # internal shape exposed over the API (Rules.md: layers talk through typed DTOs, not raw dicts).
     last_comment: str | None = None
+    # The real compliance gate's last verdict for this element's current version — null until the
+    # gate has actually run once (compliance_gate.py, now invoked automatically right after
+    # generation — session_service.py). False renders as a real UI indicator, not swallowed.
+    compliance_passed: bool | None = None
 
 
 class CanvasStateResponse(BaseModel):
