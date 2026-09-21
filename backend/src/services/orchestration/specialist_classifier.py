@@ -63,6 +63,10 @@ async def classify_target_specialist(message: str, *, extra_context: str = "") -
             system=_SYSTEM_PROMPT.format(specialist_descriptions=describe_specialists()),
             messages=[{"role": "user", "content": context}],
             max_tokens=1024,
+            # Same category of real, live-found regression as orchestrator.py's own route()
+            # classification (2026-09-21): a wrong specialist choice here misroutes a real edit,
+            # so this exact-choice classification skips local-first routing too.
+            prefer_local=False,
         )
         parsed = extract_json(result.text)
         target = str(parsed.get("target_specialist") or "").strip()

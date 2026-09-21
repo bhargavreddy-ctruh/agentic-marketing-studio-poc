@@ -75,6 +75,11 @@ async def check_brand_consistency(
                 system=_TEXT_FALLBACK_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": context}],
                 max_tokens=1024,
+                # A compliance gate's whole job is catching real problems — same real,
+                # live-found instruction-following weakness as ideation/orchestrator's own
+                # classification calls (2026-09-21) is too risky here (false pass/fail either
+                # way), so this skips local-first routing.
+                prefer_local=False,
             )
         except Exception as exc:
             raise SpecialistFailed("brand_consistency_checker", str(exc)) from exc

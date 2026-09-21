@@ -49,6 +49,7 @@ class GroqProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
+        prefer_local: bool = True,  # unused — only LLMRouter acts on this, see base.py's docstring
     ) -> LLMResult:
         if not self._api_key:
             raise ProviderUnavailable("groq", "GROQ_API_KEY is not set")

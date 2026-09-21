@@ -120,6 +120,13 @@ async def route(state: GraphState) -> GraphState:
             system=_SYSTEM_PROMPT.format(specialist_descriptions=describe_specialists()),
             messages=[{"role": "user", "content": "\n\n".join(classification_context)}],
             max_tokens=1536,
+            # Real, live-found reason (2026-09-21, same category as ideation_service.py's own
+            # comment): a side-by-side test on a brand-new session (no existing element) had the
+            # self-hosted TIER_1 model route to "direct_fix" anyway — directly disobeying this
+            # prompt's own explicit "if none is [available], do not choose direct_fix" rule —
+            # while Groq correctly returned "full_image". A wrong route here wastes a whole
+            # generation attempt, so this classification skips local-first routing.
+            prefer_local=False,
         )
         parsed = extract_json(result.text)
         chosen_route = str(parsed.get("route") or "")

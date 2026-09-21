@@ -36,6 +36,7 @@ class LocalLLMProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
+        prefer_local: bool = True,  # unused here — LLMRouter already decided to call this provider
     ) -> LLMResult:
         if tier != ModelTier.TIER_1:
             raise ProviderUnavailable("local_llm", f"only configured for TIER_1, not {tier.name}")

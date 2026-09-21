@@ -40,4 +40,14 @@ class LLMProvider(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-    ) -> LLMResult: ...
+        prefer_local: bool = True,
+    ) -> LLMResult:
+        """`prefer_local` only means anything to `LLMRouter` (router.py) — whether a TIER_1 call
+        should try the self-hosted model first. Real, live-found reason it exists (2026-09-21):
+        the self-hosted TIER_1 model handles simple tool-calling specialists fine, but produces
+        materially worse judgment on Ideation's own "is this brief ready, and what's the real
+        synthesis of it" decision — a side-by-side test on the exact same input ("A red Ferrari")
+        showed the local model return `ready: false` and silently drop "red Ferrari" from its own
+        brief synthesis entirely, while Groq correctly returned `ready: true` with the detail
+        intact. Every other provider ignores this parameter; only the router acts on it."""
+        ...

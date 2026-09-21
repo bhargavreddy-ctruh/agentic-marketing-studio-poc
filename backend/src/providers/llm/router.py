@@ -6,9 +6,15 @@ never know which vendor answered).
 
 TIER_1 tries the self-hosted Ollama model first (genuinely $0, no remote rate limit, runs on this
 machine) — matching ModelTier.TIER_1's own "small/fast model" docstring in base.py. If the local
-server is down (or, for a tool-free call, if it fails for any other reason), TIER_1 falls through
-to the same Groq -> OpenRouter chain every other tier already uses. TIER_2/TIER_3 are unaffected —
-local inference was never sized or asked to run those.
+server is down, or `prefer_local=False` was passed, TIER_1 falls through to the same
+Groq -> OpenRouter chain every other tier already uses. TIER_2/TIER_3 are unaffected — local
+inference was never sized or asked to run those.
+
+`prefer_local=False` exists because a real, live comparison (2026-09-21) found the local model's
+judgment measurably worse specifically for Ideation's "is this brief ready, and what does it
+actually mean" decision (base.py's own docstring on the parameter has the exact test) — so
+`ideation_service.py` passes it explicitly, while the tool-calling Tier 1 specialists (which tested
+fine locally) keep the default and still go local-first.
 
 Groq is primary for TIER_2/TIER_3 (and TIER_1's own fallback) as of an earlier change: real testing
 found OpenRouter's free tier has a hard 50-requests/day cap (Memory.md, Phase 2) that no per-model
@@ -50,8 +56,9 @@ class LLMRouter(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
+        prefer_local: bool = True,
     ) -> LLMResult:
-        if tier == ModelTier.TIER_1:
+        if tier == ModelTier.TIER_1 and prefer_local:
             try:
                 return await self._local.complete(
                     tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens
