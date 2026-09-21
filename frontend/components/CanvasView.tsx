@@ -28,7 +28,7 @@ function toTiles(elements: CanvasElement[], versionCounts: Map<string, number>):
       hasComment: Boolean(el.last_comment),
       version: el.version,
       versionCount: versionCounts.get(el.id),
-      compliancePassed: el.compliance_passed,
+      complianceStatus: el.compliance_status,
     }));
 }
 
@@ -98,6 +98,18 @@ export default function CanvasView({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshSignal is a deliberate,
     // externally-bumped trigger, not a value `refresh` itself reads.
   }, [refresh, refreshSignal]);
+
+  // The real compliance gate now runs as a genuine background task (session_service.py) — it
+  // finishes after this turn's own HTTP response already returned, so there's no other signal
+  // telling this view "QA just finished" the way `refreshSignal` announces "a generation just
+  // finished." A short, bounded poll is the honest way to catch that: only runs while something
+  // visible is actually still "running", stops itself the moment nothing is, never an indefinite
+  // background poll.
+  useEffect(() => {
+    if (!elements.some((el) => el.compliance_status === "running")) return;
+    const interval = setInterval(refresh, 2500);
+    return () => clearInterval(interval);
+  }, [elements, refresh]);
 
   async function withBusy(elementId: string, fn: () => Promise<CanvasElement>) {
     setBusyId(elementId);
@@ -205,7 +217,10 @@ export default function CanvasView({
                 {el.pending_storage_ref && (
                   <span className="ml-2 rounded bg-amber-100 px-2 py-0.5 text-xs text-amber-800">pending approval</span>
                 )}
-                {el.compliance_passed === false && (
+                {el.compliance_status === "running" && (
+                  <span className="ml-2 rounded bg-neutral-200 px-2 py-0.5 text-xs text-neutral-700">running QA…</span>
+                )}
+                {el.compliance_status === "failed" && (
                   <span className="ml-2 rounded bg-red-100 px-2 py-0.5 text-xs text-red-800">✕ failed QA</span>
                 )}
               </div>

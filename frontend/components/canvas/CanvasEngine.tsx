@@ -28,10 +28,10 @@ export interface CanvasTile {
    * shows a real "vX/Y" strip wired to the actual undo/redo endpoints, not a cosmetic counter. */
   version?: number;
   versionCount?: number;
-  /** The real compliance gate's verdict (compliance_gate.py, now run automatically right after
-   * generation) — false renders a small red cross badge; true/undefined render nothing (a passed
-   * or not-yet-checked element looks the same as before this existed). */
-  compliancePassed?: boolean | null;
+  /** The real compliance gate's status (compliance_gate.py), run as a real background task right
+   * after generation — "running" shows a small pulsing badge while QA is genuinely in progress,
+   * "failed" a red cross, "passed"/undefined render nothing. */
+  complianceStatus?: "running" | "passed" | "failed";
 }
 
 export interface CanvasEngineProps {
@@ -342,7 +342,17 @@ export default function CanvasEngine({ tiles, onUndo, onRedo, onSelectTile, refe
               </div>
             )}
 
-            {tile.compliancePassed === false && (
+            {tile.complianceStatus === "running" && (
+              <div
+                className="absolute left-2 top-2 flex items-center gap-1 rounded-full bg-neutral-900/80 px-2 py-1 text-xs text-white shadow"
+                title="Compliance QA is running on this element"
+              >
+                <span className="h-2 w-2 animate-pulse rounded-full bg-blue-400" />
+                Running QA…
+              </div>
+            )}
+
+            {tile.complianceStatus === "failed" && (
               <div
                 className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-xs font-bold text-white shadow"
                 title="Failed compliance QA — see the canvas Elements panel for details"

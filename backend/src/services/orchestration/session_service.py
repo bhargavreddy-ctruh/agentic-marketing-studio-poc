@@ -5,17 +5,27 @@ LangGraph graph. This is business logic — it belongs in services/, not in a ro
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 
 from ...core.events import emit, mark_turn_done, set_current_session, start_new_turn
 from ...core.exceptions import NotFoundError, ValidationFailed
 from ...mappers.session_mapper import SessionMapper
+from ...models.base import async_session_factory
 from ...models.canvas_element import CanvasElementModel
 from ...models.session import SessionModel
 from ...repositories.base import CanvasRepository, SessionRepository
+from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
 from ...schemas.sessions.responses import IdeationOption, IdeationPrompt, SessionResponse
 from ..compliance.compliance_gate import run_compliance_gate
 from .graph import get_graph
+
+# Real, live-found asyncio gotcha (2026-09-21): a bare `asyncio.create_task(...)` with no
+# reference held anywhere can be garbage-collected mid-run, silently killing the background QA
+# check before it ever persists a result — a task's only strong reference by default is this
+# variable holding it. Kept at module scope (not per-instance) since SessionService itself is
+# constructed fresh per request; the task must outlive that.
+_background_tasks: set[asyncio.Task] = set()
 
 
 class SessionService:
@@ -159,15 +169,14 @@ class SessionService:
             else:
                 element_id = (await self._add_new_element(session.id, result)).id
 
-            # Real QA, run automatically right after generation — a live-found gap (2026-09-21):
-            # `run_compliance_gate` already existed, already worked (real vision checks, real
-            # remediation), but nothing in the actual user-facing flow ever called it — it sat as
-            # a manually-triggered-only endpoint the frontend never hit. The gate's own
-            # remediation (a real, targeted image_editor/text_overlay fix + re-check, capped at
-            # one attempt — see compliance_gate.py's own docstring) already does the "try to fix
-            # it, keep the best result" behavior asked for; this just wires it in and persists the
-            # final verdict so the UI has something real to show, never silently dropped.
-            await self._run_compliance_and_persist(element_id)
+            # Real QA, kicked off automatically right after generation — a live-found gap
+            # (2026-09-21): `run_compliance_gate` already existed and worked, but nothing in the
+            # real user-facing flow ever called it. NOT awaited here on purpose — per the user's
+            # own explicit ask, the element should appear on canvas immediately (already
+            # `compliance_status: "running"` by the model's own default) while QA runs
+            # afterward, rather than the whole turn waiting on it and only showing the element
+            # once QA has already finished.
+            self._schedule_compliance_check(element_id)
         elif result:
             # A placeholder or error result — surface the message, nothing to persist yet.
             session.status = "error" if result_state.get("error") else "pending"
@@ -189,20 +198,20 @@ class SessionService:
         )
         return await self._canvas.add_element(element)
 
-    async def _run_compliance_and_persist(self, element_id: str) -> None:
-        # Never let a real QA failure (a provider hiccup, a missing asset, etc.) fail the whole
-        # turn — the generation itself already succeeded; a compliance check that can't run is an
-        # honest "unknown," not a reason to break what the user is waiting on.
-        try:
-            gate_result = await run_compliance_gate(canvas=self._canvas, element_id=element_id)
-        except Exception:  # noqa: BLE001 — deliberately broad: QA is best-effort, never turn-fatal
-            return
-        # Remediation (inside the gate) may have already bumped the element's storage_ref/version —
-        # re-fetch rather than trust a stale local copy before writing the final verdict.
-        element = await self._canvas.get_element(element_id)
-        if element is not None:
-            element.compliance_passed = bool(gate_result.get("overall_passed"))
-            await self._canvas.update_element(element)
+    def _schedule_compliance_check(self, element_id: str) -> None:
+        """Fires the real compliance gate as a genuinely detached background task — the caller
+        (the current turn) does not await this, so the HTTP response returns immediately with the
+        element already visible on canvas at its default `compliance_status: "running"`."""
+        task = asyncio.create_task(_run_compliance_background(element_id))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+    @staticmethod
+    async def _run_compliance_and_persist(element_id: str) -> None:
+        # Kept as a thin, awaitable wrapper around the real module-level worker below — some
+        # callers (tests, a future synchronous caller) may still want to await the real result
+        # directly rather than fire-and-forget it.
+        await _run_compliance_background(element_id)
 
     @staticmethod
     def _to_ideation_prompt(result: dict) -> IdeationPrompt:
@@ -212,3 +221,31 @@ class SessionService:
             options=options,
             allow_free_text=result.get("allow_free_text", True),
         )
+
+
+async def _run_compliance_background(element_id: str) -> None:
+    """The real compliance check, run completely independently of whichever HTTP request
+    triggered it — this keeps running after that request's own response has already been sent,
+    so it needs its own DB session rather than the request-scoped one `SessionService` was built
+    with (which closes once the request ends). Same pattern already used by tools that run
+    outside any one request's own session lifecycle (e.g. `discount_claims_calculator.py`).
+
+    A real QA failure never surfaces as a 500 to anyone, because there's no request left waiting
+    on this by the time it runs — but an infra error (a provider hiccup, a missing asset) is still
+    written as "failed", a real, visible flag, rather than leaving the element stuck showing
+    "running" forever (worse than an occasional false "failed", which the gate's own remediation
+    already makes rare in practice)."""
+    async with async_session_factory() as db:
+        canvas = SqliteCanvasRepository(db)
+        try:
+            gate_result = await run_compliance_gate(canvas=canvas, element_id=element_id)
+            status = "passed" if gate_result.get("overall_passed") else "failed"
+        except Exception:  # noqa: BLE001 — deliberately broad: this must never crash a bg task silently stuck
+            status = "failed"
+
+        # Remediation (inside the gate) may have already bumped the element's storage_ref/version —
+        # re-fetch rather than trust a stale local copy before writing the final verdict.
+        element = await canvas.get_element(element_id)
+        if element is not None:
+            element.compliance_status = status
+            await canvas.update_element(element)
