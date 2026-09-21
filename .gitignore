@@ -1,0 +1,27 @@
+# Only backend/ and frontend/ source are tracked in this repo.
+/*
+!/backend
+!/frontend
+!/.gitignore
+
+# --- Backend excludes ---
+backend/venv/
+backend/.env
+backend/poc.db
+backend/var/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.egg-info/
+backend/**/*.egg-info/
+backend/.pytest_cache/
+backend/**/.pytest_cache/
+
+# --- Frontend excludes ---
+frontend/node_modules/
+frontend/.env.local
+frontend/.next/
+frontend/next-env.d.ts
+
+# --- OS cruft ---
+.DS_Store
+**/.DS_Store

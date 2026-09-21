@@ -1,0 +1,14 @@
+"""The shared state every LangGraph node reads/writes. Kept small and typed on purpose (KISS)."""
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+
+class GraphState(TypedDict, total=False):
+    session_id: str
+    user_message: str
+    brief: dict[str, Any]
+    route: str | None  # "full_image" | "full_video" | "direct_fix" | None (still ideating)
+    target_specialist: str | None  # set only for the direct_fix route
+    result: dict[str, Any] | None
+    error: str | None
