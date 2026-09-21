@@ -14,10 +14,12 @@ from ..models.base import get_session
 from ..repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
 from ..repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
 from ..repositories.sqlite.sqlite_canvas_version_repository import SqliteCanvasVersionRepository
+from ..repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
 from ..repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from ..repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
 from ..services.canvas.versioning_service import CanvasVersioningService
 from ..services.knowledge.brand_dna_service import BrandDnaService
+from ..services.knowledge.mood_board_service import MoodBoardService
 from ..services.knowledge.product_dna_service import ProductDnaService
 from ..services.orchestration.session_service import SessionService
 
@@ -56,6 +58,10 @@ def get_product_dna_service(db: DbSession) -> ProductDnaService:
     return ProductDnaService(products=SqliteProductRepository(db))
 
 
+def get_mood_board_service(db: DbSession) -> MoodBoardService:
+    return MoodBoardService(assets=SqliteMoodBoardRepository(db))
+
+
 SessionServiceDep = Annotated[SessionService, Depends(get_session_service)]
 CanvasRepositoryDep = Annotated[SqliteCanvasRepository, Depends(get_canvas_repository)]
 CanvasVersionRepositoryDep = Annotated[SqliteCanvasVersionRepository, Depends(get_canvas_version_repository)]
@@ -63,3 +69,4 @@ SessionRepositoryDep = Annotated[SqliteSessionRepository, Depends(get_session_re
 VersioningServiceDep = Annotated[CanvasVersioningService, Depends(get_versioning_service)]
 BrandDnaServiceDep = Annotated[BrandDnaService, Depends(get_brand_dna_service)]
 ProductDnaServiceDep = Annotated[ProductDnaService, Depends(get_product_dna_service)]
+MoodBoardServiceDep = Annotated[MoodBoardService, Depends(get_mood_board_service)]

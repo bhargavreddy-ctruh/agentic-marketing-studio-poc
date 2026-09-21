@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .api.v1.brand.routes import router as brand_router
 from .api.v1.canvas.routes import router as canvas_router
+from .api.v1.mood_board.routes import router as mood_board_router
 from .api.v1.product.routes import router as product_router
 from .api.v1.sessions.routes import router as sessions_router
 from .core.config import settings
@@ -20,8 +21,10 @@ from .core.middleware.logging import configure_logging, get_logger
 from .models.base import async_session_factory, init_models
 from .providers.observability.langsmith import configure_langsmith
 from .repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
+from .repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
 from .repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from .services.knowledge.brand_dna_service import reindex_all_brands
+from .services.knowledge.mood_board_service import reindex_all_mood_board_assets
 from .services.knowledge.product_dna_service import reindex_all_products
 from .services.specialists.registry import load_all_specialists
 from .services.tools.registry import load_all_tools
@@ -42,6 +45,7 @@ async def lifespan(app: FastAPI):
     async with async_session_factory() as db:
         await reindex_all_brands(SqliteBrandRepository(db))
         await reindex_all_products(SqliteProductRepository(db))
+        await reindex_all_mood_board_assets(SqliteMoodBoardRepository(db))
     log.info("app_started", extra={"_extra_project": settings.langsmith_project})
     yield
     log.info("app_shutdown")
@@ -64,6 +68,7 @@ app.include_router(sessions_router)
 app.include_router(canvas_router)
 app.include_router(brand_router)
 app.include_router(product_router)
+app.include_router(mood_board_router)
 
 
 @app.get("/health")

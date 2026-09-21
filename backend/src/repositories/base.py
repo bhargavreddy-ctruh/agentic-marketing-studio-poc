@@ -13,6 +13,7 @@ from ..models.brand_profile import BrandProfileModel
 from ..models.canvas_element import CanvasElementModel
 from ..models.canvas_element_version import CanvasElementVersionModel
 from ..models.generation_job import GenerationJobModel
+from ..models.mood_board_asset import MoodBoardAssetModel
 from ..models.product_profile import ProductProfileModel
 from ..models.session import SessionModel
 from ..models.tool_call_log import ToolCallLogModel
@@ -47,6 +48,12 @@ class ProductRepository(Protocol):
     async def add(self, product: ProductProfileModel) -> ProductProfileModel: ...
     async def get(self, product_id: str) -> ProductProfileModel | None: ...
     async def list_all(self) -> list[ProductProfileModel]: ...
+
+
+class MoodBoardRepository(Protocol):
+    async def add(self, asset: MoodBoardAssetModel) -> MoodBoardAssetModel: ...
+    async def get(self, asset_id: str) -> MoodBoardAssetModel | None: ...
+    async def list_all(self) -> list[MoodBoardAssetModel]: ...
 
 
 class GenerationJobRepository(Protocol):

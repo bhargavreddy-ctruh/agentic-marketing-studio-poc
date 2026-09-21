@@ -16,7 +16,7 @@ from llama_index.core.indices.base import BaseIndex
 
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
-from .base import KnowledgeProvider
+from .base import KnowledgeProvider, RetrievedDocument
 from .embeddings_local import LocalEmbedding
 
 log = get_logger(__name__)
@@ -49,6 +49,22 @@ class LlamaIndexKnowledgeProvider(KnowledgeProvider):
         if not nodes:
             return ""
         return "\n\n".join(n.get_content() for n in nodes)
+
+    async def query_top_k(
+        self, *, collection: str, question: str, top_k: int = 3
+    ) -> list[RetrievedDocument]:
+        """Same retrieval as `query()`, but returns each matched document separately with its
+        real `doc_id` (rather than one joined blob) — needed by Mood Board Search, where each hit
+        maps back to one real asset with its own storage_ref, not a single synthesized answer."""
+        index = self._indices.get(collection)
+        if index is None:
+            raise ProviderUnavailable("llamaindex", f"collection '{collection}' has no indexed documents yet")
+        retriever = index.as_retriever(similarity_top_k=top_k)
+        nodes = retriever.retrieve(question)
+        return [
+            RetrievedDocument(doc_id=n.node.ref_doc_id or n.node.node_id, text=n.get_content(), score=n.score)
+            for n in nodes
+        ]
 
 
 _singleton: LlamaIndexKnowledgeProvider | None = None
