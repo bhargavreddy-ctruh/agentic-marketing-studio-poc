@@ -13,7 +13,7 @@
  * "one file owns the mechanism, everything else depends on an interface" isolation this project's
  * backend already applies to every vendor provider (Rules.md section 1).
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Camera, Viewport, fitViewport } from "./camera";
 
 export interface CanvasTile {
@@ -282,27 +282,48 @@ function savePositions(sessionId: string | null | undefined, map: Map<string, { 
 }
 
 function useTileLayout(tiles: CanvasTile[], sessionId?: string | null) {
-  // Seed from localStorage on first mount so dragged positions survive a page refresh.
-  const positions = useRef(loadSavedPositions(sessionId));
-  
+  // Seed from localStorage on first mount so dragged positions survive a page refresh. Computed
+  // as a plain `useMemo` value (not read off a ref) specifically so `initialNextRow` below can
+  // derive from IT rather than from `positions.current` — real, live-found bug (2026-09-23,
+  // `react-hooks/refs`): reading a ref during render, even one just created on this same render,
+  // is against React's rules the same way writing one is (see the longer note on `layout` state
+  // further down in this hook for the full story).
+  const seededPositions = useMemo(() => loadSavedPositions(sessionId), [sessionId]);
+  const positions = useRef(seededPositions);
+
   // Calculate the highest row currently occupied so new generations don't spawn at (0,0) and overlap old tiles.
   const initialNextRow = useMemo(() => {
     let maxRow = 0;
-    positions.current.forEach(pos => {
+    seededPositions.forEach(pos => {
       // 600 is the hardcoded TILE_ROW_HEIGHT used below
       const row = Math.ceil(pos.y / 600);
       if (row > maxRow) maxRow = row;
     });
     return maxRow > 0 ? maxRow + 1 : 0;
-  }, []);
-  
-  const nextRowRef = useRef(initialNextRow);
-  const [bumpCount, bump] = useState(0);
+  }, [seededPositions]);
 
-  const laidOut = useMemo(() => {
+  const nextRowRef = useRef(initialNextRow);
+
+  // Real, live-found bug (2026-09-23 frontend audit, `react-hooks/refs` — the first time this
+  // codebase ever had real lint coverage): this whole layout computation used to live in a
+  // `useMemo`, mutating `positions.current`/`nextRowRef.current` DURING RENDER — reading and
+  // writing a ref outside an effect/event handler is against React's own rules (not just a lint
+  // nit: it's exactly the assumption React Compiler / concurrent rendering relies on breaking).
+  // `positions`/`nextRowRef` genuinely need to stay refs (an imperative cache keyed by tile id,
+  // not something React should re-render for on its own) — the fix is WHERE they're touched, not
+  // WHAT they are: the mutation moved into a `useLayoutEffect` (runs synchronously after commit,
+  // before paint — same "no visible flash" guarantee the old in-render computation had), and
+  // render now only ever reads the plain, ordinary `layout` STATE this effect produces. Reading
+  // state during render is always fine; refs are not for exactly this pattern.
+  const [layout, setLayout] = useState<{
+    laidOut: { tile: CanvasTile; pos: { x: number; y: number } }[];
+    nextRunPos: { x: number; y: number };
+  }>({ laidOut: [], nextRunPos: { x: 0, y: initialNextRow * 600 } });
+
+  useLayoutEffect(() => {
     const TILE_COL_WIDTH = TILE_SIZE + TILE_GAP;
     // 9:16 portrait tiles can be ~568px tall. 600px safely prevents vertical overlap.
-    const TILE_ROW_HEIGHT = 600; 
+    const TILE_ROW_HEIGHT = 600;
 
     for (const run of computeRuns(tiles)) {
       const unpositioned = run.tileIds.filter((id) => !positions.current.has(id));
@@ -334,26 +355,36 @@ function useTileLayout(tiles: CanvasTile[], sessionId?: string | null) {
       nextRowRef.current = Math.max(nextRowRef.current, runStartRow + rowsUsed + RUN_ROW_GAP);
     }
 
-    return tiles.map((t) => ({ tile: t, pos: positions.current.get(t.id)! }));
-  }, [tiles, bumpCount]);
+    setLayout({
+      laidOut: tiles.map((t) => ({ tile: t, pos: positions.current.get(t.id)! })),
+      // Where a genuinely NEW run (e.g. the loading silhouette for a turn in flight) would start —
+      // always a fresh row-band below everything already laid out, same as a real new run would get.
+      nextRunPos: { x: 0, y: nextRowRef.current * 600 },
+    });
+  }, [tiles]);
 
   const movePosition = useCallback((id: string, x: number, y: number) => {
     positions.current.set(id, { x, y });
     savePositions(sessionId, positions.current);
-    bump((n) => n + 1);
+    setLayout((prev) => ({
+      ...prev,
+      laidOut: prev.laidOut.map((item) => (item.tile.id === id ? { ...item, pos: { x, y } } : item)),
+    }));
   }, [sessionId]);
 
   const movePositions = useCallback((updates: { id: string; x: number; y: number }[]) => {
     updates.forEach(({ id, x, y }) => positions.current.set(id, { x, y }));
     savePositions(sessionId, positions.current);
-    bump((n) => n + 1);
+    const updateById = new Map(updates.map((u) => [u.id, { x: u.x, y: u.y }]));
+    setLayout((prev) => ({
+      ...prev,
+      laidOut: prev.laidOut.map((item) =>
+        updateById.has(item.tile.id) ? { ...item, pos: updateById.get(item.tile.id)! } : item,
+      ),
+    }));
   }, [sessionId]);
 
-  // Where a genuinely NEW run (e.g. the loading silhouette for a turn in flight) would start —
-  // always a fresh row-band below everything already laid out, same as a real new run would get.
-  const nextRunPos = { x: 0, y: nextRowRef.current * 600 };
-
-  return { laidOut, movePosition, movePositions, nextRunPos };
+  return { laidOut: layout.laidOut, movePosition, movePositions, nextRunPos: layout.nextRunPos };
 }
 
 const PENDING_ICON_BY_KIND: Record<string, string> = {
@@ -438,6 +469,26 @@ export default function CanvasEngine({
     }
   }, [laidOut.length, fitToContent]);
 
+  /** Converts a raw `clientX/clientY` (viewport-relative) into a point relative to the canvas
+   * root itself. A real, likely offset bug found live: every screen-to-world conversion used
+   * `e.clientX/clientY` directly, silently assuming the canvas root sits at viewport (0,0) with
+   * no actual check — true only by accident of today's fullscreen layout, and the first thing to
+   * break if that ever changes. Always going through the root's own real bounding rect is correct
+   * regardless of where the canvas root actually sits on the page.
+   *
+   * Moved above the wheel effect below it (2026-09-23, `react-hooks` lint fix) — same function,
+   * just declared before its first use instead of after; the hooks linter's data-flow analysis
+   * flagged the hoisted-but-later-declared order, even though it already ran correctly at runtime. */
+  function toLocal(clientX: number, clientY: number) {
+    const rect = rootRef.current?.getBoundingClientRect();
+    return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
+  }
+
+  function screenToWorld(clientX: number, clientY: number) {
+    const local = toLocal(clientX, clientY);
+    return new Camera(camRef.current).screenToWorld(local.x, local.y);
+  }
+
   // Wheel: pan by default; ctrl/cmd+wheel (pinch/zoom gesture) zooms at the cursor — same feel as
   // the ported reference implementation.
   useEffect(() => {
@@ -463,22 +514,6 @@ export default function CanvasEngine({
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
     };
   }, []);
-
-  /** Converts a raw `clientX/clientY` (viewport-relative) into a point relative to the canvas
-   * root itself. A real, likely offset bug found live: every screen-to-world conversion used
-   * `e.clientX/clientY` directly, silently assuming the canvas root sits at viewport (0,0) with
-   * no actual check — true only by accident of today's fullscreen layout, and the first thing to
-   * break if that ever changes. Always going through the root's own real bounding rect is correct
-   * regardless of where the canvas root actually sits on the page. */
-  function toLocal(clientX: number, clientY: number) {
-    const rect = rootRef.current?.getBoundingClientRect();
-    return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) };
-  }
-
-  function screenToWorld(clientX: number, clientY: number) {
-    const local = toLocal(clientX, clientY);
-    return new Camera(camRef.current).screenToWorld(local.x, local.y);
-  }
 
   function drawCtx(): CanvasRenderingContext2D | null {
     return drawCanvasRef.current?.getContext("2d") ?? null;

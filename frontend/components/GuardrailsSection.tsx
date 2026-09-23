@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface GuardrailRule {
   id: string;
@@ -18,11 +18,35 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
   const [isOpen, setIsOpen] = useState(false);
   const [rules, setRules] = useState<GuardrailRule[]>([]);
   const [loading, setLoading] = useState(false);
-  
+  // Real, live-found bug (2026-09-23 frontend audit): every failure here (fetch/add/edit/delete)
+  // only did `console.error` — no `error` state, nothing shown to the user, unlike `CanvasView.tsx`,
+  // which does surface a visible banner on failure. A failed delete/edit/add looked like nothing
+  // happened, with zero explanation. Surfaced below, same pattern as `CanvasView.tsx`.
+  const [error, setError] = useState<string | null>(null);
+  // Always the latest `rules`, kept in sync by the effect below — `mutateGuardrails` reads THIS,
+  // not the `rules` closed over at click time, so two quick actions (e.g. delete then edit) each
+  // compute their diff against the other's real result instead of a stale pre-action snapshot.
+  // Real, live-found race (2026-09-23 frontend audit): without this, editing rule B right after
+  // deleting rule A could silently resurrect A if edit's PUT (built from the pre-delete list)
+  // resolved after delete's PUT. `pendingRef` below additionally serializes the actual requests so
+  // they can never even overlap in flight.
+  const rulesRef = useRef<GuardrailRule[]>([]);
+  useEffect(() => {
+    rulesRef.current = rules;
+  }, [rules]);
+  const pendingRef = useRef<Promise<void>>(Promise.resolve());
+
   // Add new rule state
   const [newRuleSource, setNewRuleSource] = useState<"brand" | "product" | "custom">("custom");
   const [newRuleText, setNewRuleText] = useState("");
   const [newRuleScope, setNewRuleScope] = useState("all");
+
+  // Edit-in-place state — which rule (by id) is currently being edited, and its draft text.
+  // The backend has no dedicated "edit one rule" endpoint; the existing PUT (full-set replace,
+  // already used by `handleDelete` below) is reused here too, just with this one rule's `rule`
+  // text swapped in the array before sending.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
 
   const [mounted, setMounted] = useState(false);
 
@@ -35,24 +59,38 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
     try {
       const data = await request<{ rules: GuardrailRule[] }>(`/api/v1/sessions/${sessionId}/guardrails`);
       setRules(data.rules || []);
+      setError(null);
     } catch (e) {
       console.error(e);
+      setError(e instanceof Error ? e.message : "Failed to load guardrails.");
     } finally {
       setLoading(false);
     }
   };
 
-  const updateGuardrails = async (updatedRules: GuardrailRule[]) => {
-    try {
-      const data = await request<{ rules: GuardrailRule[] }>(`/api/v1/sessions/${sessionId}/guardrails`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rules: updatedRules }),
-      });
-      setRules(data.rules || []);
-    } catch (e) {
-      console.error(e);
-    }
+  /** Every rule mutation (delete/edit) goes through here: `compute` reads the LATEST rules
+   * (`rulesRef.current`) at the moment it actually runs, and successive calls are chained onto
+   * `pendingRef` so their real PUT requests can never overlap in flight — fixes the real race
+   * described above `rulesRef`'s declaration. */
+  const mutateGuardrails = (compute: (current: GuardrailRule[]) => GuardrailRule[]) => {
+    const run = async () => {
+      try {
+        const updated = compute(rulesRef.current);
+        const data = await request<{ rules: GuardrailRule[] }>(`/api/v1/sessions/${sessionId}/guardrails`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rules: updated }),
+        });
+        rulesRef.current = data.rules || [];
+        setRules(data.rules || []);
+        setError(null);
+      } catch (e) {
+        console.error(e);
+        setError(e instanceof Error ? e.message : "Failed to update guardrails.");
+      }
+    };
+    pendingRef.current = pendingRef.current.then(run);
+    return pendingRef.current;
   };
 
   useEffect(() => {
@@ -62,8 +100,25 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
   }, [isOpen, sessionId]);
 
   const handleDelete = (id: string) => {
-    const updated = rules.filter(r => r.id !== id);
-    updateGuardrails(updated);
+    mutateGuardrails((current) => current.filter(r => r.id !== id));
+  };
+
+  const startEdit = (r: GuardrailRule) => {
+    setEditingId(r.id);
+    setEditingText(r.rule);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditingText("");
+  };
+
+  const handleSaveEdit = (id: string) => {
+    const trimmed = editingText.trim();
+    if (!trimmed) return;
+    mutateGuardrails((current) => current.map((r) => (r.id === id ? { ...r, rule: trimmed } : r)));
+    setEditingId(null);
+    setEditingText("");
   };
 
   const handleAdd = async () => {
@@ -79,9 +134,12 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
           source: newRuleSource,
         }),
       });
+      rulesRef.current = data.rules || [];
       setRules(data.rules || []);
+      setError(null);
     } catch (e) {
       console.error(e);
+      setError(e instanceof Error ? e.message : "Failed to add guardrail.");
     } finally {
       setLoading(false);
       setNewRuleText("");
@@ -107,6 +165,12 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
           </button>
         </div>
 
+        {error && (
+          <div className="mx-6 mt-4 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2.5 text-sm text-red-300">
+            {error}
+          </div>
+        )}
+
         {/* List */}
         <div className="flex-1 overflow-y-auto p-6 space-y-4">
           {loading ? (
@@ -128,17 +192,65 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
                       </span>
                       <span className="text-xs text-surface-400">Scope: {r.scope}</span>
                     </div>
-                    <p className="text-sm text-surface-200">{r.rule}</p>
+                    {editingId === r.id ? (
+                      <div className="space-y-2">
+                        <textarea
+                          autoFocus
+                          value={editingText}
+                          onChange={(e) => setEditingText(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !e.shiftKey) {
+                              e.preventDefault();
+                              handleSaveEdit(r.id);
+                            } else if (e.key === "Escape") {
+                              cancelEdit();
+                            }
+                          }}
+                          rows={2}
+                          className="w-full resize-none rounded-lg border border-brand-500 bg-surface-800 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-brand-500"
+                        />
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleSaveEdit(r.id)}
+                            disabled={!editingText.trim()}
+                            className="rounded-lg bg-brand-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-brand-600 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            Save
+                          </button>
+                          <button
+                            onClick={cancelEdit}
+                            className="rounded-lg border border-surface-700 px-3 py-1.5 text-xs font-medium text-surface-300 hover:bg-surface-800"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-sm text-surface-200">{r.rule}</p>
+                    )}
                   </div>
-                  <button
-                    onClick={() => handleDelete(r.id)}
-                    className="opacity-0 group-hover:opacity-100 flex-shrink-0 self-start p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
-                    title="Delete guardrail"
-                  >
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
+                  {editingId !== r.id && (
+                    <div className="flex flex-shrink-0 gap-1 opacity-0 group-hover:opacity-100 transition-all">
+                      <button
+                        onClick={() => startEdit(r)}
+                        className="self-start p-2 text-surface-300 hover:bg-surface-700/50 rounded-lg transition-all"
+                        title="Edit guardrail"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                        </svg>
+                      </button>
+                      <button
+                        onClick={() => handleDelete(r.id)}
+                        className="self-start p-2 text-red-400 hover:bg-red-500/10 rounded-lg transition-all"
+                        title="Delete guardrail"
+                      >
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             ))

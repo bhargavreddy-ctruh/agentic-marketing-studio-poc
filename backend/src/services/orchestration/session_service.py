@@ -68,6 +68,35 @@ def _resolve_yes_no_reply(reply: str, option_labels: dict[str, str]) -> str | No
     return None
 
 
+# Real, live-found bug (2026-09-24, per an explicit user ask: "is chat memory persistent and
+# updated and try again and other options work properly with context and memory"): "retry" is
+# offered as a real option after nearly every failure path (`graph.py`, 7 separate spots, always
+# `{"id": "retry", "label": "Try again"}`), but clicking it resolved `user_message` to the literal
+# label text "Try again" — which then went EVERYWHERE downstream as if it were the user's real
+# request: the orchestrator's own classification context, `ideation_service.py`'s brief-merge
+# (this is the exact, previously-flagged-but-unfixed root cause of `brief.idea` getting corrupted
+# to `"Try again\n\nText description of the image"` — a weak fallback model handed nothing but the
+# word "Try again" to synthesize from), the persisted `chat_turns.user_text` row (polluting the
+# rolling 6-turn `_recent_chat_history` window with content-free entries), and the semantic
+# LlamaIndex memory (`chat_memory_service.py` — indexing "User Request: Try again" helps no future
+# retrieval and dilutes real results). `orchestrator.py`'s own prompt and `ideation_service.py`'s
+# own "Context Guardrail" already acknowledged this exact risk for the worst case (zero context at
+# all) — this fixes the more common degraded case where real context exists but gets replaced by
+# a content-free placeholder anyway.
+_BARE_RETRY_LABEL = "try again"
+
+
+def _find_real_user_message(past_turns: list) -> str | None:
+    """Walks the session's own real chat history backward for the most recent turn that wasn't
+    ITSELF just a bare "Try again" — so retrying a retry still recovers the real original request,
+    not the previous retry's own placeholder text."""
+    for turn in reversed(past_turns):
+        text = (turn.user_text or "").strip()
+        if text and text.lower() != _BARE_RETRY_LABEL:
+            return text
+    return None
+
+
 class SessionService:
     def __init__(
         self,
@@ -201,6 +230,55 @@ class SessionService:
             session = await self._sessions.update(session)
             return SessionMapper.to_response(session)
 
+        # A real, live-found bug (2026-09-23, per an explicit user report: "Cancel is also
+        # creating llm task??"): the Laya-fallback "approval_required" prompt (orchestrator.py,
+        # when both real LLM gateways are down but Laya can still suggest a specialist) built its
+        # options as `laya_approve_{specialist}`/`cancel`, but NEITHER was ever specially handled
+        # here — both silently fell through to the generic path below, which treats a picked
+        # option as just its label TEXT and re-runs the full ideation/orchestrator pipeline with
+        # it as a brand-new user message. So "No, cancel" didn't cancel anything: it sent the
+        # literal words "No, cancel" back through real LLM classification (hence a fresh "Thinking
+        # about the brief…" the user never asked for), and "Yes, use X" didn't actually invoke X
+        # either — it sent "Yes, use X" back through the SAME classifier that had just degraded in
+        # the first place, likely to misroute or degrade again. Handled explicitly here, the same
+        # "resolve a real pending gate before the graph ever re-runs" shape as the
+        # `_pending_edit_approval_id` block just above.
+        last_option_labels = session.brief.get("_last_option_labels") or {}
+        laya_approve_keys = [k for k in last_option_labels if k.startswith("laya_approve_")]
+        if laya_approve_keys:
+            reply = free_text or last_option_labels.get(picked_option_id, picked_option_id)
+            if picked_option_id == "cancel" or is_cancel(reply):
+                session.brief = {k: v for k, v in session.brief.items() if k != "_last_option_labels"}
+                session.status = "completed"
+                session.next_prompt_json = IdeationPrompt(
+                    message="Cancelled — nothing was run.", options=[], allow_free_text=True
+                ).model_dump()
+                session = await self._sessions.update(session)
+                return SessionMapper.to_response(session)
+            approved_key = picked_option_id if picked_option_id in laya_approve_keys else (
+                laya_approve_keys[0] if is_approval(reply) else None
+            )
+            if approved_key:
+                laya_specialist = approved_key.removeprefix("laya_approve_")
+                # The real request text got lost the moment classification degraded — it was never
+                # persisted anywhere except the chat history itself, so recover it from the most
+                # recent real (non-empty) turn rather than re-asking the user to repeat themselves.
+                past_turns = await self._chat_turns.list_for_session(session.id)
+                original_message = past_turns[-1].user_text if past_turns else ""
+                brief_with_target = dict(session.brief)
+                # Consumed once by `orchestrator.py`'s `route()` (checked before real
+                # classification, same shape as its existing `video_stage` resume-check) — skips
+                # re-classifying with the same degraded LLM path and goes straight to `direct_fix`
+                # with the specialist the user just explicitly approved.
+                brief_with_target["_laya_approved_specialist"] = laya_specialist
+                session.brief = brief_with_target
+                return await self._run_turn(
+                    session, user_message=original_message, referenced_element_ids=referenced_element_ids
+                )
+            # Neither a clear approve nor a clear cancel (e.g. the user typed something else
+            # entirely instead of picking either option) — treat it as a genuinely new message,
+            # same as the generic fallthrough below.
+
         # A real, live-found bug (2026-09-22, traced from a real session's `brief.idea` getting
         # corrupted to the literal string "approve"): a free-text reply to an open ideation
         # clarifying question (`_last_option_labels` set, real pickable options shown) that doesn't
@@ -231,6 +309,15 @@ class SessionService:
         user_message = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
             picked_option_id, picked_option_id
         )
+        # See `_find_real_user_message`'s own comment above: a bare "retry" is a continuation of
+        # the real prior request, not a new one — recovered from real chat history so it's what
+        # actually reaches classification/ideation/persisted history/semantic memory this turn,
+        # instead of the content-free label "Try again" itself.
+        if not free_text and (user_message or "").strip().lower() == _BARE_RETRY_LABEL:
+            past_turns = await self._chat_turns.list_for_session(session.id)
+            real_message = _find_real_user_message(past_turns)
+            if real_message:
+                user_message = real_message
         return await self._run_turn(
             session, user_message=user_message, referenced_element_ids=referenced_element_ids
         )
@@ -432,6 +519,10 @@ class SessionService:
             # result.metadata below, same as partial_generation_note; never persisted, or it would
             # keep re-announcing an old choice on later, unrelated turns.
             "style_note",
+            # A one-shot resume flag (post_turn's Laya-fallback-approval handling) — consumed by
+            # `orchestrator.py`'s `route()` for THIS turn only; left in `session.brief` it would
+            # force-route every later, unrelated turn in the session to the same specialist forever.
+            "_laya_approved_specialist",
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}
         result = result_state.get("result")

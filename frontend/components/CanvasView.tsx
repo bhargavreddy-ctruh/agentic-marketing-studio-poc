@@ -59,7 +59,7 @@ function toTiles(elements: CanvasElement[], versionInfo: Map<string, VersionInfo
       createdAt: el.created_at,
       producedBy: el.produced_by_specialist,
       description: el.description,
-      alignmentWarning: el.alignment_warning,
+      alignmentWarning: el.alignment_warning ?? undefined,
     }));
 }
 

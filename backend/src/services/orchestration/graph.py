@@ -31,7 +31,7 @@ from langgraph.graph import END, StateGraph
 from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
 from ...core.events import emit
-from ...core.exceptions import SpecialistFailed
+from ...core.exceptions import SpecialistFailed, SpecialistNotFound
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
@@ -80,6 +80,31 @@ _ELEMENT_TYPE_BY_TOOL = {
 # card sitting next to the image, never overwrite the image's own storage_ref with text (which
 # would corrupt/destroy it). Checked before deciding `update_existing_element_id` below.
 _ANNOTATION_ONLY_TOOLS = {"text_card_writer"}
+
+
+def _produced_ref(step) -> tuple[str | None, str | None]:
+    """Which tool call actually produced this step's result — a real, live-found bug (2026-09-23):
+    the original version of this (duplicated identically in `_direct_fix_node` and
+    `_dynamic_executor_node`) picked whichever tool call happened LAST in the agentic loop,
+    tool-agnostic. `composition_artist` legitimately calls `image_editor` (the real edit) and THEN
+    ALSO calls `text_card_writer` (a real, expected creative-brief card, per its own prompt) in the
+    same turn — "last call wins" silently discarded the real edit and replaced it with the text
+    card's own storage_ref instead, which downstream code (`_ANNOTATION_ONLY_TOOLS`'s OWN check,
+    just one step later) then correctly refuses to apply to the existing element — but by then the
+    real edit result is already gone, and a stray new TEXT element gets created in its place. A
+    live-reported real turn showed exactly this: the referenced image and the actually-produced
+    element were "totally different" — one was the real edited image (discarded), the other was
+    the fallback from the wrong tool call.
+
+    Fixed by preferring a REAL generation/edit result over an annotation-only side effect
+    regardless of call order — reusing the `_ANNOTATION_ONLY_TOOLS` distinction the code already
+    had, just applied at the point it actually matters. A specialist whose ENTIRE turn was
+    genuinely annotation-only (e.g. `narrator`, which only ever calls `text_card_writer`) still
+    gets that real result — this only changes the choice when a REAL result also exists."""
+    calls_with_ref = [c for c in reversed(step.tool_calls) if c.ok and c.data.get("storage_ref")]
+    real_result = next((c for c in calls_with_ref if c.tool_name not in _ANNOTATION_ONLY_TOOLS), None)
+    chosen = real_result or (calls_with_ref[0] if calls_with_ref else None)
+    return (chosen.data["storage_ref"], chosen.tool_name) if chosen else (None, None)
 
 
 # Multi-generation (2026-09-22) — a single request can genuinely ask for several DISTINCT
@@ -990,12 +1015,6 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             "request asks to change — do not generate an unrelated new one."
         )
 
-    def _produced_ref(step) -> tuple[str | None, str | None]:
-        for call in reversed(step.tool_calls):
-            if call.ok and call.data.get("storage_ref"):
-                return call.data["storage_ref"], call.tool_name
-        return None, None
-
     direct_fix_context = "\n\n".join(context_parts)
     emit("lead_started", lead="direct_fix", target_specialist=target)
     try:
@@ -1135,12 +1154,6 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             if latest_storage_ref:
                 step_context += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
                 
-            def _produced_ref(r) -> tuple[str | None, str | None]:
-                for call in reversed(r.tool_calls):
-                    if call.ok and call.data.get("storage_ref"):
-                        return call.data["storage_ref"], call.tool_name
-                return None, None
-
             # Only enforce asset generation for specialists that actually produce assets,
             # not for planning/strategy specialists (like reference_curator or palette_strategist)
             generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
@@ -1171,6 +1184,25 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             "allow_free_text": True
         }
         emit("lead_failed", lead="dynamic_executor", reason=exc.message)
+        return state
+    except SpecialistNotFound as exc:
+        # Real, live-found bug (2026-09-23): a raw HTTP 500 in production — a hallucinated
+        # specialist name in the plan (e.g. "style_board_planner", never registered anywhere)
+        # raised this UNCAUGHT here before, since only `SpecialistFailed` was handled. The real
+        # prevention is upstream now (`orchestrator.py` validates every plan step's specialist name
+        # against the real registry before this node ever runs), but this stays as a genuine
+        # defense-in-depth backstop — the same "never a raw crash, always a real disclosed message"
+        # principle every other Lead/direct_fix path in this file already follows.
+        log.error("dynamic_plan_unknown_specialist", extra={"_extra_error": str(exc)})
+        state["result"] = {
+            "message": f"The plan named a specialist that doesn't exist ({exc}). How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
+        emit("lead_failed", lead="dynamic_executor", reason=str(exc))
         return state
 
     if not latest_storage_ref:

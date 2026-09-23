@@ -43,31 +43,58 @@ class LayaProvider:
             return {}
 
     @classmethod
-    async def predict_choice(cls, state: str | dict, options: list[str]) -> str | None:
-        """Helper to get a single choice prediction."""
+    async def predict_choice(
+        cls,
+        state: str | dict,
+        options: list[str],
+        instructions: str = "Choose the option that best fits this state.",
+    ) -> str | None:
+        """Helper to get a single choice prediction.
+
+        Real, live-found bug (2026-09-23), three layered mismatches against the installed `laya`
+        library (0.3.7), all silently swallowed by `predict()`'s broad `except Exception` (or, for
+        the third, by a `.get()` on the wrong key returning `None`) — Laya's shadow-mode routing
+        check and its LLM-down fallback path have never actually run in this codebase; they only
+        ever no-op'd:
+        1. Every question dict must carry an `"instructions"` key — `Agent._check_question` raises
+           `ValueError("question 'q1': no 'instructions'; ...")` otherwise. Never set here before.
+        2. A `"choice"` question's options go under `"criteria"`, not `"options"`.
+        3. `agent.predict()`'s real return shape is `{"model", "answers": {"q1": {...}}, "usage"}`
+           — the per-question result is nested under `"answers"`, not a top-level key — and that
+           per-question dict's picked value is under `"choice"`, not `"label"`.
+        """
         questions = {
             "q1": {
                 "type": "choice",
-                "options": options
+                "instructions": instructions,
+                "criteria": list(options),
             }
         }
         res = await cls.predict(state, questions)
-        q1_res = res.get("q1")
-        if q1_res and q1_res.get("label"):
-            return q1_res["label"]
+        q1_res = (res.get("answers") or {}).get("q1")
+        if q1_res and q1_res.get("choice"):
+            return q1_res["choice"]
         return None
 
     @classmethod
     async def predict_noul(cls, state: str | dict, statement_context: str = "") -> float:
-        """Helper to get a probability (Noul). Returns 0.0 - 1.0"""
+        """Helper to get a probability (Noul). Returns 0.0 - 1.0.
+
+        Same real bug family as `predict_choice` above: a `"noul"` question also requires
+        `"instructions"` (the statement being evaluated) — this used to send `"context"`, a key the
+        library never reads; the result is nested under `res["answers"]["q1"]`, not `res["q1"]`;
+        and the probability field is `"noul"`, not `"p_true"`. All four combined meant every real
+        call raised or missed, silently falling back to the 0.5 default — `alignment_checker.py`'s
+        compliance check has never actually flagged anything real.
+        """
         questions = {
             "q1": {
                 "type": "noul",
-                "context": statement_context
+                "instructions": statement_context or "Is this statement true of the given state?",
             }
         }
         res = await cls.predict(state, questions)
-        q1_res = res.get("q1")
-        if q1_res and "p_true" in q1_res:
-            return float(q1_res["p_true"])
+        q1_res = (res.get("answers") or {}).get("q1")
+        if q1_res and "noul" in q1_res:
+            return float(q1_res["noul"])
         return 0.5

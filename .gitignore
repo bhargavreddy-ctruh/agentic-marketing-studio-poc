@@ -21,6 +21,7 @@ frontend/node_modules/
 frontend/.env.local
 frontend/.next/
 frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
 
 # --- OS cruft ---
 .DS_Store

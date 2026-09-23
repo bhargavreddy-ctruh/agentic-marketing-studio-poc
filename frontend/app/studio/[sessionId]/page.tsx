@@ -7,7 +7,7 @@ import CanvasView, { ReferencedElement } from "@/components/CanvasView";
 import NodeGraphView from "@/components/NodeGraphView";
 import GuardrailsSection from "@/components/GuardrailsSection";
 import { LiveEvent } from "@/lib/events";
-import { User, me } from "@/lib/auth";
+import { ApiError, User, me } from "@/lib/auth";
 
 type OutputMode = "canvas" | "node";
 
@@ -27,6 +27,10 @@ export default function StudioPage() {
 
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState<User | null>(null);
+  // Real, live-found bug (2026-09-23 frontend audit), same as `app/page.tsx`: `me()` rethrows
+  // anything besides a 401 (e.g. a real network failure when the backend is unreachable), which
+  // was unhandled here — an infinite "Loading…" screen with no way out.
+  const [authError, setAuthError] = useState<string | null>(null);
   const [refreshSignal, setRefreshSignal] = useState(0);
   const [referencedElements, setReferencedElements] = useState<ReferencedElement[]>([]);
   const [outputMode, setOutputMode] = useState<OutputMode>("canvas");
@@ -41,8 +45,9 @@ export default function StudioPage() {
   const [generatingKind, setGeneratingKind] = useState<"image" | "video" | "audio" | "text" | null>(null);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
 
-  useEffect(() => {
-    (async () => {
+  async function checkAuth() {
+    setAuthError(null);
+    try {
       const current = await me();
       if (!current) {
         router.replace("/login");
@@ -50,7 +55,13 @@ export default function StudioPage() {
       }
       setUser(current);
       setAuthChecked(true);
-    })();
+    } catch (err) {
+      setAuthError(err instanceof ApiError ? err.message : "the server didn't respond.");
+    }
+  }
+
+  useEffect(() => {
+    checkAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -118,6 +129,20 @@ export default function StudioPage() {
     chatPanelRef.current?.sendFreeText(`Generate a new ${kind}: ${description}`);
   }
 
+  if (authError) {
+    return (
+      <div className="flex h-screen w-screen flex-col items-center justify-center gap-3 text-sm text-neutral-500">
+        <p>Could not reach the backend: {authError}</p>
+        <button
+          onClick={() => checkAuth()}
+          className="rounded-lg border border-surface-700/50 px-4 py-1.5 text-surface-200 hover:bg-surface-800/60"
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
   if (!authChecked || !user) {
     return (
       <div className="flex h-screen w-screen items-center justify-center text-sm text-neutral-500">
@@ -143,8 +168,16 @@ export default function StudioPage() {
         )}
       </div>
 
-      {/* Top-left: back to workflows + the existing Canvas/Node output-mode toggle. */}
-      <div className="pointer-events-none absolute left-6 top-6 z-20 flex items-center gap-3 animate-fade-in-up">
+      {/* Top-left: back to workflows + the existing Canvas/Node output-mode toggle.
+       * Real, live-found bug (2026-09-23 frontend audit, confirmed not a testing-tool artifact):
+       * `animate-fade-in-up` on THIS `pointer-events-none` wrapper made its `pointer-events-auto`
+       * children stop receiving real mouse clicks (confirmed via a controlled test — removing just
+       * this one class, nothing else, made an identical click succeed) — every other
+       * `pointer-events-none`/`auto`-split wrapper in this codebase (ChatPanel's own wrapper,
+       * CanvasView's floating panels) either doesn't use this animation class or doesn't hit the
+       * same split pattern, and both click fine. Dropped here; the one-time fade-in was cosmetic,
+       * not worth real buttons being unclickable. */}
+      <div className="pointer-events-none absolute left-6 top-6 z-20 flex items-center gap-3">
         <button
           onClick={() => router.push("/")}
           className="pointer-events-auto flex items-center gap-2 rounded-full border border-surface-700/50 bg-surface-900/40 px-4 py-2 text-sm font-medium text-surface-200 shadow-xl backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:bg-surface-800/60 hover:text-white"

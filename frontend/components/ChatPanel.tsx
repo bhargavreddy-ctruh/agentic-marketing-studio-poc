@@ -176,8 +176,22 @@ function ChatPanel(
   // alongside this, since they answer a different question (which STEP is running) than this does
   // (what is the model actually REASONING, live).
   const [liveThinking, setLiveThinking] = useState("");
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Real, live-found bug (2026-09-23): ANY reply to a still-open prompt — not just "Try again",
+  // also a real ideation option pick or a plain free-text answer to a clarifying question — sent
+  // an EMPTY referencedElementIds, because the reference chip (`referencedElements` prop) is
+  // deliberately cleared right after the turn that first used it. Correct for a genuinely NEW
+  // typed message (a stale chip shouldn't leak into later, unrelated turns); wrong for a
+  // continuation, which isn't a new request, it's the same one still being resolved. Confirmed
+  // widespread via this session's own real chat history: many real turns across a full day
+  // (option picks like "Mid Right", free-text replies like "20% discount") all lost their
+  // original image reference the same way — backend then fell back to "most recently created
+  // element in the whole session", producing edits on the wrong asset entirely. Tracks the ids
+  // actually used by the last turn that had a real reference of its own, so `handleSend`/
+  // `handlePickOption` can resend the SAME reference for any continuation that doesn't supply a
+  // new one (see `isContinuationOfPrompt` below).
+  const lastReferencedIdsRef = useRef<string[] | undefined>(undefined);
 
   // Always show the latest chat content (2026-09-22, per an explicit user ask) — scrolls the
   // message list to the bottom whenever anything new appears: a message, live-streamed thinking,
@@ -227,6 +241,24 @@ function ChatPanel(
     setMessages((m) => [...m, { id: newId(), role: "user", text, referencedElements }]);
   }
 
+  /** Real, live-found bug (2026-09-23), broader than the "Try again" case fixed earlier today:
+   * confirmed via this session's own real chat history (many real turns over the day) that ANY
+   * continuation of a pending clarification — picking a real ideation option ("Mid Right"), or
+   * just typing a free-text answer to a question the backend asked ("20% discount") — silently
+   * sent an EMPTY referencedElementIds, not just a "Try again" click. Root cause is the same one
+   * `lastReferencedIdsRef` was built for: the reference chip is cleared right after the turn that
+   * first used it, so by the time the user replies to whatever the backend asks next, there's
+   * nothing left to resend. A continuation isn't a new request, it's the same one still being
+   * resolved, so it must keep the same reference unless the user explicitly picked a different one
+   * for this reply. Detected by checking whether the message this is replying to still had
+   * options/allowFreeText attached (i.e. it was a live, unresolved prompt) BEFORE
+   * `stripOptionsFromLastMessage` clears that marker below. */
+  function isContinuationOfPrompt(): boolean {
+    if (messages.length === 0) return false;
+    const last = messages[messages.length - 1];
+    return last.options !== undefined || last.allowFreeText !== undefined;
+  }
+
   function stripOptionsFromLastMessage() {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
@@ -246,7 +278,11 @@ function ChatPanel(
   async function handleSend(freeTextOverride?: string) {
     const text = freeTextOverride ?? input.trim();
     if (!text || loading) return;
+    const wasContinuation = isContinuationOfPrompt();
     setInput("");
+    // Collapse the auto-grown textarea back to one row — its height is set imperatively via
+    // inline style (`onChange` above), so clearing `input` alone wouldn't reset it.
+    if (inputRef.current) inputRef.current.style.height = "auto";
     stripOptionsFromLastMessage();
     appendUser(text, referencedElements && referencedElements.length > 0 ? referencedElements : undefined);
     setLoading(true);
@@ -260,11 +296,18 @@ function ChatPanel(
         sid = created.id;
         onSessionId(sid);
       }
-      
-      // Clear the UI reference immediately so it doesn't linger while generating
-      const idsToSend = referencedElements?.map(e => e.id);
+
+      // Clear the UI reference immediately so it doesn't linger while generating. A reply to a
+      // still-open prompt with no NEW reference of its own reuses the reference the prompt itself
+      // was about (see `isContinuationOfPrompt` above); anything else — including a fresh,
+      // unrelated message with no reference — genuinely has none, and resets what's "last".
+      const freshIds = referencedElements?.map(e => e.id);
+      const idsToSend = freshIds && freshIds.length > 0
+        ? freshIds
+        : wasContinuation ? lastReferencedIdsRef.current : freshIds;
+      lastReferencedIdsRef.current = idsToSend;
       onClearReference?.();
-      
+
       const { result: res, thinking, seconds } = await withNarration(sid, () =>
         postTurn(sid, { freeText: text, referencedElementIds: idsToSend }),
       );
@@ -285,14 +328,22 @@ function ChatPanel(
 
   async function handlePickOption(option: IdeationOption) {
     if (!sessionId || loading) return;
+    const wasContinuation = isContinuationOfPrompt();
     stripOptionsFromLastMessage();
     appendUser(option.label, referencedElements && referencedElements.length > 0 ? referencedElements : undefined);
     setLoading(true);
     try {
-      // Clear the UI reference immediately so it doesn't linger while generating
-      const idsToSend = referencedElements?.map(e => e.id);
+      // Clear the UI reference immediately so it doesn't linger while generating. Picking ANY
+      // option — not just "Try again" — is a reply to a still-open prompt, not a new request, so
+      // it reuses that prompt's own reference unless this pick came with a new one of its own
+      // (see `isContinuationOfPrompt`/`handleSend` above — same real bug, same fix, both paths).
+      const freshIds = referencedElements?.map(e => e.id);
+      const idsToSend = freshIds && freshIds.length > 0
+        ? freshIds
+        : wasContinuation ? lastReferencedIdsRef.current : freshIds;
+      lastReferencedIdsRef.current = idsToSend;
       onClearReference?.();
-      
+
       const { result: res, thinking, seconds } = await withNarration(sessionId, () =>
         postTurn(sessionId, { pickedOptionId: option.id, referencedElementIds: idsToSend }),
       );
@@ -676,12 +727,33 @@ function ChatPanel(
           handleSend();
         }}
       >
-        <input
+        {/* Real, live-found bug (per an explicit user ask: "add wrap or something, it keeps
+         * going, i cant see all the text at a time"): this used to be a single-line `<input>` —
+         * a longer message just scrolled sideways inside it instead of wrapping, so most of what
+         * you'd typed was invisible at once. A `<textarea>` wraps like every other message in
+         * this panel already does (`whitespace-pre-wrap` on `m.text` above); auto-grows with
+         * content up to a cap, then scrolls internally rather than pushing the rest of the layout
+         * around. Enter still sends (matching the old input's implicit submit-on-Enter); Shift+
+         * Enter inserts a real newline instead, same convention `GuardrailsSection.tsx`'s
+         * edit-in-place textarea already uses. */}
+        <textarea
           ref={inputRef}
-          className="flex-1 rounded-lg border border-surface-700/50 bg-surface-900/60 px-4 py-2.5 text-sm text-surface-50 placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-brand-500/50 transition-all"
+          rows={1}
+          className="max-h-32 flex-1 resize-none overflow-y-auto rounded-lg border border-surface-700/50 bg-surface-900/60 px-4 py-2.5 text-sm text-surface-50 placeholder-surface-500 focus:outline-none focus:ring-2 focus:ring-brand-500/50 transition-all"
           placeholder={sessionId ? "Reply, or describe changes…" : "What do you want to create?"}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            const el = e.target;
+            el.style.height = "auto";
+            el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSend();
+            }
+          }}
           disabled={loading}
         />
         {loading ? (
@@ -691,8 +763,19 @@ function ChatPanel(
               if (!sessionId) return;
               try {
                 await cancelTurn(sessionId);
+                // The in-flight turn's own promise (still awaited in `handleSend`/
+                // `handlePickOption`) rejects once the backend actually cancels, and THAT already
+                // clears `loading` via its own `finally` block — nothing else to do here on success.
               } catch (e) {
+                // Real, live-found bug (2026-09-23 frontend audit): a failed cancel call itself
+                // (e.g. the backend unreachable) only logged to console — `loading` stayed `true`
+                // forever with no user-visible error and no way out short of a page reload, since
+                // nothing else was going to clear it. Surfaces the failure and re-enables the
+                // input; if the original turn's own promise later resolves/rejects on its own, it
+                // still runs its normal handling too — redundant, not harmful.
                 console.error("Failed to cancel", e);
+                appendError(e);
+                setLoading(false);
               }
             }}
             className="rounded-lg bg-red-600/80 px-5 py-2.5 text-sm font-medium text-white hover:bg-red-500 transition-all shadow-lg hover:shadow-red-500/25"

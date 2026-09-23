@@ -66,12 +66,52 @@ async def test_hallucinated_target_specialist_falls_back_to_full_image():
 
 
 @pytest.mark.asyncio
-async def test_falls_back_to_keyword_heuristic_when_llm_unavailable():
-    """Both LLM gateways down — degrades to the old Phase 0 heuristic rather than crashing the
-    turn, per the orchestrator's own documented fallback behavior."""
+async def test_falls_back_to_keyword_heuristic_when_llm_and_laya_unavailable():
+    """Both the LLM gateways AND Laya are down — degrades to the old Phase 0 heuristic rather than
+    crashing the turn, per the orchestrator's own documented fallback chain.
+
+    Real, live-found bug (2026-09-23): `LayaProvider.predict_choice` silently failed on every real
+    call (three separate mismatches against the installed `laya` 0.3.7 API — see
+    `laya_provider.py`), always returning `None` — so this test passed for the wrong reason: it
+    never actually exercised "Laya also down," it accidentally always hit that branch because Laya
+    was broken. Now that Laya works, the same test must mock Laya failing explicitly to still test
+    the branch its own docstring describes; see the next test for the now-real Laya-succeeds path.
+
+    Also fixes a second, pre-existing, unrelated bug this same test masked: `_keyword_fallback_route`
+    (a parallel session's change) now falls through to `"dynamic"` by default for a message that
+    matches none of its keyword lists — not `"full_image"`, which this test asserted before this
+    fix and which was already stale on a clean base, confirmed via `git stash` earlier this
+    session. Updated to match the real current fallback behavior.
+    """
     state = {"user_message": "make me a hero shot for this product", "session_id": "s1"}
     provider = AsyncMock()
     provider.complete.side_effect = ProviderUnavailable("groq", "down")
-    with patch("src.services.orchestration.orchestrator.get_llm_provider", return_value=provider):
+    with (
+        patch("src.services.orchestration.orchestrator.get_llm_provider", return_value=provider),
+        patch(
+            "src.providers.llm.laya_provider.LayaProvider.predict_choice",
+            AsyncMock(return_value=None),
+        ),
+    ):
         result = await route(state)
-    assert result["route"] == "full_image"
+    assert result["route"] == "dynamic"
+
+
+@pytest.mark.asyncio
+async def test_asks_for_approval_via_laya_when_llm_unavailable_but_laya_isnt():
+    """LLM gateways down but Laya IS available: real documented fallback behavior is to ask the
+    user to confirm Laya's suggested specialist, not to silently degrade straight to the keyword
+    heuristic. Added 2026-09-23 alongside the `laya_provider.py` fix that made this path real."""
+    state = {"user_message": "make me a hero shot for this product", "session_id": "s1"}
+    provider = AsyncMock()
+    provider.complete.side_effect = ProviderUnavailable("groq", "down")
+    with (
+        patch("src.services.orchestration.orchestrator.get_llm_provider", return_value=provider),
+        patch(
+            "src.providers.llm.laya_provider.LayaProvider.predict_choice",
+            AsyncMock(return_value="composition_artist"),
+        ),
+    ):
+        result = await route(state)
+    assert result["route"] == "approval_required"
+    assert result["result"]["options"][0]["id"] == "laya_approve_composition_artist"

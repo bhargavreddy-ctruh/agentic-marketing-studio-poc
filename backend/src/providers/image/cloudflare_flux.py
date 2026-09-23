@@ -1,8 +1,14 @@
 """
-THE ONLY file that talks to Cloudflare Workers AI — used for image editing (and generation) via
-FLUX.2 [klein] 4B (`@cf/black-forest-labs/flux-2-klein-4b`), a real free-allocation alternative to
-HuggingFace's fal-ai sub-provider after that one started returning 402 Payment Required (a real,
-disclosed gap this fills, not a hypothetical).
+THE ONLY file that talks to Cloudflare Workers AI — FLUX.2 [klein] 4B
+(`@cf/black-forest-labs/flux-2-klein-4b`), a real free-allocation alternative to HuggingFace's
+fal-ai sub-provider after that one started returning 402 Payment Required (a real, disclosed gap
+this fills, not a hypothetical).
+
+NOT currently wired into `image_editor.py` (2026-09-24) — that tool now calls
+`replicate_provider.py`'s Qwen edit path instead, a real, disclosed, user-chosen tradeoff (full
+`aspect_ratio`/`negative_prompt`/`seed` support and no forced 512x512 downscale, at a real per-edit
+cost this free allocation didn't have). Left in place, not deleted, as a real available fallback if
+Qwen/Replicate is ever down — but nothing currently calls `get_cloudflare_flux_provider()`.
 
 Cloudflare's Workers AI REST API always wraps a model's own output in one response envelope,
 regardless of model: `{"result": {...}, "success": bool, "errors": [...], "messages": [...]}`.
@@ -126,8 +132,9 @@ class CloudflareFluxProvider(ImageGenProvider, ImageEditProvider):
         # forwarded — Cloudflare's docs for this model never confirmed a real width/height/
         # aspect_ratio request field, unlike the input-image constraints, which ARE documented.
         # Sending an unverified field risked a silent no-op or a real rejection; honest to drop it
-        # than guess. Currently unreachable in practice — image_editor.py only calls `edit()` — so
-        # this has no live impact, flagged rather than fixed further without real API confirmation.
+        # than guess. Nothing in this codebase currently calls this class at all (2026-09-24 —
+        # `image_editor.py` moved to Qwen; see this file's module docstring), so this has no live
+        # impact either way — flagged rather than fixed further without real API confirmation.
         image_bytes, mime_type = await self._run(fields={"prompt": prompt}, files=None)
         return ImageResult(image_bytes=image_bytes, mime_type=mime_type, provider_name="cloudflare_flux")
 

@@ -39,7 +39,16 @@ export class Camera {
 export function fitViewport(box: WorldBox, screenW: number, screenH: number, padding = 120): Viewport {
   if (!box.w && !box.h) return { x: screenW / 2, y: screenH / 2, scale: 1 };
   const scale = Math.min((screenW - padding * 2) / Math.max(box.w, 1), (screenH - padding * 2) / Math.max(box.h, 1), 1);
-  const s = Math.max(0.15, scale);
+  // Real, live-found bug (2026-09-23, reported as "the canvas is going black"): a long-lived
+  // session with many real elements spread across a full day's worth of real timestamps computes
+  // a genuinely tiny "everything fits" scale — confirmed live on a real 26-element session, the
+  // real computed scale hit this floor at 0.15, where a 200px tile renders at 30px, effectively
+  // invisible against the canvas's own dark background; almost the entire viewport reads as an
+  // empty black void even though every element is real and correctly positioned. Raised to 0.4 —
+  // a real trade-off, not a free fix: content that's spread out enough may no longer ALL fit in
+  // one screen at once, but what IS visible is now actually visible, and the real pan/zoom
+  // controls this canvas already has are the correct way to reach anything that doesn't.
+  const s = Math.max(0.4, scale);
   return {
     x: (screenW - box.w * s) / 2 - box.x * s,
     y: (screenH - box.h * s) / 2 - box.y * s,

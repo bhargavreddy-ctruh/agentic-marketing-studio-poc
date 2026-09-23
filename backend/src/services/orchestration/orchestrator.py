@@ -61,7 +61,7 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 4. **Base Decision on Latest Request:** The user's most recent message is the primary driver of intent.
 5. **Campaign Defaults (CRAZY & BOLD):** We are making this for elite marketing and creating campaigns. Image and video generations should be CRAZY, striking, and visually incredible. If the request is for a broad "campaign", autonomously build a robust plan (e.g. style/palette planning, generating 1-2 base images via illustrator, and applying promotional text via overlay_artist). Push the creative boundaries.
 6. **Context Guardrail:** If the request and the brief entirely lack a specific subject or product (e.g., the user just says "retry" but there is no product established), do NOT invent or guess a generic product. Instead, return a plan instructing the first specialist to fail and ask the user for clarification.
-7. **Editing Existing Assets:** If the user request is to modify, fix, or edit an existing referenced element (e.g., "edit this image", "strike out the price", "change the color"), you MUST use route 'direct_fix' and provide the 'target_specialist'. Do NOT use 'dynamic' for edits on existing assets. For image content edits (recoloring, changing subjects, adding/removing visual elements, modifying the image itself), use 'composition_artist'. Only use 'overlay_artist' for pure TEXT overlays (adding price tags, discount labels, promotional text ON TOP of an image).
+7. **Editing Existing Assets:** If the user request is to modify, fix, or edit an existing referenced element (e.g., "edit this image", "strike out the price", "change the color"), you MUST use route 'direct_fix' and provide the 'target_specialist'. Do NOT use 'dynamic' for edits on existing assets. For image content edits (recoloring, changing subjects, adding/removing visual elements, modifying the image itself), use 'composition_artist'. Only use 'overlay_artist' for pure TEXT overlays (adding price tags, discount labels, promotional text ON TOP of an image). This applies to 'dynamic' plans too: if a referenced element exists and the request is an edit to it, NEVER put a from-scratch generator (e.g. 'illustrator') as a plan step — that discards the referenced element and produces an unrelated new asset instead of the edit the user asked for. Either route 'direct_fix' to 'composition_artist' (preferred for a single edit), or, only if the request genuinely needs multiple steps, make the first 'dynamic' step an editing-capable specialist operating on the referenced element's storage_ref.
 8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
 </rules>
 
@@ -119,6 +119,23 @@ async def route(state: GraphState) -> GraphState:
         emit("route_decided", route="full_video", target_specialist=None, resumed=True)
         return state
 
+    # Resuming after a real, explicit user approval of Laya's fallback suggestion (2026-09-23,
+    # per a real user report: "Cancel is also creating llm task??" — the same fallthrough bug also
+    # meant "Yes, use X" never actually ran X, it just re-classified the approval text). Set once,
+    # consumed once, by `session_service.py::post_turn`'s Laya-fallback-approval handling — skips
+    # real classification entirely and goes straight to `direct_fix` with the specialist the user
+    # already explicitly approved, same "explicit state beats reclassifying" shape as the
+    # `video_stage` resume-check just above. Not a routing override of a MODEL's decision (the
+    # thing reverted earlier today) — this is honoring the user's OWN explicit choice, a different
+    # thing entirely.
+    laya_approved = brief_stage_check.get("_laya_approved_specialist")
+    if laya_approved in SPECIALIST_REGISTRY:
+        state["route"] = "direct_fix"
+        state["target_specialist"] = laya_approved
+        state["dynamic_plan"] = None
+        emit("route_decided", route="direct_fix", target_specialist=laya_approved, resumed=True)
+        return state
+
     # Both the raw message AND the merged brief are given to the classifier — a merged brief alone
     # loses "just fix X" framing once ideation paraphrases it into plain descriptive language
     # (Memory.md, Phase 3 conformance audit: a real bug found live this way — routing off the
@@ -152,7 +169,13 @@ async def route(state: GraphState) -> GraphState:
             f"are (e.g. the existing element is a logo and the new message asks for a car photo "
             f"unrelated to any logo), that is a NEW/DIFFERENT asset request, never direct_fix on "
             f"these elements — route to whichever full_* route matches what's actually being asked "
-            f"for instead."
+            f"for instead.\n"
+            f"If instead the message is asking to edit/modify/fix/add something ON one of these "
+            f"same elements (a price tag, a discount, a color change, a text strike-out, etc.), "
+            f"you MUST ground your plan in that element: route 'direct_fix' to 'composition_artist' "
+            f"(or 'overlay_artist' only for a pure text overlay), never route 'dynamic' with a "
+            f"from-scratch generator like 'illustrator' — that would throw away this exact element "
+            f"and produce an unrelated new one instead of the edit being asked for."
         )
     else:
         classification_context.append("An existing generated element is available to fix: no")
@@ -197,12 +220,48 @@ async def route(state: GraphState) -> GraphState:
             )
             chosen_route, target_specialist = "full_image", None
 
+        # Real, live-found bug (2026-09-23): a referenced-element edit ("Edit image with offer
+        # price of 15% on 30000...") got routed to 'dynamic' with an illustrator regeneration plan
+        # instead of 'direct_fix'/composition_artist — Rule 7 already said not to do this, but a
+        # real, live turn violated its own rule (classification fell back to a weaker local model
+        # under today's well-documented real Groq/OpenRouter rate-limiting, per
+        # `llm_router_falling_back_to_local_last_resort` in the real logs for this exact turn).
+        # First fix attempt was a keyword-pattern override forcing the route in code — rejected on
+        # review (2026-09-23): routing must stay model-driven, not hardcoded phrase-matching.
+        # Reverted. Real fix is upstream, in the prompt itself: Rule 7 above now explicitly extends
+        # to 'dynamic' plans (never a from-scratch generator when a referenced element should be
+        # edited), and the referenced-elements block built above restates that requirement right
+        # next to the actual element data, so even a weaker fallback model sees the constraint in
+        # the same breath as what it's constraining. No deterministic route-rewrite here — the
+        # model's own decision is trusted, same as every other route.
+        _msg_lower = (user_message or "").lower()
+
+        # Real, live-found bug (2026-09-23, a raw HTTP 500 in production): the `dynamic` route's
+        # multi-step plan never got the same validation `direct_fix`'s single `target_specialist`
+        # already has above — a hallucinated specialist name in ANY step (e.g. "style_board_planner",
+        # which was never registered anywhere in this codebase) went straight into
+        # `state["dynamic_plan"]` unchecked, then crashed `_dynamic_executor_node` with an uncaught
+        # `SpecialistNotFound` deep inside its execution loop — a raw 500, not a graceful degrade.
+        # Raising here routes it through the SAME already-tested fallback chain just below (Laya
+        # recommends a real specialist with real user approval, then a keyword heuristic) rather
+        # than inventing new, less-proven handling for a genuinely newer, less-hardened route.
+        if chosen_route == "dynamic" and dynamic_plan:
+            invalid_specialists = {
+                str(step.get("specialist")) for step in dynamic_plan
+                if step.get("specialist") not in SPECIALIST_REGISTRY
+            }
+            if invalid_specialists:
+                raise ValueError(
+                    f"model's dynamic plan named unregistered specialist(s): {sorted(invalid_specialists)!r}"
+                )
+
         # Code-level safety net: if the user explicitly says "image edit" or "edit image" (or
         # similar patterns), the intent is a visual modification via image_editor, not a text
         # overlay. The LLM often confuses the two when the request mentions prices/discounts,
         # because overlay_artist's description historically attracted those keywords. This
-        # deterministic check overrides the LLM when there's a clear mismatch.
-        _msg_lower = (user_message or "").lower()
+        # deterministic check overrides the LLM when there's a clear mismatch. (`_msg_lower` is
+        # computed just above.) Pre-existing (not part of the 2026-09-23 routing fix above); kept
+        # as-is since it's a narrower same-route specialist correction, not a route override.
         _IMAGE_EDIT_PATTERNS = ("image edit", "edit image", "edit this image", "edit the image", "strike the", "strike out")
         if (
             chosen_route == "direct_fix"

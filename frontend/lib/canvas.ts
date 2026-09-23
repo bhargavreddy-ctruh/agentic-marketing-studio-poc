@@ -37,6 +37,13 @@ export interface CanvasElement {
   // /motion prompt, voiceover line, etc. the backend recorded for it (`canvas_mapper.py`), never
   // fabricated; null only if genuinely nothing was ever recorded for this element.
   description: string | null;
+  // Real backend field (`backend/src/schemas/canvas/responses.py`'s `CanvasElementResponse`) that
+  // was never declared here — a real `tsc` gap found in the 2026-09-23 frontend audit
+  // (`CanvasView.tsx` already reads `el.alignment_warning` off the raw response, so it worked at
+  // runtime; the type just never caught it). Currently always null end-to-end — a "Laya decision
+  // model" warning that was never fully wired up on the backend — so this stays functionally
+  // inert until that's built, but the type should match what the backend actually returns.
+  alignment_warning: string | null;
 }
 
 export interface CanvasElementVersion {
