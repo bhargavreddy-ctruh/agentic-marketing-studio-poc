@@ -27,3 +27,9 @@ class SqliteBrandRepository:
     async def list_all(self) -> list[BrandProfileModel]:
         result = await self._db.execute(select(BrandProfileModel))
         return list(result.scalars().all())
+
+    async def list_for_user(self, user_id: str) -> list[BrandProfileModel]:
+        result = await self._db.execute(
+            select(BrandProfileModel).where(BrandProfileModel.user_id == user_id)
+        )
+        return list(result.scalars().all())

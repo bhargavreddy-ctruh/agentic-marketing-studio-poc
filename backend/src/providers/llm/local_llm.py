@@ -9,15 +9,19 @@ this shares the retry/backoff helper in `_openai_compatible.py` rather than dupl
 API key is needed — Ollama's local server is unauthenticated; `local_llm_api_key` is a placeholder
 value only, never checked by the server.
 
-Only ever attempted for TIER_1 (router.py's own decision) — raises ProviderUnavailable immediately
-for TIER_2/TIER_3 rather than silently running a model it was never sized or asked to run.
+TIER_1 uses this as its preferred primary (router.py's own decision, per-specialist opt-in via
+`prefer_local`). TIER_2/TIER_3 don't route here under normal conditions either — this model was
+sized for TIER_1's small/fast decisions, not the heavier ones — but router.py does fall back here
+as a genuine LAST RESORT for any tier once Groq AND OpenRouter have both failed (2026-09-21, a
+real, disclosed trade-off: a live illustrator (TIER_3) run hit free-tier exhaustion on every remote
+option at once; running locally at reduced expected quality is preferable to producing nothing).
+This file itself no longer refuses a non-TIER_1 call — router.py is where that decision belongs.
 """
 from __future__ import annotations
 
 from typing import Any, Callable
 
 from ...core.config import settings
-from ...core.exceptions import ProviderUnavailable
 from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMProvider, LLMResult, ModelTier
 
@@ -39,9 +43,6 @@ class LocalLLMProvider(LLMProvider):
         prefer_local: bool = True,  # unused here — LLMRouter already decided to call this provider
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
-        if tier != ModelTier.TIER_1:
-            raise ProviderUnavailable("local_llm", f"only configured for TIER_1, not {tier.name}")
-
         full_messages = [{"role": "system", "content": system}, *messages]
         return await call_openai_compatible_chat(
             provider_name="local_llm",

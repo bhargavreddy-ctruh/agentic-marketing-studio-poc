@@ -16,9 +16,10 @@ itself surfaces as a typed SpecialistFailed, never a silent hang.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Coroutine
 
 from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable, SpecialistFailed, ToolNotFound
@@ -95,6 +96,22 @@ async def run_specialist_agentic(
     """
     spec = get_specialist(specialist_name)
     system_prompt = spec.load_prompt()
+    
+    from ...core.events import get_current_guardrails_xml
+    guardrails_xml = get_current_guardrails_xml()
+    if guardrails_xml:
+        system_prompt += f"\n\n{guardrails_xml}\n"
+
+    system_prompt += (
+        "\n\n<MASTER_DIRECTIVE>\n"
+        "You are creating top-tier, crazy, eye-catching, bold marketing material. "
+        "If your instructions are ambiguous or entirely lack context about the subject you should be creating, "
+        "FAIL immediately and explicitly ask for clarity. "
+        "Never assume, guess, or hallucinate missing details. "
+        "To fail gracefully, do NOT return your standard output format. Instead, return EXACTLY this JSON: "
+        '{"error": "Your clarifying question or explanation of why you cannot proceed here"}'
+        "\n</MASTER_DIRECTIVE>"
+    )
     llm = get_llm_provider()
     tool_schemas = [to_openai_tool_schema(get_tool(name)) for name in spec.allowed_tools]
 
@@ -167,12 +184,35 @@ async def run_specialist_agentic(
                                 record = ToolCallRecord(
                                     tool_name=tool_name, args=args, ok=False, data={}, error=str(exc)
                                 )
+                            except Exception as exc:  # noqa: BLE001 — real, live-found gap
+                                # (2026-09-22): only `ToolNotFound` was ever caught here — any OTHER
+                                # real runtime failure inside a tool (a provider error, a malformed
+                                # storage_ref pointing at bytes that aren't actually an image, a
+                                # network timeout) propagated all the way up uncaught, crashing the
+                                # ENTIRE turn with a raw 500 instead of the honest, typed
+                                # "this tool call failed" result every other failure mode in this
+                                # codebase degrades to. A single misbehaving tool call (e.g. a
+                                # hallucinated storage_ref from a genuine model error elsewhere)
+                                # must never take down a whole request — the model gets a real
+                                # error message back and can decide what to do next, same as any
+                                # other failed tool call.
+                                log.warning(
+                                    "tool_call_raised",
+                                    extra={"_extra_tool": tool_name, "_extra_error": str(exc)},
+                                )
+                                record = ToolCallRecord(
+                                    tool_name=tool_name, args=args, ok=False, data={}, error=str(exc)
+                                )
                             tool_run.add_outputs({"ok": record.ok, "data": record.data, "error": record.error})
                     tool_calls.append(record)
+                    tool_content = {"ok": record.ok, "data": record.data, "error": record.error}
+                    if not record.ok:
+                        tool_content["_system_note"] = "If a tool fails, do not repeat the exact same call. If you cannot fulfill the request, return your final JSON response immediately."
+                    
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call.get("id", ""),
-                        "content": json.dumps({"ok": record.ok, "data": record.data, "error": record.error}),
+                        "content": json.dumps(tool_content),
                     })
                     log.info(
                         "specialist_tool_call",
@@ -191,6 +231,10 @@ async def run_specialist_agentic(
                 parsed = extract_json(result.text)
             except ValueError as exc:
                 raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
+                
+            if "error" in parsed and len(parsed.keys()) == 1:
+                # The model followed the MASTER_DIRECTIVE to fail gracefully
+                raise SpecialistFailed(specialist_name, parsed["error"])
 
             log.info(
                 "specialist_step_ok",
@@ -212,3 +256,96 @@ async def run_specialist_agentic(
         raise SpecialistFailed(
             specialist_name, f"did not produce a final answer after {max_iterations} tool-calling iterations"
         )
+
+
+async def run_specialist_with_review(
+    specialist_name: str,
+    *,
+    context: str,
+    needs_retry: Callable[[AgenticStepResult], bool],
+    reminder: str,
+    max_iterations: int = 6,
+    first_result: AgenticStepResult | None = None,
+) -> AgenticStepResult:
+    """Runs a specialist, then a real, bounded "did it actually do what it claims" check — a Lead
+    calling this instead of `run_specialist_agentic` directly is genuinely reviewing its sub-agent's
+    work rather than trusting a plain input->output call (Tasks.md #3, 2026-09-22).
+
+    Generalizes a corrective-retry pattern proven twice already this session on two unrelated real
+    bugs — Illustrator's final JSON implying an image was made when `base_image_generator` was
+    never actually called, and Sound Designer recommending a voiceover it never actually synthesized
+    via `text_to_speech` — instead of leaving every future Lead to hand-roll the same
+    check-then-retry logic again. `needs_retry` is a predicate, not a fixed tool list, because the
+    real check differs per case: Illustrator's is unconditional (producing SOME image is always
+    required), Sound Designer's is conditional (only when it claims "voiceover" specifically) — a
+    fixed "was any of these tools called" shape can't express both correctly.
+
+    Deliberately NOT a semantic/quality judgment call, and deliberately not applied after every
+    single specialist everywhere — that territory already belongs to `compliance_gate.py`, which
+    does real final-output critique-and-remediation against rendered pixels/format (Tasks.md #3's
+    own scope note: don't duplicate a guardrail that already exists elsewhere). This is narrower
+    and cheaper: did the specialist's own claim match what it actually did, structurally — exactly
+    the two real bugs found so far, generalized, not a broader creative-quality review.
+
+    `first_result` lets a caller that already ran the specialist's first attempt itself (e.g. as
+    part of an `asyncio.gather` alongside other, genuinely independent specialists — motion_lead.py's
+    Sound Designer runs concurrently with the video path, so its first call can't be made FROM
+    inside this function) still route the review/retry decision through this one shared place,
+    rather than reimplementing the check-and-log-and-retry logic a second time."""
+    result = first_result or await run_specialist_agentic(
+        specialist_name, context=context, max_iterations=max_iterations
+    )
+    if not needs_retry(result):
+        return result
+    log.warning("specialist_review_retry", extra={"_extra_specialist": specialist_name})
+    # Real Node Mode visibility (2026-09-22, per the user's own ask to reflect Task 3's review
+    # capability on screen): previously only logged, never emitted as a real SSE event, so a
+    # genuine Lead-catches-and-corrects-a-specialist moment was invisible in the live view — the
+    # retry's second `specialist_started`/`_completed` pair just silently overwrote the same
+    # card, with no sign a review/correction ever happened.
+    emit("specialist_review_retry", specialist=specialist_name)
+    return await run_specialist_agentic(
+        specialist_name, context=f"{context}\n\n{reminder}", max_iterations=max_iterations
+    )
+
+
+async def run_concurrent_specialists(
+    branches: dict[str, Coroutine[Any, Any, AgenticStepResult]],
+    *,
+    critical: set[str] = frozenset(),
+) -> dict[str, AgenticStepResult]:
+    """Runs several genuinely independent specialist calls concurrently (Tasks.md #4) — the
+    generalized form of the pattern `motion_lead.py` proved first (Sound Designer / Overlay Artist
+    alongside the video path) and a real bug in it exposed on independent review: plain
+    `asyncio.gather` with no `return_exceptions=True` doesn't cancel siblings on a failure, it only
+    propagates the first exception — so one branch failing used to silently discard another
+    branch's already-computed (sometimes already-PAID-for) real result along with it.
+
+    This function only ever changes HOW failure is handled, never WHICH specialists get called
+    concurrently — that remains a static, per-Lead, code-level decision (Tasks.md #4's own open
+    question, resolved by a real dependency audit across every Lead, not by having an LLM infer
+    independence at runtime: Visual Design Lead and Scene Lead are both genuinely serial — each
+    step's real output feeds the next step's real input, or edits the very same asset a prior step
+    just produced — and forcing concurrency there would be a real correctness risk, not an
+    optimization. Only Narrative Lead and Motion Lead have branches with no such real dependency).
+
+    A `critical` branch's real exception re-raises (there's nothing meaningful to return without
+    it — matches every other "let a genuine failure surface" pattern in this codebase). Every
+    other branch degrades to an empty `AgenticStepResult` (same shape Illustrator/Sound Designer's
+    own fallbacks already build by hand) with a logged warning, instead of losing a sibling's real
+    result to an unrelated branch's failure."""
+    names = list(branches.keys())
+    results = await asyncio.gather(*branches.values(), return_exceptions=True)
+    out: dict[str, AgenticStepResult] = {}
+    for name, result in zip(names, results):
+        if isinstance(result, BaseException):
+            if name in critical:
+                raise result
+            log.warning(
+                "concurrent_specialist_degraded",
+                extra={"_extra_specialist": name, "_extra_error": str(result)},
+            )
+            out[name] = AgenticStepResult(specialist_name=name, model="", data={}, tool_calls=[])
+        else:
+            out[name] = result
+    return out

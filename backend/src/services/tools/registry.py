@@ -54,6 +54,7 @@ def load_all_tools() -> None:
     """
     from . import (  # noqa: F401
         asset_mood_board_search,
+        audio_transcriber,
         audio_video_muxer,
         base_image_generator,
         base_video_generator,
@@ -63,6 +64,7 @@ def load_all_tools() -> None:
         discount_math_calculator,
         image_editor,
         product_lookup,
+        text_card_writer,
         text_overlay,
         text_to_speech,
         video_stitcher,

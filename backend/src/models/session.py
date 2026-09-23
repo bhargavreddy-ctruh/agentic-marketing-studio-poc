@@ -11,6 +11,13 @@ class SessionModel(Base, TimestampMixin):
     __tablename__ = "sessions"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    # Tasks_Workflows.md #2 — a session is now a real, owned "workflow": nullable only so this
+    # column can be added to the existing dev `poc.db` without a migration tool (real, disclosed
+    # constraint — see models/base.py's own docstring); every session created through the new
+    # authenticated flow always sets this. A null here means "created before auth existed" or
+    # "orphaned test data," never a real anonymous-by-design session going forward.
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), default="Untitled workflow")
     status: Mapped[str] = mapped_column(String(32), default="ideating")
     # The evolving brief as ideation proceeds — free-form JSON is fine here since it's this
     # session's own scratch state, not a contract crossing a layer boundary.

@@ -9,11 +9,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.v1.auth.routes import router as auth_router
 from .api.v1.brand.routes import router as brand_router
 from .api.v1.canvas.routes import router as canvas_router
 from .api.v1.mood_board.routes import router as mood_board_router
 from .api.v1.product.routes import router as product_router
 from .api.v1.sessions.routes import router as sessions_router
+from .api.v1.guardrails.routes import router as guardrails_router
 from .core.config import settings
 from .core.middleware.correlation import CorrelationIdMiddleware
 from .core.middleware.error_handler import register_error_handlers
@@ -64,11 +66,13 @@ app.add_middleware(
 )
 register_error_handlers(app)
 
+app.include_router(auth_router)
 app.include_router(sessions_router)
 app.include_router(canvas_router)
 app.include_router(brand_router)
 app.include_router(product_router)
 app.include_router(mood_board_router)
+app.include_router(guardrails_router)
 
 
 @app.get("/health")

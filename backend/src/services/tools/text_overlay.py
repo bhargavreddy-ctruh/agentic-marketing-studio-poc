@@ -11,12 +11,45 @@ draws it directly rather than asking a model to imagine it.
 from __future__ import annotations
 
 import io
+import os
+import urllib.request
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
 from ...core.local_storage import load_asset, save_asset
 from .base import Tool, ToolResult
 from .registry import register_tool
+
+_FONT_DIR = Path(__file__).parent / "fonts"
+_FONTS = {
+    "montserrat": "https://github.com/google/fonts/raw/main/ofl/montserrat/Montserrat-Bold.ttf",
+    "oswald": "https://github.com/google/fonts/raw/main/ofl/oswald/Oswald-Bold.ttf",
+    "playfair display": "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/PlayfairDisplay-Bold.ttf",
+    "roboto": "https://github.com/google/fonts/raw/main/apache/roboto/Roboto-Bold.ttf"
+}
+
+def _get_font(family: str, size: int):
+    family_key = family.lower().strip()
+    if family_key not in _FONTS:
+        return ImageFont.load_default(size=size)
+    
+    _FONT_DIR.mkdir(exist_ok=True, parents=True)
+    font_path = _FONT_DIR / f"{family_key.replace(' ', '_')}.ttf"
+    
+    if not font_path.exists():
+        try:
+            req = urllib.request.Request(_FONTS[family_key], headers={'User-Agent': 'Mozilla/5.0'})
+            with urllib.request.urlopen(req) as response, open(font_path, 'wb') as out_file:
+                out_file.write(response.read())
+        except Exception:
+            return ImageFont.load_default(size=size)
+            
+    try:
+        return ImageFont.truetype(str(font_path), size)
+    except Exception:
+        return ImageFont.load_default(size=size)
+
 
 _UNSUPPORTED_GLYPHS = {
     "—": "-", "–": "-",  # em dash, en dash
@@ -61,6 +94,8 @@ class TextOverlayTool(Tool):
             "storage_ref": {"type": "string"},
             "text": {"type": "string"},
             "placement": {"type": "string", "default": "lower third"},
+            "font_family": {"type": "string", "description": "e.g., Montserrat, Oswald, Playfair Display, Roboto"},
+            "text_color": {"type": "string", "description": "Hex color code, e.g., #ffffff"},
         },
         "required": ["storage_ref", "text"],
     }
@@ -69,6 +104,17 @@ class TextOverlayTool(Tool):
         storage_ref = str(args.get("storage_ref") or "")
         text = _sanitize_for_default_font(str(args.get("text") or "").strip())
         placement = str(args.get("placement") or "lower third").strip().lower()
+        font_family = str(args.get("font_family") or "montserrat")
+        text_color_hex = str(args.get("text_color") or "#ffffff").strip()
+        
+        try:
+            hex_str = text_color_hex.lstrip('#')
+            text_color = tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+            if len(text_color) == 3:
+                text_color = text_color + (255,)
+        except Exception:
+            text_color = (255, 255, 255, 255)
+
         if not storage_ref or not text:
             return ToolResult(ok=False, data={}, error="storage_ref and text are required")
 
@@ -81,7 +127,7 @@ class TextOverlayTool(Tool):
             base = opened.convert("RGBA")
         width, height = base.size
         font_size = max(18, width // 18)
-        font = ImageFont.load_default(size=font_size)
+        font = _get_font(font_family, font_size)
 
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
@@ -96,7 +142,7 @@ class TextOverlayTool(Tool):
             [x - pad, y - pad // 2, x + text_w + pad, y + text_h + pad],
             fill=(0, 0, 0, 170),
         )
-        draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+        draw.text((x, y), text, font=font, fill=text_color)
 
         combined = Image.alpha_composite(base, overlay).convert("RGB")
         buf = io.BytesIO()
@@ -106,6 +152,6 @@ class TextOverlayTool(Tool):
         new_ref = save_asset(
             result_bytes,
             "image/jpeg",
-            metadata={"text_overlay": text, "placement": placement, "edited_from": storage_ref},
+            metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "edited_from": storage_ref},
         )
         return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg"})

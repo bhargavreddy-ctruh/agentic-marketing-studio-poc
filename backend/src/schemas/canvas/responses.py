@@ -26,6 +26,20 @@ class CanvasElementResponse(BaseModel):
     # "failed" (compliance_gate.py, kicked off as a real background task right after generation —
     # session_service.py). "running" is the honest default the instant an element is created.
     compliance_status: str = "running"
+    # A real, short, honest label for what this element actually IS (2026-09-22, per an explicit
+    # user ask: "label everything properly and relative to what's generated") — pulled from
+    # whichever of the element's own real recorded metadata fields actually describes it
+    # (image_prompt/motion_prompt/voiceover_line/etc, see `canvas_mapper.py`'s own docstring),
+    # never fabricated. Same "curated DTO field, not the raw metadata dict" pattern `last_comment`/
+    # `text_content` already use.
+    description: str | None = None
+    # Real, already-generated text (a shot list, a scene description, a creative brief — the same
+    # kind of card the reference product shows on its own canvas) for `element_type: "text"`
+    # elements, which have no `storage_ref` at all (there's no binary asset — the text itself IS
+    # the content). Surfaced the same way `last_comment` already is: a real already-stored field,
+    # not metadata_json's full internal shape (Rules.md: layers talk through typed DTOs).
+    text_content: str | None = None
+    alignment_warning: str | None = None
 
 
 class CanvasStateResponse(BaseModel):

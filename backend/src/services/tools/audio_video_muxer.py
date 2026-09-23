@@ -59,18 +59,34 @@ class AudioVideoMuxerTool(Tool):
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            video_path = tmp_path / "in_video.mp4"
             audio_path = tmp_path / "in_audio.wav"
             output_path = tmp_path / "muxed.mp4"
+            
+            is_image = _video_mime.startswith("image/")
+            if is_image:
+                ext = _video_mime.split("/")[-1]
+                video_path = tmp_path / f"in_image.{ext}"
+            else:
+                video_path = tmp_path / "in_video.mp4"
+                
             video_path.write_bytes(video_bytes)
             audio_path.write_bytes(audio_bytes)
 
-            error = await run_ffmpeg(
-                "-i", str(video_path), "-i", str(audio_path),
-                "-c:v", "copy", "-c:a", "aac",
-                "-map", "0:v:0", "-map", "1:a:0", "-shortest",
-                str(output_path),
-            )
+            if is_image:
+                error = await run_ffmpeg(
+                    "-loop", "1", "-framerate", "25",
+                    "-i", str(video_path), "-i", str(audio_path),
+                    "-c:v", "libx264", "-tune", "stillimage", "-c:a", "aac",
+                    "-b:a", "192k", "-pix_fmt", "yuv420p", "-shortest",
+                    str(output_path),
+                )
+            else:
+                error = await run_ffmpeg(
+                    "-i", str(video_path), "-i", str(audio_path),
+                    "-c:v", "copy", "-c:a", "aac",
+                    "-map", "0:v:0", "-map", "1:a:0", "-shortest",
+                    str(output_path),
+                )
             if error or not output_path.exists():
                 return ToolResult(ok=False, data={}, error=error or "ffmpeg produced no output")
 

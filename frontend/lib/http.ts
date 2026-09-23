@@ -16,7 +16,16 @@ export class ApiError extends Error {
 }
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_BASE_URL}${path}`, init);
+  // Real auth (Tasks_Workflows.md #1-4) — every call needs the signed session cookie sent, since
+  // the backend and frontend are different ORIGINS (different ports), even though they're the
+  // same SITE for cookie purposes. `credentials: "include"` is what makes the browser attach it.
+  // `cache: "no-store"` is load-bearing, not defensive boilerplate: a real live bug (2026-09-22)
+  // showed a freshly-completed session's canvas rendering empty after a hard refresh even though
+  // curling the same endpoint directly returned the correct data — Next.js's own fetch cache (which
+  // defaults to caching GETs unless told not to, independent of any HTTP Cache-Control header the
+  // backend sends) was serving back the FIRST response ever made for that URL (the empty one, from
+  // before generation finished). Every API call here must always hit the network live.
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include", cache: "no-store" });
   if (!res.ok) {
     // The backend's real typed-error-to-JSON-response shape (core/middleware/error_handler.py) —
     // surfaced honestly rather than a generic "something went wrong".

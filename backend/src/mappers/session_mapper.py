@@ -17,6 +17,7 @@ class SessionMapper:
         )
         return SessionResponse(
             id=entity.id,
+            title=entity.title,
             status=entity.status,
             approval_mode=entity.approval_mode,
             brief=entity.brief,

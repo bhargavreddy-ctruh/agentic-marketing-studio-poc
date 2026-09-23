@@ -5,18 +5,23 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
-class StartSessionRequest(BaseModel):
-    initial_message: str = Field(..., min_length=1, max_length=4000)
+class CreateSessionRequest(BaseModel):
     # "auto" (default — existing behavior, no pauses) or "approve" (Memory.md, Phase 4: real
-    # per-stage pipeline gates and per-edit staging).
+    # per-stage pipeline gates and per-edit staging). No initial_message any more — creating the
+    # session and running its first turn are now two separate calls (session_service.py's
+    # `create_session` docstring explains why: the client needs the id back before it can open
+    # the SSE stream, so the first turn's live events aren't lost).
     approval_mode: str = Field(default="auto", pattern="^(auto|approve)$")
+    # A real, human-chosen workflow name (Tasks_Workflows.md #2) — optional; the model's own
+    # default ("Untitled workflow") covers a blank/omitted title rather than rejecting the request.
+    title: str | None = Field(default=None, max_length=200)
 
 
 class PostTurnRequest(BaseModel):
     # Exactly one of these should be set — a card pick, or free text (Architecture.md section 1d).
     picked_option_id: str | None = None
     free_text: str | None = None
-    # A user-picked canvas element this turn is explicitly about (Memory.md: "reference an
-    # element in chat") — grounds direct_fix against THAT element instead of whichever was most
+    # A list of user-picked canvas elements this turn is explicitly about (Memory.md: "reference an
+    # element in chat") — grounds direct_fix against THESE elements instead of whichever was most
     # recently created. Falls back to today's auto-inferred behavior when absent or stale.
-    referenced_element_id: str | None = None
+    referenced_element_ids: list[str] | None = None

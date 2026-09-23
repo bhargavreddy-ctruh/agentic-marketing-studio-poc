@@ -67,3 +67,17 @@ class ValidationFailed(AppError):
 
     def __init__(self, message: str):
         super().__init__(message, status_code=400)
+
+
+class Unauthorized(AppError):
+    """No valid session cookie was presented — the caller isn't authenticated at all."""
+
+    def __init__(self, message: str = "Not authenticated"):
+        super().__init__(message, status_code=401)
+
+
+class Forbidden(AppError):
+    """The caller is authenticated, but doesn't own the resource they're trying to act on."""
+
+    def __init__(self, message: str = "Not allowed to access this resource"):
+        super().__init__(message, status_code=403)

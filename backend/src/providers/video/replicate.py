@@ -37,7 +37,7 @@ log = get_logger(__name__)
 
 class ReplicateVideoProvider(VideoGenProvider):
     def __init__(self, api_key: str | None = None, model: str | None = None):
-        self._api_key = api_key or settings.replicate_api_key
+        self._api_key = api_key or settings.replicate_api_token
         self._model = model or settings.replicate_model
 
     async def generate(

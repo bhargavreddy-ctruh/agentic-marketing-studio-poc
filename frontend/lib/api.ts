@@ -6,7 +6,7 @@
  * "propose options + free text" pattern used across ideation AND every HITL gate, so this one
  * client type covers all of them — no separate shape per gate.
  */
-import { ApiError, request } from "./http";
+import { ApiError, request, API_BASE_URL } from "./http";
 
 export { ApiError };
 
@@ -43,6 +43,7 @@ export interface ScenePlan {
 
 export interface SessionResponse {
   id: string;
+  title: string;
   status: string;
   approval_mode: "auto" | "approve";
   brief: Record<string, unknown>;
@@ -51,20 +52,34 @@ export interface SessionResponse {
   next_prompt: IdeationPrompt | null;
 }
 
-export async function startSession(
-  initialMessage: string,
+/** Creates the session row only — no turn run yet. Split from the first message (2026-09-21) so
+ * the caller can open the SSE stream (`openEventStream`) for this id BEFORE sending the first
+ * `postTurn`, the same way every later turn already streams. See the backend's
+ * `SessionService.create_session` docstring for the live bug this fixes (turn 1's events used to
+ * be emitted before anyone could listen, and were silently lost). `title` (Tasks_Workflows.md #2)
+ * is the real, human-chosen workflow name shown on the home page's list — omitted falls back to
+ * the model's own "Untitled workflow" default. Requires being logged in (the backend reads the
+ * owning user from the session cookie, never from this request body). */
+export async function createSession(
   approvalMode: "auto" | "approve" = "auto",
+  title?: string,
 ): Promise<SessionResponse> {
   return request<SessionResponse>("/api/v1/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ initial_message: initialMessage, approval_mode: approvalMode }),
+    body: JSON.stringify({ approval_mode: approvalMode, title }),
   });
+}
+
+/** The current logged-in user's own workflows (Tasks_Workflows.md #2) — the home page's real
+ * data source, newest-updated first (matches the backend's own ordering). */
+export async function listSessions(): Promise<SessionResponse[]> {
+  return request<SessionResponse[]>("/api/v1/sessions");
 }
 
 export async function postTurn(
   sessionId: string,
-  args: { pickedOptionId?: string; freeText?: string; referencedElementId?: string },
+  args: { pickedOptionId?: string; freeText?: string; referencedElementIds?: string[] },
 ): Promise<SessionResponse> {
   return request<SessionResponse>(`/api/v1/sessions/${sessionId}/turns`, {
     method: "POST",
@@ -72,11 +87,53 @@ export async function postTurn(
     body: JSON.stringify({
       picked_option_id: args.pickedOptionId,
       free_text: args.freeText,
-      referenced_element_id: args.referencedElementId,
+      referenced_element_ids: args.referencedElementIds,
     }),
   });
 }
 
 export async function getSession(sessionId: string): Promise<SessionResponse> {
   return request<SessionResponse>(`/api/v1/sessions/${sessionId}`);
+}
+
+/** One real, persisted chat turn (`ChatTurnResponse`, 2026-09-22) — `thinking_text` is the real
+ * accumulated model text streamed live during that turn, null when nothing was ever streamed. */
+export interface ChatTurn {
+  id: string;
+  user_text: string;
+  thinking_text: string | null;
+  assistant_text: string | null;
+  created_at: string;
+  // Real, persisted Node Mode run history for this turn (2026-09-22, per an explicit user ask:
+  // "show all the runs even after a refresh") — see backend `models/chat_turn.py`'s own docstring.
+  events: Record<string, unknown>[];
+  referenced_elements?: {
+    id: string;
+    kind: "image" | "video" | "audio" | "text";
+    url: string;
+    description: string;
+  }[];
+}
+
+/** Real, persisted chat history — the actual fix for a page refresh losing the conversation
+ * (2026-09-22). Every prior turn, oldest first, each with its real user message, the real
+ * "thinking" streamed live during it, and the real final response. */
+export async function listTurns(sessionId: string): Promise<ChatTurn[]> {
+  const turns = await request<ChatTurn[]>(`/api/v1/sessions/${sessionId}/turns`);
+  for (const t of turns) {
+    if (t.referenced_elements) {
+      for (const el of t.referenced_elements) {
+        if (el.url?.startsWith("/api/")) {
+          el.url = `${API_BASE_URL}${el.url}`;
+        }
+      }
+    }
+  }
+  return turns;
+}
+
+export async function cancelTurn(sessionId: string): Promise<{ cancelled: boolean }> {
+  return request<{ cancelled: boolean }>(`/api/v1/sessions/${sessionId}/cancel`, {
+    method: "POST",
+  });
 }

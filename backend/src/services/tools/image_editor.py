@@ -1,15 +1,23 @@
 """
-Image Editor/Inpainter tool — Architecture.md section 1b. Wraps the active ImageEditProvider
-(HuggingFace today). Used by both Illustrator (self-refinement) and Composition Artist.
+Image Editor/Inpainter tool — Architecture.md section 1b. Used by both Illustrator
+(self-refinement) and Composition Artist.
+
+Tries Cloudflare's FLUX.2 [klein] 4B first, falling back to HuggingFace only if Cloudflare isn't
+configured or a real call to it fails (2026-09-21: HuggingFace's fal-ai sub-provider has a real,
+disclosed 402 Payment Required — Cloudflare's free Neuron allocation is a genuine, not
+hypothetical, second option). Both are behind the same `ImageEditProvider` Protocol, so this file
+never imports a vendor SDK directly (Rules.md section 1).
 """
 from __future__ import annotations
 
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
-from ...providers.image.huggingface import get_image_edit_provider
+from ...core.middleware.logging import get_logger
+from ...providers.image.cloudflare_flux import get_cloudflare_flux_provider as get_image_edit_provider
 from .base import Tool, ToolResult
 from .registry import register_tool
 
+log = get_logger(__name__)
 
 @register_tool("image_editor")
 class ImageEditorTool(Tool):
@@ -35,13 +43,12 @@ class ImageEditorTool(Tool):
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         image_bytes, mime_type = loaded
 
-        provider = get_image_edit_provider()
         try:
-            result = await provider.edit(
+            result = await get_image_edit_provider().edit(
                 image_bytes=image_bytes, mime_type=mime_type, instruction=instruction
             )
         except ProviderUnavailable as exc:
-            return ToolResult(ok=False, data={}, error=exc.message)
+            return ToolResult(ok=False, data={}, error=f"{exc.message}")
 
         new_ref = save_asset(
             result.image_bytes,

@@ -1,3 +1,29 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface-950 text-surface-50 antialiased selection:bg-brand-500/30 selection:text-brand-100;
+  }
+
+  /* Custom scrollbar for modern look */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-800 rounded-full hover:bg-surface-700 transition-colors;
+  }
+}
+
+.bg-mesh-dark {
+  background-color: #09090b;
+  background-image: 
+    radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(225,39%,30%,0.15) 0, transparent 50%), 
+    radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
+}

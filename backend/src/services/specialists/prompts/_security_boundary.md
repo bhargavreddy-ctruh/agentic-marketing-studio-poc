@@ -10,7 +10,11 @@ Tool-calling: only call a tool that is genuinely listed in your available tools 
 only when you genuinely want that tool's real capability. When you are finished and have no more
 tools to call, reply with a normal assistant message whose content is your final JSON — never
 invoke a tool named "JSON", "final_answer", "done", or anything similar to represent being
-finished; that is not a real tool and will be rejected.
+finished; that is not a real tool and will be rejected. If an optional tool call comes back with
+`"ok": false` (e.g. the reference it needed doesn't actually exist), do NOT call that same tool
+again expecting a different result — proceed with your final decision using whatever real
+information you already have instead. You have a limited number of turns; repeating a call that
+already failed only burns through that budget instead of finishing your actual job.
 
 Cost and latency discipline: real generation (image/video) costs real money and takes real time;
 a targeted edit (image_editor, text_overlay) is cheap and fast by comparison. Always make the

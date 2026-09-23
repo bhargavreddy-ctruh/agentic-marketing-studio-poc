@@ -7,14 +7,22 @@ per-element undo/redo.
 """
 from __future__ import annotations
 
+import uuid
+
 from fastapi import APIRouter, UploadFile
 from fastapi.responses import Response
 
-from ....core.exceptions import NotFoundError
+from ....core.exceptions import NotFoundError, ValidationFailed
 from ....core.local_storage import load_asset, save_asset
 from ....core.mime_sniff import sniff_image_mime
 from ....mappers.canvas_mapper import CanvasMapper
-from ....schemas.canvas.requests import CommentRequest, DirectEditRequest, TargetedRegenerateRequest
+from ....models.canvas_element import CanvasElementModel
+from ....schemas.canvas.requests import (
+    CommentRequest,
+    CreateElementRequest,
+    DirectEditRequest,
+    TargetedRegenerateRequest,
+)
 from ....schemas.canvas.responses import (
     AssetUploadResponse,
     CanvasElementResponse,
@@ -39,6 +47,50 @@ router = APIRouter(prefix="/api/v1/canvas", tags=["canvas"])
 async def get_canvas_state(session_id: str, repo: CanvasRepositoryDep) -> CanvasStateResponse:
     elements = await repo.list_for_session(session_id)
     return CanvasMapper.to_state_response(session_id, elements)
+
+
+def _element_type_from_mime(mime_type: str) -> str:
+    for prefix, element_type in (("image/", "image"), ("video/", "video"), ("audio/", "audio")):
+        if mime_type.startswith(prefix):
+            return element_type
+    raise ValidationFailed(f"Unsupported media type for a canvas element: {mime_type}")
+
+
+@router.post("/{session_id}/elements", response_model=CanvasElementResponse)
+async def create_element(
+    session_id: str,
+    body: CreateElementRequest,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+) -> CanvasElementResponse:
+    """The real backend half of "Upload Media" / "New Image" / "New Video" / "New Audio" / "Paste"
+    (right-click canvas menu, 2026-09-22) — places an already-uploaded asset (`POST /assets`)
+    directly onto the canvas as a brand-new element, no specialist/model call involved. No auth
+    dependency here, matching every other route in this router today (a real, pre-existing,
+    disclosed gap — see Tasks_Workflows.md #3's note on canvas routes) rather than introducing
+    inconsistent enforcement in one route alone."""
+    session = await sessions.get(session_id)
+    if session is None:
+        raise NotFoundError("Session", session_id)
+    loaded = load_asset(body.storage_ref)
+    if loaded is None:
+        raise NotFoundError("Asset", body.storage_ref)
+    _, mime_type = loaded
+    element = CanvasElementModel(
+        id=uuid.uuid4().hex,
+        session_id=session_id,
+        element_type=_element_type_from_mime(mime_type),
+        produced_by_specialist="user_upload",
+        version=1,
+        storage_ref=body.storage_ref,
+        metadata_json={"source": "user_upload"},
+        # Honest "not checked" — the compliance gate only ever runs on specialist-produced
+        # elements (session_service.py's background task); a user's own upload was never claimed
+        # to pass QA it was never actually put through.
+        compliance_status="disabled",
+    )
+    created = await canvas.add_element(element)
+    return CanvasMapper.to_response(created)
 
 
 @router.get("/assets/{storage_ref}")

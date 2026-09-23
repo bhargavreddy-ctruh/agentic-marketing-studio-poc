@@ -29,6 +29,7 @@ from ..tools.registry import get_tool
 from .brand_consistency_checker import check_brand_consistency
 from .format_technical_qa import check_format_technical
 from .visual_fidelity_checker import check_visual_fidelity
+from .alignment_checker import check_alignment
 
 log = get_logger(__name__)
 
@@ -62,7 +63,30 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
     format_qa = await check_format_technical(
         storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")
     )
-    return {"brand_consistency": brand, "visual_fidelity": visual, "format_technical_qa": format_qa}
+    
+    # We retrieve the original user_message from the turn history in the DB, but since the compliance 
+    # gate doesn't easily have it passed in, we can fetch it via the element's session ID if needed.
+    # Actually, we can fetch the most recent user turn for this session here.
+    user_message = ""
+    async with async_session_factory() as db:
+        from ...repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
+        from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+        element = await SqliteCanvasRepository(db).get_element_by_storage_ref(storage_ref)
+        if element:
+            turns = await SqliteChatTurnRepository(db).list_for_session(element.session_id)
+            if turns:
+                user_message = turns[-1].user_text
+    
+    alignment = await check_alignment(
+        user_message=user_message, generation_prompt_text=generation_prompt_text
+    )
+    
+    return {
+        "brand_consistency": brand, 
+        "visual_fidelity": visual, 
+        "format_technical_qa": format_qa,
+        "alignment": alignment
+    }
 
 
 def _collect_violations(checks: dict) -> list[str]:
@@ -112,7 +136,16 @@ async def run_compliance_gate(
     checks = await _run_checks(
         storage_ref=element.storage_ref, metadata=metadata, element_type=element.element_type
     )
-    overall_passed = all(bool(c.get("passed")) for c in checks.values())  # worst_of
+    
+    # Check if alignment failed and append it as a non-blocking warning metadata
+    alignment_check = checks.get("alignment", {})
+    if not alignment_check.get("passed") and alignment_check.get("violations"):
+        metadata["alignment_warning"] = alignment_check["violations"][0]
+        element.metadata_json = metadata
+        element = await canvas.update_element(element)
+        
+    # alignment is deliberately excluded from worst_of so it doesn't force a retry
+    overall_passed = all(bool(c.get("passed")) for k, c in checks.items() if k != "alignment")  # worst_of
 
     remediation: dict | None = None
     if not overall_passed and allow_remediation and element.element_type == "image":

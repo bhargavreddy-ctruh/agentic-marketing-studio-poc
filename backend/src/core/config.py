@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     # "passed".
     compliance_qa_enabled: bool = True
 
+    # --- Multi-generation (graph.py, 2026-09-22) — a single request can ask for several DISTINCT
+    # images/videos (e.g. "2 images, one pink one green"). Genuinely INDEPENDENT variants (neither
+    # needs the other's real result to exist first) run concurrently by default for speed; a
+    # DEPENDENT sequence (e.g. "generate a car, then a video based on that exact image") always
+    # runs sequentially regardless of this flag — that's a real correctness requirement, not a
+    # preference, since a dependent step literally cannot start before the one it depends on
+    # produces a real result. Set to false to force EVERY multi-generation request fully
+    # sequential, independent variants included — real cost/predictability control, especially for
+    # video: each independent video variant is its own real, separate paid Replicate render, so
+    # "parallel" here directly means "spend on N renders at once" rather than one at a time.
+    multi_generation_parallel_enabled: bool = True
+
     # --- Live "LLM thinking" streaming (_openai_compatible.py, per the user's explicit ask,
     # 2026-09-21) — real streamed text fragments, emitted live via the existing SSE event bus as
     # they arrive from the provider, instead of only ever seeing a node's final result once it's
@@ -89,13 +101,25 @@ class Settings(BaseSettings):
     # returned a `brand_kit_lookup` call with real arguments.
     local_llm_base_url: str = "http://localhost:11434/v1"
     local_llm_api_key: str = "ollama"  # unauthenticated local server; never checked by Ollama
-    local_llm_model_tier_1: str = "qwen2.5:3b"
+    local_llm_model_tier_1: str = "qwen2.5:7b"
 
     # --- Image generation ---
     pollinations_base_url: str = "https://image.pollinations.ai"
     huggingface_api_token: str | None = None
     huggingface_base_url: str = "https://api-inference.huggingface.co"
     huggingface_image_edit_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
+
+    # --- Image editing (Cloudflare Workers AI, FLUX.2 [klein] 4B) — a real second option for
+    # image_editor.py, added because HuggingFace's fal-ai sub-provider was hitting a real 402
+    # Payment Required (Memory.md's disclosed gap). Cloudflare gives a 10,000-Neuron/day free
+    # allocation shared across all Workers AI models on the account; this model costs ~5.37
+    # Neurons per 512x512 input tile and ~26.05 per 512x512 output tile (Cloudflare's own pricing
+    # page) — genuinely free at this project's volume, not "free" in the vaguer sense. Preferred
+    # over HuggingFace when both are configured (image_editor.py), since it doesn't share HF's
+    # exhausted fal-ai credits.
+    cloudflare_account_id: str | None = None
+    cloudflare_api_token: str | None = None
+    cloudflare_flux_model: str = "@cf/black-forest-labs/flux-2-klein-4b"
 
     # --- Text-to-speech (local, not a remote provider) ---
     # Confirmed live (Memory.md): HuggingFace's own free `hf-inference` serverless tier hosts NO
@@ -120,7 +144,7 @@ class Settings(BaseSettings):
     # once a real key is added, not because fal.ai's provider code was wrong.
     # prunaai/p-video specifically chosen per the user's own example: a genuinely light, fast
     # model ("generates a video in under 10 seconds") — ideal for testing, not a guess.
-    replicate_api_key: str | None = None
+    replicate_api_token: str | None = None
     replicate_model: str = "prunaai/p-video"
 
     # --- Legacy providers (registered, inactive by default — see Rules.md section 6) ---
@@ -137,6 +161,13 @@ class Settings(BaseSettings):
     # Comma-separated allowed origins for the Next.js frontend (Phase 4a) — config-driven per
     # Rules.md section 2, not hardcoded into main.py itself.
     frontend_origins: str = "http://localhost:3000"
+
+    # --- Auth (Tasks_Workflows.md #1) — signs the session cookie's HMAC (core/security.py).
+    # A real dev-only default so the app still boots with zero setup, per the project's own
+    # "scaffold with placeholders" pattern — MUST be overridden via .env for anything beyond a
+    # single developer's local machine, since anyone who has this value can forge a valid login.
+    auth_secret_key: str = "dev-only-insecure-secret-change-in-.env"
+    auth_session_ttl_seconds: int = 60 * 60 * 24 * 30  # 30 days
 
 
 settings = Settings()

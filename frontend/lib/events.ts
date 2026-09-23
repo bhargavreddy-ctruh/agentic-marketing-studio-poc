@@ -19,7 +19,11 @@ export function openEventStream(
   sessionId: string,
   onEvent: (event: LiveEvent) => void,
 ): () => void {
-  const es = new EventSource(`${API_BASE_URL}/api/v1/sessions/${sessionId}/events`);
+  // withCredentials: true — the events route is now ownership-checked (Tasks_Workflows.md #2),
+  // so the signed session cookie must actually be sent; EventSource doesn't do this by default.
+  const es = new EventSource(`${API_BASE_URL}/api/v1/sessions/${sessionId}/events`, {
+    withCredentials: true,
+  });
   es.onmessage = (e) => {
     try {
       onEvent(JSON.parse(e.data));
@@ -52,6 +56,19 @@ export interface PipelineNode {
   /** Real tool calls this node made, in the order they actually happened. */
   tools: { tool: string; ok: boolean }[];
   reason?: string;
+  /** Client-observed timestamps (`event._receivedAt`, stamped in page.tsx as each SSE event
+   * arrives) — an honest proxy for real timing, not exact server-side instrumentation (the
+   * backend's events carry no timestamp of their own). `startedAt` is set the first time this
+   * node shows any activity; `endedAt` when it genuinely finishes (completed/failed). Used by
+   * `assignLanes()` below to detect real overlap between nodes — Tasks.md #2. */
+  startedAt?: number;
+  endedAt?: number;
+  /** True once a real `specialist_review_retry` event fires for this node (Tasks.md #3, surfaced
+   * in Node Mode 2026-09-22) — a Lead genuinely caught this specialist's first attempt not
+   * matching its own claim and sent it back with a correction, not a silent input->output call.
+   * `endedAt` naturally ends up reflecting when the RETRY finished, not the first attempt — an
+   * honest longer real duration for a card that needed two tries. */
+  retried?: boolean;
 }
 
 function nodeIdentity(nodeName: string): { id: string; label: string; kind: PipelineNode["kind"] } {
@@ -68,8 +85,16 @@ function nodeIdentity(nodeName: string): { id: string; label: string; kind: Pipe
 export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
   const nodes = new Map<string, PipelineNode>();
   const order: string[] = [];
+  // Real turn separation (2026-09-22, per an explicit user ask: "show all the runs even after a
+  // refresh") — restoring MULTIPLE past turns' persisted events concatenated into one array means
+  // a bare id like "ideation" or "lead:visual_design_lead" would otherwise collide across turns,
+  // and each later turn would silently overwrite the previous turn's card in place instead of
+  // getting its own. Namespacing every id by which turn it belongs to (bumped on each real
+  // `turn_started`) keeps every turn's own real run visible as its own set of cards.
+  let turnIndex = -1;
 
-  function ensure(id: string, label: string, kind: PipelineNode["kind"]): PipelineNode {
+  function ensure(rawId: string, label: string, kind: PipelineNode["kind"]): PipelineNode {
+    const id = `t${turnIndex}:${rawId}`;
     let node = nodes.get(id);
     if (!node) {
       node = { id, label, kind, status: "pending", thinking: "", tools: [] };
@@ -79,15 +104,34 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
     return node;
   }
 
+  // First activity stamps `startedAt`; a genuine finish stamps `endedAt` — both read from the
+  // event's own client-receipt time (page.tsx), never `Date.now()` called here (this function
+  // must stay a pure reduction over `events`, re-derivable identically on every render).
+  function touchStart(n: PipelineNode, event: LiveEvent): void {
+    if (n.startedAt == null && typeof event._receivedAt === "number") n.startedAt = event._receivedAt;
+  }
+  function touchEnd(n: PipelineNode, event: LiveEvent): void {
+    if (typeof event._receivedAt === "number") n.endedAt = event._receivedAt;
+  }
+
   for (const event of events) {
     switch (event.type) {
-      case "ideation_started":
-        ensure("ideation", "Ideation", "ideation").status = "running";
+      case "turn_started": {
+        turnIndex += 1;
         break;
+      }
+      case "ideation_started": {
+        const n = ensure("ideation", "Ideation", "ideation");
+        n.status = "running";
+        touchStart(n, event);
+        break;
+      }
       case "ideation_completed": {
         const n = ensure("ideation", "Ideation", "ideation");
         n.status = "completed";
         n.output = event.ready ? "Brief ready" : "Needs more detail";
+        touchStart(n, event);
+        touchEnd(n, event);
         break;
       }
       case "route_decided": {
@@ -96,38 +140,71 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
         n.output = event.target_specialist
           ? `${event.route} → ${event.target_specialist}`
           : String(event.route ?? "");
+        touchStart(n, event);
+        touchEnd(n, event);
         break;
       }
-      case "lead_started":
-        ensure(`lead:${event.lead}`, String(event.lead), "lead").status = "running";
+      case "lead_started": {
+        const n = ensure(`lead:${event.lead}`, String(event.lead), "lead");
+        n.status = "running";
+        touchStart(n, event);
         break;
-      case "lead_completed":
-        ensure(`lead:${event.lead}`, String(event.lead), "lead").status = "completed";
+      }
+      case "lead_completed": {
+        const n = ensure(`lead:${event.lead}`, String(event.lead), "lead");
+        n.status = "completed";
+        touchStart(n, event);
+        touchEnd(n, event);
         break;
+      }
       case "lead_failed": {
         const n = ensure(`lead:${event.lead}`, String(event.lead), "lead");
         n.status = "failed";
         n.reason = String(event.reason ?? "");
+        touchStart(n, event);
+        touchEnd(n, event);
         break;
       }
-      case "specialist_started":
-        ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist").status = "running";
+      case "specialist_started": {
+        const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
+        n.status = "running";
+        touchStart(n, event);
         break;
+      }
       case "specialist_completed": {
         const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
         n.status = "completed";
         n.output = `${event.tool_call_count} tool call${event.tool_call_count === 1 ? "" : "s"}`;
+        touchStart(n, event);
+        touchEnd(n, event);
         break;
       }
       case "specialist_failed": {
         const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
         n.status = "failed";
         n.reason = String(event.reason ?? "");
+        touchStart(n, event);
+        touchEnd(n, event);
+        break;
+      }
+      case "specialist_review_retry": {
+        // Real Task 3 visibility (Tasks.md, 2026-09-22): a Lead genuinely caught this
+        // specialist's first attempt not matching its own claim and sent it back corrected —
+        // marked here so the card can show it, rather than the retry's second start/complete
+        // pair silently overwriting the first with no sign a review ever happened. A visible
+        // divider is inserted into the accumulated thinking text so the two attempts read as
+        // two real turns, not one run-on stream.
+        const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
+        n.retried = true;
+        n.status = "running";
+        n.thinking += n.thinking ? "\n\n↻ reviewed — retrying with a correction…\n\n" : "";
+        touchStart(n, event);
         break;
       }
       case "tool_call": {
         const n = ensure(`specialist:${event.specialist}`, String(event.specialist), "specialist");
         n.tools.push({ tool: String(event.tool ?? ""), ok: Boolean(event.ok) });
+        touchStart(n, event);
         break;
       }
       case "llm_delta": {
@@ -135,6 +212,7 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
         const n = ensure(id, label, kind);
         if (n.status === "pending") n.status = "running";
         n.thinking += String(event.text ?? "");
+        touchStart(n, event);
         break;
       }
       default:
@@ -143,6 +221,88 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
   }
 
   return order.map((id) => nodes.get(id)!);
+}
+
+/** One "lane" of nodes that don't genuinely overlap in time — nodes are packed into the first
+ * lane whose last-placed node has already finished before this one started (classic interval
+ * scheduling), so two nodes sharing a lane are guaranteed sequential, and two nodes that DO
+ * overlap always land in different lanes. Nodes with no real timing (`startedAt` never stamped —
+ * an event that arrived with no `_receivedAt`, or a node that only ever appeared in `tool_call`
+ * without its own `_started`) fall back to one node per lane in event order, never guessed as
+ * parallel with no real evidence. */
+export interface LaneAssignment {
+  node: PipelineNode;
+  lane: number;
+}
+
+export function assignLanes(nodes: PipelineNode[]): LaneAssignment[] {
+  const timed = nodes.filter((n) => n.startedAt != null);
+  const untimed = nodes.filter((n) => n.startedAt == null);
+  const sorted = [...timed].sort((a, b) => a.startedAt! - b.startedAt!);
+
+  const laneEnds: number[] = []; // last real/ongoing end time occupying each lane
+  const result: LaneAssignment[] = [];
+  const now = Date.now();
+
+  for (const node of sorted) {
+    const start = node.startedAt!;
+    const end = node.endedAt ?? now; // still running — treat as ongoing through "now"
+    let lane = laneEnds.findIndex((laneEnd) => laneEnd <= start);
+    if (lane === -1) {
+      lane = laneEnds.length;
+      laneEnds.push(end);
+    } else {
+      laneEnds[lane] = end;
+    }
+    result.push({ node, lane });
+  }
+
+  // Untimed nodes (real, just no receipt-time evidence) each get their own trailing lane —
+  // visually sequential, honestly reflecting that no overlap was ever actually observed for them.
+  let nextLane = laneEnds.length;
+  for (const node of untimed) {
+    result.push({ node, lane: nextLane });
+    nextLane += 1;
+  }
+
+  return result;
+}
+
+/** Groups lane assignments into left-to-right "waves" for rendering — nodes in the same wave
+ * share screen space as parallel columns; consecutive waves connect with an arrow. A wave is one
+ * maximal run of nodes (in real start order) that keep landing in previously-unseen lanes without
+ * a lane-reset — i.e. genuinely running at the same time as their wave-mates, per `assignLanes`'
+ * own overlap detection, not just adjacent in the list. */
+export function buildWaves(assignments: LaneAssignment[]): PipelineNode[][] {
+  // Real, live-found bug (2026-09-22, independent review): untimed nodes each get a unique lane
+  // from `assignLanes` (by design — "visually sequential"), but lanes never repeating among them
+  // meant the loop below never saw a reason to start a new wave, so every untimed node ended up
+  // clumped into a single wave together — rendering as falsely "parallel". Untimed nodes are
+  // handled separately here, each forced into its own trailing singleton wave, matching the
+  // documented intent; only real, timed nodes go through the lane-repeat wave-grouping logic.
+  const timed = assignments.filter((a) => a.node.startedAt != null);
+  const untimed = assignments.filter((a) => a.node.startedAt == null);
+  const byStart = [...timed].sort((a, b) => a.node.startedAt! - b.node.startedAt!);
+
+  const waves: PipelineNode[][] = [];
+  let currentWave: LaneAssignment[] = [];
+  let seenLanes = new Set<number>();
+
+  for (const item of byStart) {
+    if (currentWave.length > 0 && seenLanes.has(item.lane)) {
+      // This lane already has a node in the current wave — a genuinely new wave starts (the
+      // previous occupant of this lane must have already finished for this node to reuse it).
+      waves.push(currentWave.map((a) => a.node));
+      currentWave = [];
+      seenLanes = new Set();
+    }
+    currentWave.push(item);
+    seenLanes.add(item.lane);
+  }
+  if (currentWave.length > 0) waves.push(currentWave.map((a) => a.node));
+
+  for (const item of untimed) waves.push([item.node]);
+  return waves;
 }
 
 /** Turns one real backend event into one short, human-readable narration line — no event type
@@ -169,6 +329,8 @@ export function describeEvent(event: LiveEvent): string | null {
       return `✅ ${event.specialist} done (${event.tool_call_count} tool call${event.tool_call_count === 1 ? "" : "s"})`;
     case "specialist_failed":
       return `❌ ${event.specialist} failed — ${event.reason}`;
+    case "specialist_review_retry":
+      return `↻ ${event.specialist} reviewed — retrying with a correction`;
     case "tool_call":
       return `${event.ok ? "🔧" : "⚠️"} ${event.specialist} called ${event.tool}`;
     default:

@@ -27,6 +27,14 @@ if Groq itself is ever unavailable.
 If OPENROUTER_API_KEY isn't set, the fallback attempt still runs and fails with its own clear
 ProviderUnavailable("openrouter", "OPENROUTER_API_KEY is not set") — never silently swallowed, so
 a caller always learns the real reason the whole call failed.
+
+LAST-RESORT LOCAL FALLBACK, any tier (2026-09-21): a real live outage found Groq AND every free
+OpenRouter model for a tier rate-limited at once (illustrator, TIER_3) — the user explicitly asked
+to use the local model rather than fail outright. Rather than flip TIER_2/TIER_3 to prefer local
+(which would trade away quality on every normal call, not just outages), this only reaches for
+local_llm as the very last thing tried, after Groq AND OpenRouter have both already failed —
+quality priority is unchanged in the normal case, and a real request only degrades to the smaller
+local model instead of failing outright during a genuine free-tier outage.
 """
 from __future__ import annotations
 
@@ -77,11 +85,23 @@ class LLMRouter(LLMProvider):
                 on_delta=on_delta,
             )
         except ProviderUnavailable as exc:
+            groq_error = exc
             log.warning(
                 "llm_router_falling_back_to_openrouter",
                 extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
             )
+
+        try:
             return await self._fallback.complete(
+                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                on_delta=on_delta,
+            )
+        except ProviderUnavailable as exc:
+            log.warning(
+                "llm_router_falling_back_to_local_last_resort",
+                extra={"_extra_tier": tier.name, "_extra_groq_error": groq_error.message, "_extra_openrouter_error": exc.message},
+            )
+            return await self._local.complete(
                 tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
                 on_delta=on_delta,
             )

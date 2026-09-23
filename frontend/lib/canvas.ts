@@ -27,6 +27,16 @@ export interface CanvasElement {
   // background task right after generation, so an element can genuinely be "running" for a few
   // seconds after it first appears on canvas, not just eventually "passed"/"failed".
   compliance_status: "running" | "passed" | "failed" | "disabled";
+  // Real, already-generated text (a shot list, a scene description, a creative brief) for
+  // `element_type: "text"` elements — those have no `storage_ref` at all, since there's no binary
+  // asset; the text itself IS the content (2026-09-22, matching the reference product's own
+  // "Creative Brief / Shot List" canvas cards).
+  text_content: string | null;
+  // A real, short, honest label for what this element actually IS (2026-09-22, per an explicit
+  // user ask: "label everything properly and relative to what's generated") — the actual image
+  // /motion prompt, voiceover line, etc. the backend recorded for it (`canvas_mapper.py`), never
+  // fabricated; null only if genuinely nothing was ever recorded for this element.
+  description: string | null;
 }
 
 export interface CanvasElementVersion {
@@ -72,6 +82,25 @@ export async function uploadAsset(file: Blob): Promise<{ storage_ref: string; mi
   const form = new FormData();
   form.append("file", file);
   return request(`/api/v1/canvas/assets`, { method: "POST", body: form });
+}
+
+/** Places an already-uploaded asset directly onto the canvas as a brand-new element — the real
+ * backend half of "Upload Media" / "New Image/Video/Audio" / "Paste" (right-click canvas menu,
+ * 2026-09-22). Callers upload first via `uploadAsset`, then pass its `storage_ref` here. */
+export async function createElement(sessionId: string, storageRef: string): Promise<CanvasElement> {
+  return request<CanvasElement>(`/api/v1/canvas/${sessionId}/elements`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ storage_ref: storageRef }),
+  });
+}
+
+/** Uploads a raw file/blob and immediately places it on the canvas as a new element — the one
+ * real action every context-menu item (New Image/Video/Audio, Upload Media, Paste) reduces to,
+ * just with a different accepted-type filter applied client-side before calling this. */
+export async function uploadAndPlaceElement(sessionId: string, file: Blob): Promise<CanvasElement> {
+  const { storage_ref } = await uploadAsset(file);
+  return createElement(sessionId, storage_ref);
 }
 
 export async function directEdit(elementId: string, storageRef: string): Promise<CanvasElement> {

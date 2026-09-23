@@ -28,3 +28,11 @@ class SqliteSessionRepository:
         await self._db.commit()
         await self._db.refresh(session)
         return session
+
+    async def list_for_user(self, user_id: str) -> list[SessionModel]:
+        result = await self._db.execute(
+            select(SessionModel)
+            .where(SessionModel.user_id == user_id)
+            .order_by(SessionModel.updated_at.desc())
+        )
+        return list(result.scalars().all())

@@ -21,32 +21,42 @@ from ..specialists.registry import SPECIALIST_REGISTRY
 
 log = get_logger(__name__)
 
-_SYSTEM_PROMPT = """You are matching a user's request about an existing marketing asset to the ONE
-specialist whose job matches it.
+_SYSTEM_PROMPT = """<role>
+You are the Target Classifier. Your job is to match a user's request about an existing marketing asset to the ONE specialist best suited to handle it.
+</role>
 
-Available specialists, with the real tools each one can call:
+<specialists>
+Available specialists, along with the tools they can call:
 {specialist_descriptions}
+</specialists>
 
-Cost and latency discipline (this matters — pick the CHEAPEST specialist that can genuinely
-satisfy the request, never a more expensive one out of habit): a wrong price, discount, or other
-text/number is a `text_overlay` + `discount_claims_calculator` job (overlay_artist) — cheap and
-fast, never worth a full regeneration. A color/lighting/composition tweak is an `image_editor` job
-— still cheap. Only pick a specialist whose only tool is a full generator
-(`base_image_generator`/`base_video_generator`) when the request genuinely needs a brand new
-composition that no targeted edit could produce.
+<rules>
+1. **Best Capability Match:** Pick the specialist whose tools and description BEST match what the user is actually asking for. For image edits (recoloring, changing content, modifying subjects, adding/removing objects), pick a specialist with the `image_editor` tool (e.g., `composition_artist`). For text/price/discount overlays ONLY, pick `overlay_artist`. 
+2. **Avoid Full Regeneration:** Only pick a specialist whose sole capability is full generation (`base_image_generator` or `base_video_generator`) if the request genuinely demands a brand new composition from scratch that no targeted edit could resolve.
+</rules>
 
-Return ONLY JSON:
+<output_format>
+Return ONLY valid JSON matching this schema:
 {{"target_specialist": "one of the exact names above, or empty string if none genuinely fits"}}
+</output_format>
 """
 
 
 def describe_specialists() -> str:
     """Public (not `_`-prefixed) since orchestrator.py's own classification prompt reuses this
     exact text too (Rules.md section 1: DRY) — both places need the same real tool-per-specialist
-    picture to reliably route a cost-sensitive request (e.g. a wrong price) to the cheapest
-    specialist that can fix it, not a full-regeneration one."""
+    picture to reliably route a request (e.g. an image edit vs a text overlay) to the specialist
+    whose tools actually match what's being asked for.
+
+    Includes each specialist's own `description` (not just its tool list) — a real, live-found gap
+    (2026-09-21): a bare tool list let "make a video of it racing on track" get matched to
+    video_editor_cutter purely because it has a video-shaped tool, when its real job (assembling
+    clips that ALREADY exist) can't satisfy a request to generate brand new footage at all. The
+    description is what actually disambiguates "generates X from scratch" from "edits an existing
+    X" from "assembles/finishes an already-generated X"."""
     return "\n".join(
-        f"- {name}: tools = {', '.join(spec.allowed_tools) or '(none — reasoning only)'}"
+        f"- {name}: {spec.description or '(no description)'} "
+        f"[tools = {', '.join(spec.allowed_tools) or 'none — reasoning only'}]"
         for name, spec in sorted(SPECIALIST_REGISTRY.items())
     )
 

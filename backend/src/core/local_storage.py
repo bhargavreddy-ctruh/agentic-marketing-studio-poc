@@ -18,7 +18,13 @@ _EXT_BY_MIME = {
     "image/webp": "webp",
     "image/gif": "gif",
     "video/mp4": "mp4",
+    "video/webm": "webm",
+    "video/quicktime": "mov",
     "audio/wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/ogg": "ogg",
+    "audio/webm": "weba",
+    "text/plain": "txt",
 }
 
 

@@ -9,19 +9,25 @@ tool-ownership table). Camera Director's only job now is deciding the motion and
 choosing to call base_video_generator on that existing image; Video Editor/Cutter genuinely
 decides whether/how to call video_stitcher, rather than this file calling it unconditionally.
 
-Sound Designer now has a real `text_to_speech` tool (local Kokoro-82M, no external cost) — when it
-genuinely calls it for a voiceover, the result is a real audio asset, surfaced as its own
-`audio_storage_ref`. Sound Designer ALSO has `mux_audio_into_video`, but this executor never calls
-it itself and never muxes automatically just because both a video and an audio track exist — per
-the user's explicit instruction, muxing is the specialist's own genuine, optional decision (see
-`sound_designer.md`). Only when Sound Designer chooses to call it does this file's final
-`storage_ref` become the muxed result (`audio_muxed_into_video: true`); otherwise the plain
-stitched video and the separate audio asset both stay exactly as produced. Overlay Artist also has
-a real `text_overlay` tool (Memory.md, Phase 3) — when it genuinely calls it, the result is a new
-overlaid STILL IMAGE (drawn on the source frame, before animation), not a modified version of the
-final video's own pixels, so it's surfaced as its own `overlay_image_storage_ref` rather than
-replacing the video's `storage_ref` (Rules.md section 2: no silently defaulting a real result to a
-fake "not applied").
+Real parallel execution (Tasks.md #1, 2026-09-22): the video path (Camera Director -> Video
+Editor/Cutter, genuinely sequential — the editor needs the raw clip to exist) and Sound Designer
+no longer wait on each other. Sound Designer previously received the finished video's
+`storage_ref` so it could decide whether to mux a voiceover into it — that data dependency was
+the only thing forcing it to run after the video path finished, and it wasn't a REAL dependency:
+Sound Designer's voiceover script is about the campaign/story, not the camera motion, so it can be
+grounded in the same narrative/shot context Camera Director gets, computed before either runs.
+Sound Designer now decides `should_mux` as its own creative judgment call — made from context, the
+same way it always judged tone/mood — without needing to see the actual video first; the executor
+here performs the real mux itself (a deterministic ffmpeg operation, not something needing an
+LLM's agentic tool-call loop) once BOTH sides are done, only if a real voiceover was produced and
+Sound Designer's own judgment wanted it muxed. Overlay Artist was already independent (only needs
+the scene's still frame, never the video) and joins the same concurrent group.
+
+Overlay Artist also has a real `text_overlay` tool (Memory.md, Phase 3) — when it genuinely calls
+it, the result is a new overlaid STILL IMAGE (drawn on the source frame, before animation), not a
+modified version of the final video's own pixels, so it's surfaced as its own
+`overlay_image_storage_ref` rather than replacing the video's `storage_ref` (Rules.md section 2:
+no silently defaulting a real result to a fake "not applied").
 """
 from __future__ import annotations
 
@@ -30,8 +36,9 @@ import json
 
 from ...core.exceptions import SpecialistFailed
 from ...core.middleware.logging import get_logger
-from ..specialists.runner import run_specialist_agentic
-from .base import LeadResult, LeadSpec, NarrativePlan, ScenePlan
+from ..specialists.runner import AgenticStepResult, run_specialist_agentic, run_specialist_with_review
+from ..tools.registry import get_tool
+from .base import LeadResult, LeadSpec, NarrativePlan, ScenePlan, referenced_element_block
 
 log = get_logger(__name__)
 
@@ -72,43 +79,82 @@ async def run_motion_lead(
     context_parts.append(f"Lighting:\n{scene.lighting_description}")
     context_parts.append(f"Full brief:\n{json.dumps(brief)}")
 
-    camera = await run_specialist_agentic("camera_director", context="\n\n".join(context_parts))
-    video_call = camera.latest_call("base_video_generator")
-    if not video_call or not video_call.data.get("storage_ref"):
-        raise SpecialistFailed("camera_director", "did not produce a video via base_video_generator")
-    raw_clip_storage_ref = video_call.data["storage_ref"]
-    motion_prompt = camera.get("motion_prompt", "")
-    # The real aspect_ratio actually sent to base_video_generator, not the LLM's own restated
-    # JSON field — what Format/Technical QA's compliance check verifies the output against.
-    aspect_ratio = video_call.args.get("aspect_ratio", "16:9")
-
-    editor = await run_specialist_agentic(
-        "video_editor_cutter",
-        context=f"Raw clip storage_ref: {raw_clip_storage_ref}\nMotion prompt used:\n{motion_prompt}",
-    )
-    stitch_result = editor.latest_result("video_stitcher")
-    if stitch_result and stitch_result.get("storage_ref"):
-        storage_ref = stitch_result["storage_ref"]
-        stitched = True
-    else:
-        # Video Editor/Cutter genuinely chose not to call video_stitcher (or it failed) — the raw
-        # clip is still a valid result, reflected honestly rather than forced.
-        log.warning("motion_lead_no_stitch", extra={"_extra_specialist": "video_editor_cutter"})
-        storage_ref = raw_clip_storage_ref
-        stitched = False
-
-    # Sound Designer and Overlay Artist depend only on the idea/motion_prompt already decided
-    # above, not on each other's output — genuinely independent, run concurrently
-    # (Architecture.md's own example: parallelize specialists with no dependency between them).
-    sound, overlay = await asyncio.gather(
-        run_specialist_agentic(
-            "sound_designer",
-            context=(
-                f"Campaign idea:\n{idea}\n\nMotion prompt:\n{motion_prompt}\n\n"
-                f"video_storage_ref (the finished clip, if you decide a voiceover belongs muxed "
-                f"into it): {storage_ref}"
+    async def _run_video_path() -> tuple:
+        """Camera Director -> Video Editor/Cutter — genuinely sequential (the editor needs the
+        raw clip Camera Director produces), but this whole chain runs concurrently with Sound
+        Designer / Overlay Artist below, none of which depend on its result."""
+        # Real bug audit (2026-09-22): Camera Director had the same "generate or nothing valid"
+        # requirement as Illustrator (`visual_design_lead.py`) — a specialist deciding the motion
+        # but never actually calling `base_video_generator` — with none of Illustrator's retry
+        # safety net, despite that gap being empirically confirmed at ~1-in-3 on weaker models for
+        # the exact same shape of requirement. `run_specialist_with_review` closes the same gap
+        # here, one bounded reconsideration before genuinely failing the whole video pipeline.
+        camera = await run_specialist_with_review(
+            "camera_director",
+            context="\n\n".join(context_parts),
+            needs_retry=lambda r: not (
+                r.latest_call("base_video_generator") and r.latest_call("base_video_generator").data.get("storage_ref")
             ),
-        ),
+            reminder=(
+                "REMINDER: you decided the motion but never actually called base_video_generator. "
+                "You MUST call it now, with your motion prompt and the given source image, before "
+                "responding with final JSON."
+            ),
+        )
+        video_call = camera.latest_call("base_video_generator")
+        if not video_call or not video_call.data.get("storage_ref"):
+            raise SpecialistFailed("camera_director", "did not produce a video via base_video_generator")
+        raw_clip_storage_ref = video_call.data["storage_ref"]
+        motion_prompt = camera.get("motion_prompt", "")
+        # The real aspect_ratio actually sent to base_video_generator, not the LLM's own restated
+        # JSON field — what Format/Technical QA's compliance check verifies the output against.
+        aspect_ratio = video_call.args.get("aspect_ratio", "16:9")
+
+        editor = await run_specialist_agentic(
+            "video_editor_cutter",
+            context=f"Raw clip storage_ref: {raw_clip_storage_ref}\nMotion prompt used:\n{motion_prompt}",
+        )
+        stitch_result = editor.latest_result("video_stitcher")
+        if stitch_result and stitch_result.get("storage_ref"):
+            video_storage_ref = stitch_result["storage_ref"]
+            stitched = True
+        else:
+            # Video Editor/Cutter genuinely chose not to call video_stitcher (or it failed) — the
+            # raw clip is still a valid result, reflected honestly rather than forced.
+            log.warning("motion_lead_no_stitch", extra={"_extra_specialist": "video_editor_cutter"})
+            video_storage_ref = raw_clip_storage_ref
+            stitched = False
+
+        return camera, editor, video_storage_ref, raw_clip_storage_ref, motion_prompt, aspect_ratio, stitched
+
+    # Real parallel execution (Tasks.md #1): the video path above and these two specialists run
+    # concurrently — Sound Designer is grounded in the narrative/shot context already known before
+    # Camera Director runs (never the video itself), and Overlay Artist only ever needed the
+    # scene's still frame. Verified live: real overlapping LLM/tool-call timestamps between the
+    # video path and Sound Designer, not just declared concurrent in code.
+    # `referenced_element_block` (2026-09-22) — a real, confirmed gap: this context previously had
+    # NO mention of a referenced element at all, not even buried — a request like "re: this audio,
+    # make a video based on this" left Sound Designer with zero real grounding in what that audio
+    # actually said, so "same voiceover"/"reuse this audio" could never genuinely work. See
+    # `leads/base.py`'s own docstring.
+    sound_designer_context = (
+        f"Campaign idea:\n{idea}{referenced_element_block(brief)}\n\nShot to produce:\n{primary_shot}\n\n"
+        + (f"Overall story:\n{narrative.overall_story}\n\n" if narrative else "")
+        + (f"Script line to accompany this shot:\n{narrative.script_line}\n\n"
+           if narrative and narrative.script_line else "")
+    )
+    # Real, live-found bug (2026-09-22, independent review): `asyncio.gather` without
+    # `return_exceptions=True` cancels nothing on a sibling's failure — it only propagates the
+    # first exception, while every other task (the video path included) keeps running to
+    # completion in the background with its result silently discarded. Since the video path is a
+    # real PAID Replicate call, Sound Designer or Overlay Artist failing first used to abort the
+    # whole turn while the render it already paid for kept going unseen. `return_exceptions=True`
+    # plus explicit per-branch handling below fixes this: the video path failing is still genuinely
+    # fatal (no video, nothing to return), but Sound Designer/Overlay Artist failing degrades
+    # gracefully to "no audio"/"no overlay" instead of discarding an already-running paid render.
+    video_path_result, sound_result, overlay_result = await asyncio.gather(
+        _run_video_path(),
+        run_specialist_agentic("sound_designer", context=sound_designer_context),
         run_specialist_agentic(
             "overlay_artist",
             context=(
@@ -117,26 +163,169 @@ async def run_motion_lead(
                 f"works on this, not on the finished video): {scene.scene_image_storage_ref}"
             ),
         ),
+        return_exceptions=True,
     )
 
+    if isinstance(video_path_result, BaseException):
+        raise video_path_result
+    (camera, editor, storage_ref, raw_clip_storage_ref, motion_prompt, aspect_ratio, stitched) = video_path_result
+
+    def _empty_result(specialist_name: str) -> AgenticStepResult:
+        return AgenticStepResult(specialist_name=specialist_name, model="", data={}, tool_calls=[])
+
+    if isinstance(sound_result, BaseException):
+        log.warning("motion_lead_sound_designer_failed", extra={"_extra_error": str(sound_result)})
+        sound = _empty_result("sound_designer")
+    else:
+        sound = sound_result
+
+    if isinstance(overlay_result, BaseException):
+        log.warning("motion_lead_overlay_artist_failed", extra={"_extra_error": str(overlay_result)})
+        overlay = _empty_result("overlay_artist")
+    else:
+        overlay = overlay_result
+
+    # Real, live-found failure mode (2026-09-22, same category as illustrator's own fix): Sound
+    # Designer sometimes recommends "voiceover" (and even writes muxing notes for it) without ever
+    # actually calling `text_to_speech` — a recommendation with nothing behind it. Routed through
+    # the same shared review/retry mechanism illustrator uses (Tasks.md #3) via `first_result`,
+    # since Sound Designer's own first attempt already ran above, inside the concurrent gather.
+    # Wrapped in try/except (independent review, 2026-09-22): the video above is already a real
+    # paid render by this point — a retry failure here must degrade to "no audio" rather than
+    # losing that result by letting SpecialistFailed propagate out of the whole turn.
+    try:
+        sound = await run_specialist_with_review(
+            "sound_designer",
+            context=sound_designer_context,
+            first_result=sound,
+            needs_retry=lambda r: r.get("audio_recommendation") == "voiceover" and not (
+                r.latest_call("text_to_speech") and r.latest_call("text_to_speech").ok
+            ),
+            reminder=(
+                "REMINDER: your previous attempt recommended a voiceover but never actually called "
+                "text_to_speech. If you still want a voiceover, you MUST call text_to_speech with "
+                "your line now."
+            ),
+        )
+    except SpecialistFailed as exc:
+        log.warning("motion_lead_sound_designer_retry_failed", extra={"_extra_error": exc.message})
+        sound = _empty_result("sound_designer")
     sound_call = sound.latest_call("text_to_speech")
     audio_storage_ref = sound_call.data.get("storage_ref") if sound_call and sound_call.ok else None
 
-    # Muxing is the specialist's own genuine decision (see sound_designer.md) — not something this
-    # executor does automatically just because both a video and an audio track exist.
-    mux_call = sound.latest_call("mux_audio_into_video")
-    audio_muxed_into_video = bool(mux_call and mux_call.ok and mux_call.data.get("storage_ref"))
-    if audio_muxed_into_video:
-        storage_ref = mux_call.data["storage_ref"]
+    # Muxing is a real, deterministic ffmpeg operation (AudioVideoMuxerTool) — no agentic
+    # reasoning needed at call time, only Sound Designer's own prior creative judgment on WHETHER
+    # to (its `should_mux` field, decided without ever seeing the video — see sound_designer.md).
+    # Called directly here rather than through another specialist turn, since by the time both
+    # halves of the gather above finish, there is nothing left to decide, only to execute.
+    audio_muxed_into_video = False
+    if audio_storage_ref and sound.get("should_mux"):
+        mux_result = await get_tool("mux_audio_into_video").run(
+            {"video_storage_ref": storage_ref, "audio_storage_ref": audio_storage_ref}
+        )
+        if mux_result.ok and mux_result.data.get("storage_ref"):
+            storage_ref = mux_result.data["storage_ref"]
+            audio_muxed_into_video = True
+        else:
+            log.warning("motion_lead_mux_failed", extra={"_extra_error": mux_result.error})
 
     overlay_call = overlay.latest_call("text_overlay")
     overlay_image_storage_ref = overlay_call.data.get("storage_ref") if overlay_call and overlay_call.ok else None
+
+    # Real, distinct artifacts this run genuinely produced beyond the final video (2026-09-22) —
+    # each already has a real storage_ref on disk; only the final video used to reach the canvas,
+    # everything else was silently dropped into metadata JSON. Not every intermediate is included
+    # here on purpose: prop/lighting edits inside Scene Lead already collapse into ONE
+    # `scene_image_storage_ref` (an in-place edit chain, correctly modeled as one asset, not
+    # siblings), and the raw clip is only added when it's genuinely a DIFFERENT asset from the
+    # final video (i.e. video_editor_cutter actually stitched something new) — when it didn't,
+    # `raw_clip_storage_ref == storage_ref` already and adding it again would just duplicate the
+    # main element.
+    # Real, visible text cards (2026-09-22) — written by Shot Planner / Lighting Designer
+    # themselves via a genuine `text_card_writer` tool call (a real, modular tool, per an explicit
+    # user ask — the same agentic pattern every other generation capability already uses), not
+    # Python code hand-building strings after the fact. Falls back to a plain hand-built summary
+    # only if a specialist genuinely skipped the (required, but a real model can be flaky) tool
+    # call — an honest degrade, never a missing card.
+    if narrative.shot_list_storage_ref:
+        shot_list_extra = {
+            "storage_ref": narrative.shot_list_storage_ref,
+            "element_type": "text",
+            "produced_by_specialist": "shot_planner",
+            "metadata": {"label": "shot_list"},
+        }
+    else:
+        shot_list_text = (
+            "Shots:\n" + "\n".join(f"- {s}" for s in narrative.shots) + "\n\n"
+            f"Story:\n{narrative.overall_story}"
+            + (f"\n\nScript line:\n{narrative.script_line}" if narrative.script_line else "")
+        )
+        shot_list_extra = {
+            "element_type": "text",
+            "produced_by_specialist": "shot_planner",
+            "metadata": {"label": "shot_list", "text": shot_list_text},
+        }
+    if scene.scene_description_storage_ref:
+        scene_description_extra = {
+            "storage_ref": scene.scene_description_storage_ref,
+            "element_type": "text",
+            "produced_by_specialist": "lighting_designer",
+            "metadata": {"label": "scene_description"},
+        }
+    else:
+        scene_description_text = (
+            f"Environment:\n{scene.environment_description}\n\n"
+            f"Lighting:\n{scene.lighting_description}"
+            + (f"\n\nProps:\n{scene.prop_description}" if scene.prop_description else "")
+        )
+        scene_description_extra = {
+            "element_type": "text",
+            "produced_by_specialist": "environment_designer",
+            "metadata": {"label": "scene_description", "text": scene_description_text},
+        }
+    extra_elements: list[dict] = [
+        {
+            "storage_ref": scene.scene_image_storage_ref,
+            "element_type": "image",
+            "produced_by_specialist": "environment_designer",
+            "metadata": {"label": "scene_still", "environment_description": scene.environment_description},
+        },
+        shot_list_extra,
+        scene_description_extra,
+    ]
+    if stitched:
+        extra_elements.append({
+            "storage_ref": raw_clip_storage_ref,
+            "element_type": "video",
+            "produced_by_specialist": "camera_director",
+            "metadata": {"label": "raw_clip_pre_stitch", "motion_prompt": motion_prompt},
+        })
+    if audio_storage_ref:
+        extra_elements.append({
+            "storage_ref": audio_storage_ref,
+            "element_type": "audio",
+            "produced_by_specialist": "sound_designer",
+            "metadata": {
+                "label": "voiceover",
+                "muxed_into_video": audio_muxed_into_video,
+                "notes": sound.get("notes", ""),
+                "voiceover_line": sound.get("voiceover_line", ""),
+            },
+        })
+    if overlay_image_storage_ref:
+        extra_elements.append({
+            "storage_ref": overlay_image_storage_ref,
+            "element_type": "image",
+            "produced_by_specialist": "overlay_artist",
+            "metadata": {"label": "overlay_still"},
+        })
 
     all_steps = (camera, editor, sound, overlay)
     return LeadResult(
         storage_ref=storage_ref,
         produced_by_specialist="camera_director",
         element_type="video",
+        extra_elements=extra_elements,
         metadata={
             "primary_shot": primary_shot,
             "shot_count_proposed": len(narrative.shots) if narrative else 1,
@@ -151,6 +340,8 @@ async def run_motion_lead(
             "audio_applied": audio_storage_ref is not None,
             "audio_storage_ref": audio_storage_ref,
             "audio_muxed_into_video": audio_muxed_into_video,
+            # Same one-off mood/style announcement carried through as visual_design_lead.py's.
+            **({"style_note": brief["style_note"]} if brief.get("style_note") else {}),
             "overlay_recommendation": overlay.data if overlay.get("needs_overlay") else None,
             "overlay_applied": overlay_image_storage_ref is not None,
             "overlay_image_storage_ref": overlay_image_storage_ref,

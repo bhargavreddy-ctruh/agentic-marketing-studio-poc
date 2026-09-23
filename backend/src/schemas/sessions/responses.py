@@ -24,9 +24,29 @@ class IdeationPrompt(BaseModel):
 
 class SessionResponse(BaseModel):
     id: str
+    title: str
     status: str
     approval_mode: str
     brief: dict
     created_at: datetime
     updated_at: datetime
     next_prompt: IdeationPrompt | None = None
+
+
+class ChatTurnResponse(BaseModel):
+    """One real, persisted chat turn (2026-09-22) — the actual fix for the chat transcript never
+    surviving a refresh. `thinking_text` is the real accumulated model text streamed live during
+    this turn (None when nothing was ever streamed, e.g. thinking-streaming disabled)."""
+
+    id: str
+    user_text: str
+    thinking_text: str | None
+    assistant_text: str | None
+    created_at: datetime
+    # The real, complete node/specialist/tool event history for this turn (2026-09-22, per an
+    # explicit user ask: "show all the runs even after a refresh") — `core/events.py`'s own real
+    # events, minus `llm_delta` (see that file), so Node Mode can be rebuilt from the database on a
+    # fresh page load instead of only ever showing whatever arrived on the one live SSE connection
+    # that happened to be open at the time.
+    events: list[dict] = []
+    referenced_elements: list[dict] = []

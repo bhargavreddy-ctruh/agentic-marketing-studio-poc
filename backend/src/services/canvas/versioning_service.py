@@ -27,44 +27,80 @@ class CanvasVersioningService:
     async def _ensure_v1_recorded(self, element: CanvasElementModel) -> None:
         """An element's own creation is version 1 — recorded lazily, the first time anything
         touches this element's history, so elements created before this feature existed still
-        have a real v1 row rather than a gap undo/redo could fall into."""
+        have a real v1 row rather than a gap undo/redo could fall into. Records the element's
+        CURRENT `element_type` as a best-effort backfill for pre-existing elements — real for any
+        element that hasn't changed type yet (the overwhelming majority), an honest approximation
+        only for one that had already been mislabeled by the pre-2026-09-21 bug before ever
+        reaching this method."""
         existing = await self._versions.list_for_element(element.id)
         if not existing:
             await self._versions.add(CanvasElementVersionModel(
                 id=uuid.uuid4().hex, element_id=element.id, version=1,
                 storage_ref=element.storage_ref, metadata_json=element.metadata_json,
+                element_type=element.element_type,
             ))
 
     async def record_new_version(
-        self, element: CanvasElementModel, *, storage_ref: str, metadata: dict
+        self,
+        element: CanvasElementModel,
+        *,
+        storage_ref: str,
+        metadata: dict,
+        element_type: str | None = None,
     ) -> CanvasElementModel:
-        """Call this whenever a real edit produces a new result for an element."""
+        """Call this whenever a real edit produces a new result for an element. `element_type`
+        only needs passing when the edit genuinely changes what KIND of asset this is (real,
+        live-found case: a direct_fix's `video_stitcher` turning a still-image element into a
+        video one) — defaults to the element's current type, unchanged, for every other edit
+        path (direct-edit, regenerate, comment), none of which ever change an element's kind."""
         await self._ensure_v1_recorded(element)
-        await self._versions.delete_versions_after(element.id, element.version)
-        new_version_num = element.version + 1
+        # Anchor on `element.version` when a real row for it actually exists — this is what makes
+        # "undo, then make a new edit" correctly discard the abandoned future versions (delete
+        # everything after the version the user is actually AT). Falls back to the highest
+        # recorded version only when `element.version` itself has no matching row — the real,
+        # live-found drift case (2026-09-21): a chat-driven direct_fix used to bump `element.version`
+        # by hand with no row ever written here, so an element edited via chat before that fix
+        # landed can have a counter ahead of what its history actually contains. A real regression
+        # was caught here on independent review (2026-09-22): anchoring on the highest recorded
+        # version UNCONDITIONALLY (not just for the drift case) made `delete_versions_after` a
+        # no-op by definition, silently breaking the truncation — undo to v1 then a new edit would
+        # leave v2-v5's abandoned future intact and create a v6, instead of discarding them.
+        existing = await self._versions.list_for_element(element.id)
+        existing_versions = {v.version for v in existing}
+        anchor = element.version if element.version in existing_versions else max(existing_versions, default=element.version)
+        await self._versions.delete_versions_after(element.id, anchor)
+        new_version_num = anchor + 1
+        resolved_type = element_type or element.element_type
         await self._versions.add(CanvasElementVersionModel(
             id=uuid.uuid4().hex, element_id=element.id, version=new_version_num,
-            storage_ref=storage_ref, metadata_json=metadata,
+            storage_ref=storage_ref, metadata_json=metadata, element_type=resolved_type,
         ))
         element.storage_ref = storage_ref
         element.metadata_json = metadata
         element.version = new_version_num
+        element.element_type = resolved_type
         return await self._canvas.update_element(element)
 
     async def undo(self, element_id: str) -> CanvasElementModel:
         element = await self._get_or_404(element_id)
         await self._ensure_v1_recorded(element)
-        if element.version <= 1:
+        # Step to the nearest REAL recorded version below the current one, not a naive
+        # `version - 1` — an element edited via chat before 2026-09-21's fix can have a `version`
+        # counter ahead of what its history actually contains (see record_new_version's own
+        # comment), so `version - 1` can point at a version number with no row at all.
+        versions = sorted((v.version for v in await self._versions.list_for_element(element_id)))
+        earlier = [v for v in versions if v < element.version]
+        if not earlier:
             raise ValidationFailed("Already at the earliest version — nothing to undo.")
-        return await self._move_to(element, element.version - 1)
+        return await self._move_to(element, earlier[-1])
 
     async def redo(self, element_id: str) -> CanvasElementModel:
         element = await self._get_or_404(element_id)
-        versions = await self._versions.list_for_element(element_id)
-        max_version = max((v.version for v in versions), default=element.version)
-        if element.version >= max_version:
+        versions = sorted((v.version for v in await self._versions.list_for_element(element_id)))
+        later = [v for v in versions if v > element.version]
+        if not later:
             raise ValidationFailed("Already at the latest version — nothing to redo.")
-        return await self._move_to(element, element.version + 1)
+        return await self._move_to(element, later[0])
 
     async def list_versions(self, element_id: str) -> list[CanvasElementVersionModel]:
         element = await self._get_or_404(element_id)
@@ -79,16 +115,24 @@ class CanvasVersioningService:
         metadata: dict,
         action: str,
         approval_mode: str,
+        element_type: str | None = None,
     ) -> CanvasElementModel:
         """The one real branch point between "auto" (apply immediately, existing behavior,
         unchanged) and "approve" (Memory.md, Phase 4: stage for explicit approval instead) — every
         edit-producing service (regenerate, comment resolution, direct-edit) calls this rather
-        than deciding for itself, so the auto/approve distinction lives in exactly one place."""
+        than deciding for itself, so the auto/approve distinction lives in exactly one place.
+        `element_type` — see `record_new_version`'s own docstring — is NOT yet threaded through
+        "approve" mode's staging (`CanvasElementModel` has no `pending_element_type` field): a
+        genuinely disclosed, narrower gap than the one this fixes, since no edit path that changes
+        an element's kind (currently only chat-driven direct_fix) is used under "approve" mode in
+        practice yet."""
         if approval_mode == "approve":
             return await self.stage_pending_edit(
                 element, storage_ref=storage_ref, metadata=metadata, action=action
             )
-        return await self.record_new_version(element, storage_ref=storage_ref, metadata=metadata)
+        return await self.record_new_version(
+            element, storage_ref=storage_ref, metadata=metadata, element_type=element_type
+        )
 
     async def stage_pending_edit(
         self, element: CanvasElementModel, *, storage_ref: str, metadata: dict, action: str
@@ -131,6 +175,10 @@ class CanvasVersioningService:
         element.storage_ref = target.storage_ref
         element.metadata_json = target.metadata_json
         element.version = target_version
+        # Restores the real type recorded for THAT version, not just its storage_ref — an element
+        # that changed kind mid-history (e.g. a direct_fix turning a still image into a video)
+        # must render correctly at every version undo/redo can land on, not just its latest one.
+        element.element_type = target.element_type
         return await self._canvas.update_element(element)
 
     async def _get_or_404(self, element_id: str) -> CanvasElementModel:

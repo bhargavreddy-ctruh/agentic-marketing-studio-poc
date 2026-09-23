@@ -1,10 +1,22 @@
 """
-The Orchestrator — exactly three routes, per Architecture.md section 1 (transcribed from the
-source PDF's Section 7):
+The Orchestrator — four routes. The first three are per Architecture.md section 1 (transcribed
+from the source PDF's Section 7):
 
     1. Full still image  -> Visual Design Lead (+ Scene Lead if a background/scene is needed)
     2. Full video        -> Narrative Lead -> Scene Lead -> Motion Lead
     3. Single-element fix -> direct specialist call, bypassing its Lead
+
+A 4th route, "full_audio", was added 2026-09-22 — a real, disclosed extension beyond the reference
+PDF's own three, not a silent deviation (genai_build's ADR spirit: written down here, not snuck
+in). Real gap found live: the canvas's right-click "New Audio" had nothing to route to — Sound
+Designer only ever ran via "direct_fix", which the orchestrator's own prompt correctly refuses
+unless an existing element is already on the canvas, so a brand-new standalone audio request (no
+prior image/video yet) had no route at all. Sound Designer's own prompt (sound_designer.md)
+already never depended on an existing element's storage_ref, only campaign/shot context — so this
+is a real, honest capability that already existed, just unreachable. Disclosed limit: Sound
+Designer can only produce a spoken VOICEOVER line via `text_to_speech` — "there is still no
+music-generation capability in this build" per its own prompt — so "full_audio" produces real
+speech audio, never music, regardless of what the user asked for.
 
 Real Tier-1-model-driven classification (Memory.md, Phase 3 conformance audit) — the Phase 0
 keyword heuristic this replaces stayed in place well past the phase that was supposed to upgrade
@@ -18,6 +30,7 @@ real classification first (Rules.md section 2).
 """
 from __future__ import annotations
 
+from ...core.chat_history import build_history_messages
 from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.json_extract import extract_json
@@ -32,56 +45,62 @@ from .state import GraphState
 log = get_logger(__name__)
 
 _VIDEO_KEYWORDS = ("video", "clip", "motion", "reel")
-_FIX_KEYWORDS = ("fix", "just change", "just fix", "relight", "recolor")
+_AUDIO_KEYWORDS = ("audio", "voiceover", "voice over", "narration", "spoken", "sound clip")
+_FIX_KEYWORDS = ("fix", "just change", "just fix", "relight", "recolor", "redo", "update", "remove", "add")
 
-_VALID_ROUTES = {"full_image", "full_video", "direct_fix"}
+_VALID_ROUTES = {"dynamic", "full_image", "full_video", "full_audio", "direct_fix"}
 
-_SYSTEM_PROMPT = """You are the Orchestrator for a creative marketing studio. Given the user's
-request, decide which of exactly three routes applies:
+_SYSTEM_PROMPT = """<role>
+You are the Orchestrator for a creative marketing studio. Your job is to analyze the user's request and dynamically assemble a plan of specialists to execute it.
+</role>
 
-- "full_image": a brand new still image needs to be generated from scratch.
-- "full_video": a brand new video needs to be generated from scratch.
-- "direct_fix": a targeted fix to ONE existing element — no new generation from scratch, just one
-  specialist adjusting something that already exists (e.g. "just fix the lighting", "relight this
-  scene", "change the overlay text", "recolor the background").
+<rules>
+1. **Dynamic Assembly:** You do NOT use hardcoded pipelines. Instead, you select EXACTLY the specialists needed to fulfill the request, in the exact order they should run, and provide a clear instruction for each step.
+2. **Efficiency & Autonomy:** Do not waste steps, but DO autonomously include planning and strategy specialists (like 'reference_curator' or 'palette_strategist') if the task is complex, broad, or requires a cohesive brand style (e.g., a "campaign" or "brand refresh"). Do not rely on the user to explicitly ask for them.
+3. **Valid Specialists Only:** You can only use the specialists listed below.
+4. **Base Decision on Latest Request:** The user's most recent message is the primary driver of intent.
+5. **Campaign Defaults (CRAZY & BOLD):** We are making this for elite marketing and creating campaigns. Image and video generations should be CRAZY, striking, and visually incredible. If the request is for a broad "campaign", autonomously build a robust plan (e.g. style/palette planning, generating 1-2 base images via illustrator, and applying promotional text via overlay_artist). Push the creative boundaries.
+6. **Context Guardrail:** If the request and the brief entirely lack a specific subject or product (e.g., the user just says "retry" but there is no product established), do NOT invent or guess a generic product. Instead, return a plan instructing the first specialist to fail and ask the user for clarification.
+7. **Editing Existing Assets:** If the user request is to modify, fix, or edit an existing referenced element (e.g., "edit this image", "strike out the price", "change the color"), you MUST use route 'direct_fix' and provide the 'target_specialist'. Do NOT use 'dynamic' for edits on existing assets. For image content edits (recoloring, changing subjects, adding/removing visual elements, modifying the image itself), use 'composition_artist'. Only use 'overlay_artist' for pure TEXT overlays (adding price tags, discount labels, promotional text ON TOP of an image).
+8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
+</rules>
 
-If and only if the route is "direct_fix", also name the single specialist whose job matches the
-request, from these, with the real tools each can call:
+<specialists>
 {specialist_descriptions}
+</specialists>
 
-Cost and latency discipline (this matters — pick the CHEAPEST specialist that can genuinely
-satisfy the request): a wrong price/discount/text is a `text_overlay` +
-`discount_claims_calculator` job (overlay_artist) — never worth routing to "full_image"/
-"full_video" or a full-regeneration specialist just to fix a number. A color/lighting/composition
-tweak is an `image_editor` job on the existing asset. Only choose "full_image"/"full_video" (a
-brand new generation from scratch) when the request genuinely can't be satisfied by any targeted
-specialist edit.
-
-You will be given the user's most recent literal message AND a merged brief describing the
-overall idea so far. Base your route decision on the MOST RECENT MESSAGE's actual intent — a
-merged brief often rephrases a targeted fix request into plain descriptive language (e.g. "just
-fix the lighting" can become "...with brighter lighting" once merged), which would wrongly look
-like a fresh full-generation request if you only read the merged brief. "direct_fix" is only
-possible when an existing element is mentioned as available — if none is, do not choose direct_fix
-even if the message sounds like a tweak.
-
-Return ONLY JSON:
+<output_format>
+Return ONLY valid JSON matching this schema:
 {{
-  "route": "full_image" | "full_video" | "direct_fix",
-  "target_specialist": "one of the exact names above, ONLY if route is direct_fix, else empty string"
+  "route": "Must be exactly one of: 'dynamic', 'direct_fix', 'full_video', 'full_image', 'full_audio'",
+  "target_specialist": "Required ONLY IF route is 'direct_fix'. MUST be a valid specialist name from the <specialists> section (e.g., 'overlay_artist', 'composition_artist'). DO NOT return null if route is 'direct_fix'. Otherwise null.",
+  "plan": [ // Required ONLY IF route is 'dynamic'. Otherwise null.
+    {{
+      "specialist": "the exact name of the specialist",
+      "instruction": "Clear instruction for what this specialist needs to accomplish in this step"
+    }}
+  ]
 }}
+</output_format>
 """
 
 
-def _keyword_fallback_route(message: str) -> str:
+def _keyword_fallback_route(message: str) -> tuple[str, str | None, list[dict] | None]:
     """The original Phase 0 heuristic — used only if the real LLM classification call itself
-    fails, never as the default path."""
+    fails, never as the default path. `_AUDIO_KEYWORDS` added 2026-09-22 alongside "full_audio" —
+    checked before the video keywords since "voiceover"/"narration" alone (no "video"/"clip"
+    keyword present) should degrade to audio, not video."""
     if any(k in message for k in _FIX_KEYWORDS):
-        return "direct_fix"
+        return "direct_fix", "composition_artist", None
+    if any(k in message for k in _AUDIO_KEYWORDS) and not any(k in message for k in _VIDEO_KEYWORDS):
+        return "full_audio", None, None
     if any(k in message for k in _VIDEO_KEYWORDS):
-        return "full_video"
-    return "full_image"
-
+        return "full_video", None, None
+        
+    # Default to a basic dynamic generation plan instead of the old, static full_image pipeline
+    return "dynamic", None, [
+        {"specialist": "illustrator", "instruction": "Generate the requested image based on the prompt."}
+    ]
 
 @traceable(name="orchestrator_node")
 async def route(state: GraphState) -> GraphState:
@@ -93,6 +112,10 @@ async def route(state: GraphState) -> GraphState:
     if brief_stage_check.get("video_stage") in ("narrative_pending", "scene_pending", "motion_pending"):
         state["route"] = "full_video"
         state["target_specialist"] = None
+        # No LLM call on this resume path, but still stripped for the same reason as the main
+        # return below — leads/specialists downstream don't need it restated in their own dumps.
+        if "_recent_chat_history" in brief_stage_check:
+            state["brief"] = {k: v for k, v in brief_stage_check.items() if k != "_recent_chat_history"}
         emit("route_decided", route="full_video", target_specialist=None, resumed=True)
         return state
 
@@ -104,35 +127,64 @@ async def route(state: GraphState) -> GraphState:
     brief = state.get("brief") or {}
     brief_idea = brief.get("idea") or ""
     user_message = state.get("user_message") or ""
-    latest_ref = brief.get("latest_element_storage_ref")
-
+    referenced_elements = brief.get("referenced_elements_context", [])
+    
     classification_context = [f"User's most recent literal message:\n{user_message or '(none)'}"]
     if brief_idea:
         classification_context.append(f"Merged brief so far:\n{brief_idea}")
-    classification_context.append(
-        f"An existing generated element is available to fix: {'yes' if latest_ref else 'no'}"
-    )
+        
+    retrieved_memory = brief.get("_retrieved_memory")
+    if retrieved_memory:
+        classification_context.append(f"Relevant historical chat memory:\n{retrieved_memory}")
+    
+    if referenced_elements:
+        elements_desc = []
+        for i, el in enumerate(referenced_elements, 1):
+            kind = el.get("element_type", "unknown kind")
+            desc = el.get("description", "(no description recorded)")
+            elements_desc.append(f"Element {i} (Type: {kind}): {desc}")
+            
+        elements_str = "\n".join(elements_desc)
+        classification_context.append(
+            f"The following existing generated elements ARE available to fix:\n{elements_str}\n"
+            f"Compare this against the user's most recent message: if the message is asking for "
+            f"something about a DIFFERENT subject/kind than what these existing elements actually "
+            f"are (e.g. the existing element is a logo and the new message asks for a car photo "
+            f"unrelated to any logo), that is a NEW/DIFFERENT asset request, never direct_fix on "
+            f"these elements — route to whichever full_* route matches what's actually being asked "
+            f"for instead."
+        )
+    else:
+        classification_context.append("An existing generated element is available to fix: no")
 
     llm = get_llm_provider()
+    
+    from ...providers.llm.laya_provider import LayaProvider
+    import asyncio
+    
+    async def _safe_laya_choice():
+        try:
+            return await LayaProvider.predict_choice(
+                state=f"{brief_idea}\n\nUser request: {user_message}",
+                options=list(_VALID_ROUTES)
+            )
+        except Exception:
+            return None
+            
+    laya_task = asyncio.create_task(_safe_laya_choice())
+    
     try:
         result = await llm.complete(
             tier=ModelTier.TIER_1,
             system=_SYSTEM_PROMPT.format(specialist_descriptions=describe_specialists()),
-            messages=[{"role": "user", "content": "\n\n".join(classification_context)}],
+            messages=build_history_messages(brief, "\n\n".join(classification_context)),
             max_tokens=1536,
-            # Real, live-found reason (2026-09-21, same category as ideation_service.py's own
-            # comment): a side-by-side test on a brand-new session (no existing element) had the
-            # self-hosted TIER_1 model route to "direct_fix" anyway — directly disobeying this
-            # prompt's own explicit "if none is [available], do not choose direct_fix" rule —
-            # while Groq correctly returned "full_image". A wrong route here wastes a whole
-            # generation attempt, so this classification skips local-first routing.
             prefer_local=False,
-            # Real live "thinking" text, per the user's explicit ask (2026-09-21).
-            on_delta=lambda delta: emit("llm_delta", node="orchestrator", text=delta),
         )
         parsed = extract_json(result.text)
         chosen_route = str(parsed.get("route") or "")
         target_specialist = str(parsed.get("target_specialist") or "").strip() or None
+        dynamic_plan = parsed.get("plan") or None
 
         if chosen_route not in _VALID_ROUTES:
             raise ValueError(f"model returned an invalid route: {chosen_route!r}")
@@ -145,28 +197,106 @@ async def route(state: GraphState) -> GraphState:
             )
             chosen_route, target_specialist = "full_image", None
 
+        # Code-level safety net: if the user explicitly says "image edit" or "edit image" (or
+        # similar patterns), the intent is a visual modification via image_editor, not a text
+        # overlay. The LLM often confuses the two when the request mentions prices/discounts,
+        # because overlay_artist's description historically attracted those keywords. This
+        # deterministic check overrides the LLM when there's a clear mismatch.
+        _msg_lower = (user_message or "").lower()
+        _IMAGE_EDIT_PATTERNS = ("image edit", "edit image", "edit this image", "edit the image", "strike the", "strike out")
+        if (
+            chosen_route == "direct_fix"
+            and target_specialist == "overlay_artist"
+            and any(p in _msg_lower for p in _IMAGE_EDIT_PATTERNS)
+        ):
+            log.info(
+                "orchestrator_override_overlay_to_composition",
+                extra={"_extra_original": "overlay_artist", "_extra_override": "composition_artist"},
+            )
+            target_specialist = "composition_artist"
+            
+        if chosen_route == "dynamic" and not dynamic_plan:
+            raise ValueError("model returned a dynamic route but an empty plan")
+
         state["route"] = chosen_route
         state["target_specialist"] = target_specialist
+        state["dynamic_plan"] = dynamic_plan
+        
+        # Shadow mode mismatch check
+        laya_route = await laya_task
+        if laya_route and laya_route != chosen_route:
+            log.warning(
+                "orchestrator_route_mismatch", 
+                extra={"_extra_llm_route": chosen_route, "_extra_laya_route": laya_route}
+            )
+            
         log.info(
             "orchestrator_routed",
             extra={"_extra_route": chosen_route, "_extra_target": target_specialist, "_extra_method": "llm"},
         )
         emit("route_decided", route=chosen_route, target_specialist=target_specialist)
     except (ProviderUnavailable, ValueError) as exc:
-        # Both LLM gateways are down, or it returned something unparseable — degrade to the old
-        # heuristic rather than crashing the turn, but log it clearly as a degraded path.
-        fallback = _keyword_fallback_route((user_message or brief_idea).lower())
-        state["route"] = fallback
-        state["target_specialist"] = None
-        log.warning(
-            "orchestrator_routing_fallback",
-            extra={"_extra_route": fallback, "_extra_reason": str(exc)},
-        )
-        emit("route_decided", route=fallback, target_specialist=None, degraded=True)
+        # LLM gateways are down, or it returned something unparseable.
+        # Try asking the Laya model to predict the specialist first.
+        options_list = list(SPECIALIST_REGISTRY.keys())
+        try:
+            # We must recreate the task because laya_task might have been awaited and failed.
+            laya_specialist = await LayaProvider.predict_choice(
+                state=f"{brief_idea}\n\nUser request: {user_message}",
+                options=options_list
+            )
+        except Exception:
+            laya_specialist = None
+
+        if laya_specialist and laya_specialist in SPECIALIST_REGISTRY:
+            log.warning(
+                "orchestrator_routing_laya_fallback",
+                extra={"_extra_route": "approval_required", "_extra_laya_specialist": laya_specialist, "_extra_reason": str(exc)},
+            )
+            state["route"] = "approval_required"
+            state["target_specialist"] = None
+            state["dynamic_plan"] = None
+            state["result"] = {
+                "message": f"I couldn't confidently decide how to route this request, but my fallback model suggests routing this to **{laya_specialist}**. Do you want to proceed?",
+                "options": [
+                    {
+                        "id": f"laya_approve_{laya_specialist}",
+                        "label": f"Yes, use {laya_specialist}",
+                        "description": SPECIALIST_REGISTRY[laya_specialist].description
+                    },
+                    {
+                        "id": "cancel",
+                        "label": "No, cancel",
+                        "description": "Stop this task"
+                    }
+                ]
+            }
+            emit("route_decided", route="approval_required", target_specialist=laya_specialist, degraded=True)
+        else:
+            # Both LLM and Laya failed (or Laya couldn't pick) — degrade to the old heuristic.
+            fallback_route, fallback_target, fallback_plan = _keyword_fallback_route((user_message or brief_idea).lower())
+            state["route"] = fallback_route
+            state["target_specialist"] = fallback_target
+            state["dynamic_plan"] = fallback_plan
+            log.warning(
+                "orchestrator_routing_fallback",
+                extra={"_extra_route": fallback_route, "_extra_reason": str(exc)},
+            )
+            emit("route_decided", route=fallback_route, target_specialist=None, degraded=True)
+
+    # `_recent_chat_history` and `_retrieved_memory` were real, useful context for THIS classification 
+    # call (and ideation's own calls before it) — but every Lead/specialist downstream builds its own 
+    # context via a raw `json.dumps(brief)` dump (`leads/base.py` etc.), which would otherwise restate 
+    # the same conversation history a second time in every single specialist call for the rest of this turn.
+    # Stripped here, the one real boundary between "the orchestration layer, which genuinely benefits from 
+    # real memory" and "specialist calls, which already get everything they need via `referenced_element_block`/explicit context".
+    for scratch_key in ("_recent_chat_history", "_retrieved_memory"):
+        if scratch_key in (state.get("brief") or {}):
+            state["brief"] = {k: v for k, v in state["brief"].items() if k != scratch_key}
 
     return state
 
 
 def route_condition(state: GraphState) -> str:
     """The conditional-edge selector LangGraph calls after `route` runs."""
-    return state.get("route") or "full_image"
+    return state.get("route") or "dynamic"

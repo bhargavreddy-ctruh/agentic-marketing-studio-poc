@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import save_asset
-from ...providers.image.pollinations import get_image_gen_provider
+from ...providers.image.replicate_provider import get_image_gen_provider
 from .base import Tool, ToolResult
 from .registry import register_tool
 

@@ -198,6 +198,22 @@ async def _stream_one_attempt(
             if delta.get("tool_calls"):
                 _merge_streamed_tool_call_delta(tool_call_accum, delta["tool_calls"])
 
+        # A real, live-found failure shape (2026-09-21), in two variants: OpenRouter sometimes
+        # returns a genuine HTTP 200 with only a couple of raw lines, no `choices` ever carrying
+        # content or tool_calls, and no `finish_reason` at all. The self-hosted Ollama model has
+        # its own variant of the same problem — a normal `finish_reason: "stop"` chunk, but zero
+        # content deltas ever sent (confirmed live: 5 raw lines total, nothing but role+finish).
+        # Either way the result is unusable — our runner.py always needs either tool_calls to
+        # continue on, or real text to parse as the final answer — so both count as retryable
+        # regardless of what `stop_reason` came back, rather than silently returning an empty
+        # "successful" LLMResult that only fails much later as an opaque "empty model response"
+        # deep in the specialist parser, after discarding that run's real prior tool calls.
+        if not text_parts and not tool_call_accum:
+            raise _RetryableStreamError(
+                provider_name,
+                f"{model} stream ended with no content (raw_lines={raw_line_count}, stop_reason={stop_reason})",
+            )
+
         log.info(
             "llm_http_call",
             extra={

@@ -8,16 +8,27 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
-from ...core.events import emit, mark_turn_done, set_current_session, start_new_turn
-from ...core.exceptions import NotFoundError, ValidationFailed
+from ...core.events import (
+    emit,
+    get_current_turn_events,
+    get_current_turn_thinking,
+    mark_turn_done,
+    set_current_session,
+    start_new_turn,
+)
+from ...core.exceptions import Forbidden, NotFoundError, ValidationFailed
+from ...core.middleware.logging import get_logger
 from ...mappers.session_mapper import SessionMapper
 from ...models.base import async_session_factory
 from ...models.canvas_element import CanvasElementModel
+from ...models.chat_turn import ChatTurnModel
 from ...models.session import SessionModel
-from ...repositories.base import CanvasRepository, SessionRepository
+from ...repositories.base import CanvasRepository, ChatTurnRepository, SessionRepository
 from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
-from ...schemas.sessions.responses import IdeationOption, IdeationPrompt, SessionResponse
+from ...schemas.sessions.responses import ChatTurnResponse, IdeationOption, IdeationPrompt, SessionResponse
+from ..canvas.versioning_service import CanvasVersioningService
 from ..compliance.compliance_gate import run_compliance_gate
 from .graph import get_graph
 
@@ -27,34 +38,192 @@ from .graph import get_graph
 # variable holding it. Kept at module scope (not per-instance) since SessionService itself is
 # constructed fresh per request; the task must outlive that.
 _background_tasks: set[asyncio.Task] = set()
+_RUNNING_TURNS: dict[str, asyncio.Task] = {}
+log = get_logger(__name__)
+
+def cancel_running_turn(session_id: str) -> bool:
+    """Cancels the currently running _run_turn task for the given session_id, if any."""
+    task = _RUNNING_TURNS.get(session_id)
+    if task and not task.done():
+        task.cancel()
+        return True
+    return False
+
+
+
+def _resolve_yes_no_reply(reply: str, option_labels: dict[str, str]) -> str | None:
+    """See `post_turn`'s own comment for the real bug this fixes. Only ever resolves when the
+    reply is unambiguously a yes/no-shaped word (`is_approval`/`is_cancel`) AND one of the pending
+    options' own label genuinely reads as the matching yes/no answer — never guesses among options
+    that don't have that shape (most ideation choices are subject/style picks, not yes/no)."""
+    if is_approval(reply):
+        target_prefixes = ("yes", "approve")
+    elif is_cancel(reply):
+        target_prefixes = ("no", "reject", "cancel")
+    else:
+        return None
+    for label in option_labels.values():
+        if label.strip().lower().startswith(target_prefixes):
+            return label
+    return None
 
 
 class SessionService:
-    def __init__(self, sessions: SessionRepository, canvas: CanvasRepository):
+    def __init__(
+        self,
+        sessions: SessionRepository,
+        canvas: CanvasRepository,
+        versioning: CanvasVersioningService,
+        chat_turns: ChatTurnRepository,
+    ):
         # Depends on the Protocols, never a concrete SQLite class (Dependency Inversion).
         self._sessions = sessions
         self._canvas = canvas
+        self._chat_turns = chat_turns
+        # Real, live-found gap (2026-09-21): a chat-driven direct_fix used to mutate an element's
+        # storage_ref directly, bumping `version` by hand with no row ever written to
+        # CanvasElementVersionModel — the exact undo/redo/version-history infrastructure this
+        # project already built for Regenerate/Comment/Direct-edit (canvas/routes.py's
+        # /undo,/redo,/versions endpoints) silently didn't apply to chat edits at all, so a user
+        # asking to modify an image via chat had no way back to the previous version. Routing
+        # through the same CanvasVersioningService every other edit path already uses fixes that
+        # for free, and also makes chat edits respect "approve" mode's staging like every other
+        # edit type already does (previously chat edits always applied immediately regardless).
+        self._versioning = versioning
 
-    async def start_session(self, initial_message: str, *, approval_mode: str = "auto") -> SessionResponse:
-        session = SessionModel(
-            id=uuid.uuid4().hex, status="ideating", brief={}, approval_mode=approval_mode
-        )
+    async def create_session(
+        self, *, user_id: str, approval_mode: str = "auto", title: str | None = None
+    ) -> SessionResponse:
+        """Persists a bare session row and returns immediately, with no turn run yet.
+
+        Split out from running the first turn (2026-09-21, real live-testing bug: the client
+        can't open the SSE stream (`GET /{id}/events`) until it has a session_id, so the old
+        one-call `start_session` that created the row AND ran the first turn synchronously meant
+        the very first turn's `llm_delta`/node events were emitted into a queue nobody was
+        listening to yet, and got silently discarded by the next turn's `start_new_turn()`. Node
+        Mode and streamed "thinking" were therefore always empty for a session's first message —
+        the most common turn there is. Splitting lets the client create the session, open the
+        stream, THEN call `post_turn` for the first message, so turn 1 streams exactly like every
+        later turn.
+
+        `user_id` (Tasks_Workflows.md #2): every session is now a real, owned "workflow" — the
+        route handler gets it from `CurrentUserDep`, never trusted from request body."""
+        kwargs = {"id": uuid.uuid4().hex, "status": "ideating", "brief": {}, "approval_mode": approval_mode, "user_id": user_id}
+        if title:
+            kwargs["title"] = title
+        session = SessionModel(**kwargs)
         session = await self._sessions.add(session)
-        return await self._run_turn(session, user_message=initial_message)
+        return SessionMapper.to_response(session)
+
+    async def list_sessions(self, *, user_id: str) -> list[SessionResponse]:
+        sessions = await self._sessions.list_for_user(user_id)
+        return [SessionMapper.to_response(s) for s in sessions]
+
+    async def list_turns(self, session_id: str, *, user_id: str) -> list[ChatTurnResponse]:
+        """Real, persisted chat history (2026-09-22) — the actual fix for "the chat forgets
+        everything on refresh": every prior turn's real user message, the real accumulated
+        "thinking" text streamed live during it, and the real final response, not just the
+        session's current status. Ownership-checked the same way every other session route is."""
+        await self._get_owned_session(session_id, user_id=user_id)
+        turns = await self._chat_turns.list_for_session(session_id)
+        
+        referenced_ids = set()
+        for t in turns:
+            if getattr(t, "referenced_element_ids", None):
+                referenced_ids.update(t.referenced_element_ids)
+        
+        referenced_elements = {}
+        if referenced_ids:
+            existing_elements = await self._canvas.list_for_session(session_id)
+            from ...mappers.canvas_mapper import CanvasMapper
+            for e in existing_elements:
+                if e.id in referenced_ids:
+                    resp = CanvasMapper.to_response(e)
+                    kind = "video" if resp.element_type == "video" else "audio" if resp.element_type == "audio" else "text" if resp.element_type == "text" else "image"
+                    url = f"/api/v1/canvas/assets/{resp.storage_ref}" if resp.storage_ref else ""
+                    referenced_elements[e.id] = {
+                        "id": resp.id,
+                        "kind": kind,
+                        "url": url,
+                        "description": resp.description,
+                    }
+
+        return [
+            ChatTurnResponse(
+                id=t.id, user_text=t.user_text, thinking_text=t.thinking_text,
+                assistant_text=t.assistant_text, created_at=t.created_at,
+                events=t.events_json or [],
+                referenced_elements=[referenced_elements[rid] for rid in getattr(t, "referenced_element_ids", []) or [] if rid in referenced_elements]
+            )
+            for t in turns
+        ]
 
     async def post_turn(
         self,
         session_id: str,
         *,
+        user_id: str,
         picked_option_id: str | None,
         free_text: str | None,
-        referenced_element_id: str | None = None,
+        referenced_element_ids: list[str] | None = None,
     ) -> SessionResponse:
-        session = await self._sessions.get(session_id)
-        if session is None:
-            raise NotFoundError("Session", session_id)
+        session = await self._get_owned_session(session_id, user_id=user_id)
         if not picked_option_id and not free_text:
             raise ValidationFailed("Provide either picked_option_id or free_text")
+
+        # A real, chat-actionable resolution for a staged per-element direct edit (2026-09-22, see
+        # the matching comment where `_pending_edit_approval_id` is set in `_run_turn_inner`) —
+        # handled here, BEFORE the graph ever runs, since approving/rejecting a staged edit is not
+        # a new creative request for the ideation/orchestrator pipeline to interpret. Reuses the
+        # exact same `CanvasVersioningService` methods the canvas UI's own Approve/Reject buttons
+        # already call (`api/v1/canvas/routes.py`'s `/approve-edit`/`/reject-edit`), so a chat reply
+        # and a canvas click do exactly the same real thing.
+        pending_edit_id = session.brief.get("_pending_edit_approval_id")
+        if pending_edit_id:
+            reply = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
+                picked_option_id, picked_option_id
+            )
+            if is_approval(reply) or picked_option_id == "approve_edit":
+                await self._versioning.approve_pending_edit(pending_edit_id)
+                message = "Approved — the staged edit is now the current version."
+            elif is_cancel(reply) or picked_option_id == "reject_edit":
+                await self._versioning.reject_pending_edit(pending_edit_id)
+                message = "Rejected — discarded, nothing changed."
+            else:
+                # An unclear reply never means yes (core/approval.py's own rule, already applied
+                # to the video pipeline's motion-spend gate) — leave the gate open rather than
+                # guessing at a real, currently-pending change.
+                session = await self._sessions.update(session)
+                return SessionMapper.to_response(session)
+            session.brief = {k: v for k, v in session.brief.items() if k != "_pending_edit_approval_id"}
+            session.status = "completed"
+            session.next_prompt_json = IdeationPrompt(message=message, options=[], allow_free_text=True).model_dump()
+            session = await self._sessions.update(session)
+            return SessionMapper.to_response(session)
+
+        # A real, live-found bug (2026-09-22, traced from a real session's `brief.idea` getting
+        # corrupted to the literal string "approve"): a free-text reply to an open ideation
+        # clarifying question (`_last_option_labels` set, real pickable options shown) that doesn't
+        # literally match any option's id/label — e.g. typing "approve" instead of clicking a
+        # button labeled "Yes, add $1500 RS as the price tag." — fell straight through as raw,
+        # context-free `user_message` text. `ideation_service.py`'s own clarification-accumulation
+        # fix then concatenated it onto the pending question text into one confusing blob, which is
+        # what the orchestrator's classifier actually saw as "the user's latest message" — a real,
+        # traced cause of at least one live misroute. Resolved deterministically here, same
+        # "a plain check beats trusting an LLM every time" reasoning as `_is_bare_greeting`/
+        # `_check_price_stated` (`ideation_service.py`) and the `_pending_edit_approval_id` gate
+        # just above: if the reply is a clear yes/no-shaped word AND one of the pending options
+        # itself reads as the yes/no answer (its own label starts with "yes"/"no"), resolve to that
+        # option's real label — exactly as if it had been clicked — instead of passing an
+        # unresolved bare word forward. Genuinely ambiguous option sets (neither option reads as
+        # yes/no — most subject/style disambiguation choices) are left untouched; no unsafe guess.
+        last_option_labels = session.brief.get("_last_option_labels") or {}
+        if not picked_option_id and free_text and last_option_labels:
+            reply = free_text.strip()
+            if reply not in last_option_labels and reply not in last_option_labels.values():
+                resolved_label = _resolve_yes_no_reply(reply, last_option_labels)
+                if resolved_label:
+                    free_text = resolved_label
 
         # A card pick is just shorthand for its label — the graph's ideation node only deals in
         # plain text either way (Architecture.md section 1d: a pick is a shortcut, not a
@@ -63,17 +232,25 @@ class SessionService:
             picked_option_id, picked_option_id
         )
         return await self._run_turn(
-            session, user_message=user_message, referenced_element_id=referenced_element_id
+            session, user_message=user_message, referenced_element_ids=referenced_element_ids
         )
 
-    async def get_session(self, session_id: str) -> SessionResponse:
+    async def get_session(self, session_id: str, *, user_id: str) -> SessionResponse:
+        session = await self._get_owned_session(session_id, user_id=user_id)
+        return SessionMapper.to_response(session)
+
+    async def _get_owned_session(self, session_id: str, *, user_id: str) -> SessionModel:
         session = await self._sessions.get(session_id)
         if session is None:
             raise NotFoundError("Session", session_id)
-        return SessionMapper.to_response(session)
+        # Sessions created before auth existed (or orphaned test data) have `user_id=None` — never
+        # treated as "owned by everyone"; only a real matching owner may act on them.
+        if session.user_id != user_id:
+            raise Forbidden("This workflow belongs to a different user")
+        return session
 
     async def _run_turn(
-        self, session: SessionModel, *, user_message: str, referenced_element_id: str | None = None
+        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None
     ) -> SessionResponse:
         # Sets the ContextVar every nested call (Leads, specialists, tools) reads to emit live
         # events for THIS turn, without session_id being threaded through every function
@@ -81,15 +258,65 @@ class SessionService:
         set_current_session(session.id)
         start_new_turn(session.id)
         emit("turn_started", user_message=user_message)
+        # A real, persisted "a turn is actually running" marker (2026-09-22) — a real, live-found
+        # gap: nothing on the session's own row ever indicated a turn was in flight server-side, so
+        # a page reload mid-generation had no way to tell "still working" apart from whatever
+        # status was left over from the LAST completed turn — Node Mode/chat just looked frozen or
+        # blank, even though the graph below keeps running to completion regardless of the client
+        # (uvicorn does not cancel this coroutine on a client disconnect). Persisted immediately,
+        # BEFORE the real — possibly slow — graph execution, so a concurrent GET /{session_id} from
+        # a reloaded tab can actually see it and poll until it resolves, instead of guessing.
+        session.status = "generating"
+        session.next_prompt_json = None
+        session = await self._sessions.update(session)
+        
+        task = asyncio.current_task()
+        if task:
+            _RUNNING_TURNS[session.id] = task
+            
         try:
             return await self._run_turn_inner(
-                session, user_message=user_message, referenced_element_id=referenced_element_id
+                session, user_message=user_message, referenced_element_ids=referenced_element_ids
             )
+        except Exception as exc:
+            # A real, live-found regression in the "generating" marker just added above
+            # (2026-09-22): it was written unconditionally, but nothing guaranteed it would ever
+            # be overwritten by a TERMINAL status if the turn crashed with a genuine unhandled
+            # exception (as opposed to a `SpecialistFailed` a graph node already catches and turns
+            # into a normal error `result` — those still complete normally). Caught live: a bare
+            # `NameError` in `graph.py` (a missing `import json`, since fixed) left a real user's
+            # session stuck at `"generating"` forever — permanently, since nothing else ever wrote
+            # to that row again. The NEW frontend poll (`ChatPanel.tsx`) only stops polling once
+            # status moves past `"generating"`, so this bug would have made THAT poll loop forever
+            # too, on any future crash, not just this one. Never let that repeat: any unhandled
+            # exception here now resolves the session to a real, honest terminal state before
+            # re-raising (preserving the existing "genuine 500, not a fabricated success" behavior
+            # for the CURRENT request) — so a reloaded tab's poll always terminates either way.
+            log.error("turn_crashed", extra={"_extra_error": str(exc)})
+            session.status = "error"
+            session.next_prompt_json = IdeationPrompt(
+                message=f"Something went wrong while generating: {exc}",
+                options=[], allow_free_text=True,
+            ).model_dump()
+            await self._sessions.update(session)
+            raise
+        except asyncio.CancelledError:
+            log.info("turn_cancelled", extra={"_extra_session": session.id})
+            session.status = "error"
+            session.brief["_error"] = "Turn cancelled by user."
+            session.next_prompt_json = IdeationPrompt(
+                message="Generation cancelled by user.",
+                options=[], allow_free_text=True,
+            ).model_dump()
+            await self._sessions.update(session)
+            emit("turn_completed", status=session.status)
+            raise
         finally:
+            _RUNNING_TURNS.pop(session.id, None)
             await mark_turn_done(session.id)
 
     async def _run_turn_inner(
-        self, session: SessionModel, *, user_message: str, referenced_element_id: str | None = None
+        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None
     ) -> SessionResponse:
         # The direct_fix route needs something to act on — the most recently produced element by
         # default (Memory.md, Phase 3 conformance audit), or the one the user explicitly picked in
@@ -97,28 +324,102 @@ class SessionService:
         # or unknown id just falls back to the default rather than erroring the whole turn.
         existing_elements = await self._canvas.list_for_session(session.id)
         latest_element = existing_elements[-1] if existing_elements else None
-        if referenced_element_id:
-            referenced = next((e for e in existing_elements if e.id == referenced_element_id), None)
-            if referenced is not None:
-                latest_element = referenced
+        referenced_elements = []
+        if referenced_element_ids:
+            for rid in referenced_element_ids:
+                ref = next((e for e in existing_elements if e.id == rid), None)
+                if ref is not None:
+                    referenced_elements.append(ref)
+            if referenced_elements:
+                latest_element = referenced_elements[-1]
         brief_for_graph = dict(session.brief)
+        # Real conversation history (2026-09-22, per an explicit user ask: "make sure the llm has
+        # chat history context cache, so it can work in a session") — a real, live-found gap: this
+        # app already persists every real turn verbatim (`ChatTurnModel`, `self._chat_turns`), but
+        # NOTHING ever fed it back into an actual LLM call — every ideation/orchestrator call was a
+        # single stateless message built from `brief.idea`, a summary the model itself re-writes
+        # every turn. `brief.idea` staying lossy was a deliberate, documented tradeoff (the
+        # "numeric erosion" bug — resummarizing repeatedly lost real figures like "$1500/12% off")
+        # but the fix for THAT bug never replaced real memory with something better, it just
+        # accepted losing it. Real, VERBATIM past turns (never re-summarized, so they can't erode
+        # the same way) are read here and handed to `ideation_service.py`/`orchestrator.py` as a
+        # real scratch field — capped to the most recent 6 turns to bound token growth on a
+        # long-lived session (`test_set`'s real 26-element session made this a genuine concern, not
+        # a hypothetical one). Read-only and never persisted into `session.brief` (recomputed fresh
+        # from the real `chat_turns` table every turn, same treatment as `approval_mode` above).
+        recent_turns = await self._chat_turns.list_for_session(session.id)
+        if recent_turns:
+            brief_for_graph["_recent_chat_history"] = [
+                {"user": t.user_text, "assistant": t.assistant_text or ""}
+                for t in recent_turns[-6:]
+            ]
+        
+        # Real, semantic LLM context caching (2026-09-23) — retrieves older, relevant turns from LlamaIndex
+        # so the LLM doesn't lose long-term memory beyond the strict 6-turn rolling window above.
+        from ..knowledge.chat_memory_service import ChatMemoryService
+        chat_memory = ChatMemoryService()
+        if user_message:
+            retrieved_memory = await chat_memory.get_relevant_history(session.id, user_message)
+            if retrieved_memory:
+                brief_for_graph["_retrieved_memory"] = retrieved_memory
         # Read-only, sourced from the session's own column, never persisted back into brief JSON
         # (Memory.md, Phase 4: "approve" mode's per-stage pipeline gates).
         brief_for_graph["approval_mode"] = session.approval_mode
+        # Fallback fields for backwards compatibility with parts of graph that expect latest_element
         if latest_element:
             brief_for_graph["latest_element_id"] = latest_element.id
             brief_for_graph["latest_element_storage_ref"] = latest_element.storage_ref
             brief_for_graph["latest_element_type"] = latest_element.element_type
-            # The original generation prompt, not just the brief's overall campaign idea — a
-            # text-only specialist has no memory of its own prior run and no way to see the
-            # storage_ref's pixels, so the exact original description is real grounding a general
-            # "campaign idea so far" text can't fully substitute for (Memory.md, Phase 4: the same
-            # real bug found in regenerate/comment resolution — without this, a direct_fix could
-            # equally invent an unrelated image).
-            meta = latest_element.metadata_json or {}
-            brief_for_graph["latest_element_description"] = (
+
+        # Multi-element context
+        ref_context = []
+        # If no specific references were provided, fallback to the latest element, if any
+        elements_to_contextualize = referenced_elements if referenced_elements else ([latest_element] if latest_element else [])
+        
+        for el in elements_to_contextualize:
+            meta = el.metadata_json or {}
+            description = (
                 meta.get("image_prompt") or meta.get("frame_prompt") or meta.get("motion_prompt")
+                or meta.get("voiceover_line") or meta.get("text")
             )
+            if description is None:
+                if el.element_type == "audio":
+                    description = await self._describe_uploaded_audio(el.storage_ref)
+                elif el.element_type == "image":
+                    description = await self._describe_uploaded_image(el.storage_ref)
+            
+            ref_context.append({
+                "id": el.id,
+                "storage_ref": el.storage_ref,
+                "element_type": el.element_type,
+                "description": description or "(no description recorded)"
+            })
+            
+            # for backwards compatibility for older prompts relying on this
+            if el.id == (latest_element.id if latest_element else None):
+                brief_for_graph["latest_element_description"] = description
+                
+        brief_for_graph["referenced_elements_context"] = ref_context
+
+        from ..knowledge.guardrail_service import GuardrailService
+        from ...core.guardrails import coerce_set
+        guardrail_svc = GuardrailService(self._sessions)
+        
+        # Check if the session currently has any guardrails. If not, we should infer them.
+        existing_guardrails = coerce_set(session.brief.get("guardrails"))
+        has_rules = existing_guardrails and len(existing_guardrails.rules) > 0
+        
+        # Automatically infer guardrails from the user's prompt if none exist, or if this is the first turn.
+        if (not recent_turns or not has_rules) and user_message:
+            context_for_guardrails = session.brief.get("idea") or user_message
+            await guardrail_svc.infer_initial_guardrails(session.id, context_for_guardrails)
+            
+        # Guarantees the state has deterministic guardrails before hitting any agents
+        guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
+        brief_for_graph["guardrails"] = guardrail_set.model_dump()
+
+        from ...core.events import set_current_guardrails_xml
+        set_current_guardrails_xml(guardrail_set.render())
 
         graph = get_graph()
         result_state = await graph.ainvoke(
@@ -131,7 +432,11 @@ class SessionService:
         returned_brief = result_state.get("brief") or session.brief
         _scratch_keys = (
             "latest_element_id", "latest_element_storage_ref", "latest_element_type",
-            "latest_element_description", "approval_mode",
+            "latest_element_description", "approval_mode", "_recent_chat_history", "_retrieved_memory",
+            # This turn's own mood/style announcement (ideation_service.py) — read out via
+            # result.metadata below, same as partial_generation_note; never persisted, or it would
+            # keep re-announcing an old choice on later, unrelated turns.
+            "style_note",
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}
         result = result_state.get("result")
@@ -152,43 +457,123 @@ class SessionService:
             session.status = "awaiting_approval" if session.brief.get("video_stage") else "ideating"
             prompt = self._to_ideation_prompt(result)
         elif result and result.get("storage_ref"):
-            session.status = "completed"
             element_id: str | None = None
+            # Real, live-found bug (2026-09-22, independent review): "approve" mode's
+            # `apply_or_stage` only sets `pending_storage_ref` — the element's real `storage_ref`
+            # is untouched until the user explicitly approves it (canvas/routes.py's
+            # /approve-edit). The turn used to unconditionally report "completed" and schedule QA
+            # regardless, so a staged-but-not-yet-approved chat edit got a real compliance verdict
+            # written against the OLD, unedited asset while the client was told the turn finished.
+            edit_staged_not_applied = False
             if result.get("update_existing_element_id"):
-                # A direct_fix that adjusted the existing element in place — bump its version
-                # rather than creating an unrelated new one (per-element versioning, Architecture.md
-                # section 1c), keeping the same id so a client following that element sees the fix.
+                # A direct_fix that adjusted the existing element in place — recorded as a real
+                # new version (not a raw mutation) via the same CanvasVersioningService every
+                # other edit path (regenerate/comment/direct-edit) already uses, so the existing
+                # /undo, /redo, /versions endpoints work for chat-driven edits too, and "approve"
+                # mode correctly stages this instead of always applying immediately.
                 target = await self._canvas.get_element(result["update_existing_element_id"])
                 if target is not None:
-                    target.storage_ref = result["storage_ref"]
-                    target.metadata_json = {**target.metadata_json, **result.get("metadata", {})}
-                    target.version += 1
-                    target = await self._canvas.update_element(target)
+                    target = await self._versioning.apply_or_stage(
+                        target,
+                        storage_ref=result["storage_ref"],
+                        metadata={**target.metadata_json, **result.get("metadata", {})},
+                        action="direct_fix",
+                        approval_mode=session.approval_mode,
+                        # A direct_fix can genuinely change what KIND of asset this element is
+                        # (graph.py's `_ELEMENT_TYPE_BY_TOOL`, e.g. video_stitcher turning a still
+                        # image into a video) — passed through so the version history records the
+                        # real type at each version, not just at the element's latest one.
+                        element_type=result.get("element_type"),
+                    )
                     element_id = target.id
+                    edit_staged_not_applied = target.pending_storage_ref is not None
                 else:
                     element_id = (await self._add_new_element(session.id, result)).id
             else:
                 element_id = (await self._add_new_element(session.id, result)).id
+                # Real intermediate artifacts this turn genuinely produced beyond the main result
+                # (2026-09-22) — a scene's starting still, a raw pre-stitch clip, a standalone
+                # voiceover track, an overlaid still. Only for a brand-new element, never the
+                # `update_existing_element_id` (direct_fix) branch above — a direct_fix's result
+                # never populates `extra_elements` (only Motion Lead does today), so this is a
+                # no-op there regardless, but the placement itself matches the reference
+                # architecture's intent: these are byproducts of a fresh GENERATION, not of an
+                # in-place EDIT to something that already exists.
+                for extra in result.get("extra_elements") or []:
+                    # An honest "not checked" (the same disclosed meaning `compliance_status:
+                    # "disabled"` already carries when the QA gate is turned off entirely) — the
+                    # compliance gate only ever runs against the turn's MAIN result, never these
+                    # byproducts, so leaving the model's own "running" default here would show a
+                    # QA check that will never actually complete.
+                    await self._add_new_element(session.id, extra, compliance_status="disabled")
 
-            # Real QA, kicked off automatically right after generation — a live-found gap
-            # (2026-09-21): `run_compliance_gate` already existed and worked, but nothing in the
-            # real user-facing flow ever called it. NOT awaited here on purpose — per the user's
-            # own explicit ask, the element should appear on canvas immediately (already
-            # `compliance_status: "running"` by the model's own default) while QA runs
-            # afterward, rather than the whole turn waiting on it and only showing the element
-            # once QA has already finished.
-            #
-            # `COMPLIANCE_QA_ENABLED=false` (config.py) skips this entirely — a real extra round
-            # of LLM/vision calls per generation, worth turning off for fast local iteration. The
-            # element is marked "disabled", not "passed" — an honest "not checked", never a
-            # fabricated verdict.
-            if settings.compliance_qa_enabled:
-                self._schedule_compliance_check(element_id)
+            if edit_staged_not_applied:
+                # Honest status — the edit is real and staged, but not yet the current version;
+                # QA against the still-unchanged asset would tell the user nothing true about what
+                # they're about to approve.
+                session.status = "awaiting_approval"
+                # Real, live-found gap (2026-09-22): `options=[]` here meant this gate — unlike
+                # every OTHER approval gate in this app (the video pipeline's narrative/scene/motion
+                # stages) — had no chat-actionable way to resolve it at all; a user had to go find
+                # the canvas's separate Elements drawer instead, even though this message reads
+                # like it expects a reply. `_pending_edit_approval_id` (a normal persisted `brief`
+                # field, not a same-turn scratch key — must survive to the NEXT turn) is read by
+                # `post_turn`'s own short-circuit below, which resolves a pick/reply here without
+                # ever routing through the ideation/orchestrator graph — approving/rejecting a
+                # staged edit isn't a new creative request.
+                session.brief = {**session.brief, "_pending_edit_approval_id": element_id}
+                prompt = IdeationPrompt(
+                    message="A direct edit is staged for this element — approve or reject it below "
+                    "before it becomes the current version.",
+                    options=[
+                        {"id": "approve_edit", "label": "Approve", "description": "Apply this staged edit"},
+                        {"id": "reject_edit", "label": "Reject", "description": "Discard this staged edit"},
+                    ],
+                    allow_free_text=True,
+                )
             else:
-                element = await self._canvas.get_element(element_id)
-                if element is not None:
-                    element.compliance_status = "disabled"
+                session.status = "completed"
+                # Real QA, kicked off automatically right after generation — a live-found gap
+                # (2026-09-21): `run_compliance_gate` already existed and worked, but nothing in the
+                # real user-facing flow ever called it. NOT awaited here on purpose — per the user's
+                # own explicit ask, the element should appear on canvas immediately (already
+                # `compliance_status: "running"` by the model's own default) while QA runs
+                # afterward, rather than the whole turn waiting on it and only showing the element
+                # once QA has already finished.
+                #
+                # `COMPLIANCE_QA_ENABLED=false` (config.py) skips this entirely — a real extra round
+                # of LLM/vision calls per generation, worth turning off for fast local iteration. The
+                # element is marked "disabled", not "passed" — an honest "not checked", never a
+                # fabricated verdict.
+                if settings.compliance_qa_enabled:
+                    self._schedule_compliance_check(element_id)
+                else:
+                    element = await self._canvas.get_element(element_id)
+                    if element is not None:
+                        element.compliance_status = "disabled"
                     await self._canvas.update_element(element)
+
+                # A real, honest disclosure (2026-09-22, a bug caught via live testing under real
+                # provider instability, not just reviewed): multi-generation degrades gracefully
+                # when one variant fails (`graph.py`'s `_run_multi_generation`) rather than failing
+                # the whole turn — correct, but it used to do so SILENTLY, reporting "completed"
+                # with the exact same message a full success gets even when e.g. only 1 of 2
+                # requested images actually got made (Rules.md: no fabricated success). Surfaced
+                # as a real `next_prompt` even though status is "completed" — the frontend's own
+                # `describeResponse` already checks `next_prompt` before falling back to the
+                # generic "Generated" line, so this note is what actually shows instead.
+                partial_note = (result.get("metadata") or {}).get("partial_generation_note")
+                if partial_note:
+                    prompt = IdeationPrompt(message=partial_note, options=[], allow_free_text=True)
+                else:
+                    # The mood/style direction Ideation auto-chose for this turn, if any (point 3 of
+                    # ideation_service.py's _SYSTEM_PROMPT) — a real, disclosed creative decision,
+                    # not a silent guess, surfaced the same way partial_generation_note is (a real
+                    # `next_prompt` even though status is "completed"). Lower priority than a partial
+                    # -failure disclosure, which is more urgent when both are somehow true at once.
+                    style_note = (result.get("metadata") or {}).get("style_note")
+                    if style_note:
+                        prompt = IdeationPrompt(message=style_note, options=[], allow_free_text=True)
         elif result:
             # A placeholder or error result — surface the message, nothing to persist yet.
             session.status = "error" if result_state.get("error") else "pending"
@@ -196,19 +581,110 @@ class SessionService:
 
         session.next_prompt_json = prompt.model_dump() if prompt else None
         session = await self._sessions.update(session)
+
+        # Real, persisted chat history (2026-09-22) — one row per turn, capturing what a live
+        # client would have shown: the real user message, the real accumulated "thinking" text
+        # streamed during this turn (core/events.py), and the real final response text. Mirrors
+        # the frontend's own `describeResponse()` fallback for a real "completed" turn with no
+        # `next_prompt` (a fresh generation) — kept in sync deliberately, so restored history reads
+        # exactly like the live turn did, not a differently-worded reconstruction.
+        assistant_text = (
+            prompt.message if prompt
+            else "Generated — check the canvas behind this chat." if session.status == "completed"
+            else f"Status: {session.status}"
+        )
+        await self._chat_turns.add(ChatTurnModel(
+            id=uuid.uuid4().hex,
+            session_id=session.id,
+            user_text=user_message,
+            thinking_text=get_current_turn_thinking(session.id),
+            assistant_text=assistant_text,
+            referenced_element_ids=referenced_element_ids,
+            # Real, persisted Node Mode run history for this turn (2026-09-22) — see
+            # `models/chat_turn.py`'s own docstring for why this exists.
+            events_json=get_current_turn_events(session.id),
+        ))
+        
+        # Ingest into the semantic ChatMemoryService so it can be recalled in future turns
+        await chat_memory.add_turn(
+            session_id=session.id,
+            turn_id=uuid.uuid4().hex,
+            user_text=user_message,
+            assistant_text=assistant_text
+        )
+
         emit("turn_completed", status=session.status)
         return SessionMapper.to_response(session)
 
-    async def _add_new_element(self, session_id: str, result: dict) -> CanvasElementModel:
+    async def _add_new_element(
+        self, session_id: str, result: dict, *, compliance_status: str | None = None
+    ) -> CanvasElementModel:
         element = CanvasElementModel(
             id=uuid.uuid4().hex,
             session_id=session_id,
             element_type=result.get("element_type", "image"),
             produced_by_specialist=result.get("produced_by_specialist", "unknown"),
-            storage_ref=result["storage_ref"],
+            # `.get(...)`, not `result["storage_ref"]` (2026-09-22) — a real "text" extra_element
+            # (a shot list, a scene description) has no binary asset at all; the text itself IS
+            # the content, stored in `metadata["text"]` instead. The MAIN turn result always still
+            # has a real storage_ref (checked by the caller before this is ever invoked for it).
+            storage_ref=result.get("storage_ref"),
             metadata_json=result.get("metadata", {}),
         )
+        if compliance_status is not None:
+            element.compliance_status = compliance_status
         return await self._canvas.add_element(element)
+
+    @staticmethod
+    async def _describe_uploaded_audio(storage_ref: str) -> str | None:
+        """Real, local speech-to-text + pace + acoustic mood for an audio element this app did NOT
+        itself generate (2026-09-22) — see `providers/audio/local_whisper.py` for why this is more
+        than just a transcript. An honest `None` (never a fabricated description) if the asset is
+        missing or transcription genuinely fails — the caller already handles `None` the same as
+        "nothing recorded", the same honest-gap behavior this had before this feature existed."""
+        from ...core.local_storage import load_asset
+        from ...providers.audio.local_whisper import get_transcription_provider
+
+        loaded = load_asset(storage_ref)
+        if loaded is None:
+            return None
+        audio_bytes, mime_type = loaded
+        try:
+            result = await get_transcription_provider().transcribe(audio_bytes=audio_bytes, mime_type=mime_type)
+        except Exception as exc:
+            log.warning("uploaded_audio_transcription_failed", extra={"_extra_error": str(exc)})
+            return None
+        if not result.text:
+            return None
+        parts = [f'Spoken content: "{result.text}"']
+        if result.pace_label:
+            parts.append(f"pace: {result.pace_label} (~{result.pace_wpm} words/min)")
+        if result.mood:
+            parts.append(f"acoustic tone: {result.mood}")
+        return " — ".join(parts)
+
+    @staticmethod
+    async def _describe_uploaded_image(storage_ref: str) -> str | None:
+        """Real, local vision inference for an image element this app did NOT itself generate, or 
+        that lost its prompt. Fails safely to None if the asset is missing or the provider fails."""
+        from ...core.local_storage import load_asset
+        from ...providers.llm.vision import complete_with_vision
+
+        loaded = load_asset(storage_ref)
+        if loaded is None:
+            return None
+        image_bytes, mime_type = loaded
+        try:
+            result = await complete_with_vision(
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                system="You are a meticulous visual analyzer for a marketing team.",
+                question="Describe this image in detail, focusing on the main visual subjects, objects, colors, and setting."
+            )
+            return result.text
+        except Exception as exc:
+            log.warning("uploaded_image_vision_failed", extra={"_extra_error": str(exc)})
+            return None
 
     def _schedule_compliance_check(self, element_id: str) -> None:
         """Fires the real compliance gate as a genuinely detached background task — the caller

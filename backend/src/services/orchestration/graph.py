@@ -20,40 +20,413 @@ placeholder despite PRD.md listing it as in-scope; see `_direct_fix_node` below.
 """
 from __future__ import annotations
 
+import asyncio
+import json
+import re
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
+
 from langgraph.graph import END, StateGraph
 
-from ...core.approval import is_approval
+from ...core.approval import is_approval, is_cancel
+from ...core.config import settings
 from ...core.events import emit
 from ...core.exceptions import SpecialistFailed
+from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
+from ...providers.llm.base import ModelTier
+from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import traceable
 from ..ideation.ideation_service import run_ideation
-from ..leads.base import NarrativePlan, ScenePlan
+from ..leads.base import LeadResult, NarrativePlan, ScenePlan, referenced_element_block, stale_campaign_context_block
 from ..leads.motion_lead import run_motion_lead
 from ..leads.narrative_lead import run_narrative_lead
 from ..leads.scene_lead import run_scene_lead
 from ..leads.visual_design_lead import run_visual_design_lead
-from ..specialists.runner import run_specialist_agentic
+from ..specialists.runner import run_specialist_with_review
 from .orchestrator import route, route_condition
 from .state import GraphState
 
 log = get_logger(__name__)
 
+# Which real element_type each tool's own storage_ref output actually is — used by
+# `_direct_fix_node` below to label a result by what it genuinely produced, not by guessing from
+# whatever the previously-existing element happened to be (see that function's own comment for the
+# real bug this fixes: a video onto a previously-image element used to keep `element_type: "image"`
+# and get rendered as a broken `<img>` tag). Every tool that can set a top-level `storage_ref` in
+# its `ToolResult.data` needs an entry here — `asset_mood_board_search`/`color_palette_extractor`
+# don't (checked directly): the first nests refs inside a results list, the second only takes one
+# as an input arg and never returns one.
+_ELEMENT_TYPE_BY_TOOL = {
+    "base_image_generator": "image",
+    "image_editor": "image",
+    "text_overlay": "image",
+    "base_video_generator": "video",
+    "video_stitcher": "video",
+    # The registered tool name is "mux_audio_into_video" (see @register_tool in
+    # audio_video_muxer.py) — "audio_video_muxer" is only that file's module name. Caught on
+    # independent review (2026-09-22): the wrong key here silently defeated this map's whole
+    # purpose for any direct_fix a muxer actually produced, falling through to the old buggy guess.
+    "mux_audio_into_video": "video",
+    "text_to_speech": "audio",
+    "text_card_writer": "text",
+}
+
+# Tools that ANNOTATE an existing element rather than REPLACING its own content (2026-09-22) — a
+# real, live-found-before-shipping correctness issue: `_direct_fix_node`'s default assumption is
+# that a direct_fix's result IS the target element's new content (versioned in place — correct for
+# e.g. video_editor_cutter turning an image element into a video, or image_editor recoloring it).
+# `text_card_writer` is different in kind: "describe this image" must produce a NEW, separate text
+# card sitting next to the image, never overwrite the image's own storage_ref with text (which
+# would corrupt/destroy it). Checked before deciding `update_existing_element_id` below.
+_ANNOTATION_ONLY_TOOLS = {"text_card_writer"}
+
+
+# Multi-generation (2026-09-22) — a single request can genuinely ask for several DISTINCT
+# images/videos ("2 images, one pink one green"; "a car shot, then a video based on it"). Shared
+# across both `_visual_design_lead_node` and `_motion_lead_node` (medium-agnostic: the planning
+# call and the sequential/parallel execution logic don't care whether the thing being produced is
+# an image or a video — only the per-variant "how do I actually run one" callable differs, which
+# each caller supplies). A real, hard cap per medium — video especially, since each independent
+# variant is its own separate PAID Replicate render; a wrong "count: 10" from a flaky free-tier
+# classification call must never translate into 10 real paid renders.
+_MAX_MULTI_IMAGE_COUNT = 4
+_MAX_MULTI_VIDEO_COUNT = 2
+
+_MULTI_GENERATION_PLAN_PROMPT = """You are deciding how many DISTINCT {medium}s a request is
+actually asking for, and whether they are independent or dependent on each other.
+
+Most requests ask for exactly ONE {medium} — default to count=1 unless the message CLEARLY asks
+for multiple DISTINCT {medium}s (e.g. "generate 2 images of X, one in pink one in green", "make 3
+variations of..."). Never split a single request describing ONE {medium} into several just because
+it mentions multiple details together (colors, props, angles) — that's still ONE {medium} unless
+the message explicitly asks for that many separate outputs.
+
+If count > 1 (maximum {max_count} — if the request genuinely asks for more than that, cap it at
+{max_count} and only write prompts for the first {max_count}):
+- Write one clear, standalone descriptive prompt PER {medium} — each must be a complete, sensible
+  request on its own (never "the same but in green" — restate what it's actually of, e.g. "a pink
+  Ferrari on a race track", not just "in pink").
+- Decide "sequential": true if a LATER {medium} genuinely depends on an EARLIER one's actual
+  result existing first (e.g. "generate a car, then a video showing it driving off, based on that
+  exact image" — the second cannot be made without the first's real output). false if the
+  {medium}s are genuinely independent variants that could be produced in any order or at the same
+  time (e.g. "one in pink, one in green" — neither needs the other to exist first). Default to
+  false (independent) unless there's a real, stated dependency — most multi-{medium} requests are
+  independent variants, not a sequence.
+
+Return ONLY JSON:
+{{
+  "count": 1 or more,
+  "prompts": ["..."],
+  "sequential": true or false
+}}
+"""
+
+
+@dataclass
+class MultiGenerationPlan:
+    prompts: list[str]
+    sequential: bool
+
+
+async def _plan_multi_generation(
+    user_message: str, brief_idea: str, *, medium: str, max_count: int
+) -> MultiGenerationPlan:
+    """A real Tier-1 classification call, not a regex — splitting "2 images, one pink one green"
+    into genuinely distinct, standalone prompts needs actual language understanding, the same
+    reasoning this codebase already applies to routing (orchestrator.py) rather than keyword
+    matching. Fails safe to a single-item plan (today's original, single-generation behavior) on
+    any real failure — a broken planner must never block a normal turn."""
+    single = MultiGenerationPlan(prompts=[user_message], sequential=False)
+    if not user_message.strip():
+        return single
+
+    llm = get_llm_provider()
+    context = f"User's request:\n{user_message}"
+    if brief_idea:
+        context += (
+            f"\n\nBroader campaign context so far (supporting detail only — judge the count/split "
+            f"from the request above, not this): {brief_idea}"
+        )
+    try:
+        result = await llm.complete(
+            tier=ModelTier.TIER_1,
+            system=_MULTI_GENERATION_PLAN_PROMPT.format(medium=medium, max_count=max_count),
+            messages=[{"role": "user", "content": context}],
+            max_tokens=1024,
+            # Same reasoning as orchestrator.py's own classification call — a wrong split wastes a
+            # whole generation attempt (or, for video, several real paid ones), not worth the local
+            # model's measurably weaker judgment on this exact kind of call.
+            prefer_local=False,
+        )
+        parsed = extract_json(result.text)
+    except Exception as exc:  # noqa: BLE001 — a broken planner degrades to single-generation, never blocks the turn
+        log.warning("multi_generation_plan_failed", extra={"_extra_medium": medium, "_extra_error": str(exc)})
+        return single
+
+    count = int(parsed.get("count") or 1)
+    prompts = [str(p).strip() for p in (parsed.get("prompts") or []) if str(p).strip()]
+    if count <= 1 or len(prompts) <= 1:
+        return single
+    if len(prompts) > max_count:
+        log.warning(
+            "multi_generation_plan_truncated",
+            extra={"_extra_medium": medium, "_extra_requested": len(prompts), "_extra_cap": max_count},
+        )
+        prompts = prompts[:max_count]
+    return MultiGenerationPlan(prompts=prompts, sequential=bool(parsed.get("sequential", False)))
+
+
+async def _run_multi_generation(
+    plan: MultiGenerationPlan,
+    *,
+    run_one: Callable[[str, str | None], Awaitable[LeadResult]],
+) -> list[LeadResult]:
+    """Executes a plan's variants — genuinely SEQUENTIAL when the plan says so (a real correctness
+    requirement: a dependent variant needs the prior one's real result, so it structurally cannot
+    run any other way) or when `settings.multi_generation_parallel_enabled` is off (a real,
+    deliberate cost/predictability override — independent variants CAN run concurrently, doesn't
+    mean they must). Otherwise genuinely concurrent via `asyncio.gather`. Each variant's own
+    failure degrades gracefully (logged, skipped) rather than losing every other already-succeeded
+    (sometimes already-PAID-for) variant to one bad one — the same pattern `run_concurrent_specialists`
+    already uses. `run_one(prompt, prior_variant_description)` — the second arg is only ever
+    non-None in the sequential path, letting a later variant reference what the earlier one
+    actually produced."""
+
+    async def _safe(prompt: str, prior_desc: str | None) -> LeadResult | None:
+        try:
+            return await run_one(prompt, prior_desc)
+        except SpecialistFailed as exc:
+            log.warning("multi_generation_variant_failed", extra={"_extra_error": exc.message})
+            return None
+
+    if plan.sequential or not settings.multi_generation_parallel_enabled:
+        results: list[LeadResult] = []
+        prior_desc: str | None = None
+        for prompt in plan.prompts:
+            r = await _safe(prompt, prior_desc)
+            if r is not None:
+                results.append(r)
+                prior_desc = (
+                    r.metadata.get("image_prompt") or r.metadata.get("motion_prompt") or prompt
+                )
+        return results
+
+    raw = await asyncio.gather(*[_safe(p, None) for p in plan.prompts])
+    return [r for r in raw if r is not None]
+
+
+def _variant_brief(brief: dict) -> dict:
+    """A real, live-found bug (2026-09-22, caught during live verification): each multi-generation
+    variant's own sub-prompt is already a complete, standalone request (the planning prompt
+    explicitly requires this) — but every variant call still received the FULL original `brief`,
+    including `idea`, which for a multi-subject request (e.g. "one video of a car, one of a
+    mountain bike") still describes BOTH subjects together. `visual_design_lead.py`/
+    `narrative_lead.py`'s own "current message first, brief.idea as secondary support" fix treats
+    that idea as real supporting context, not noise — so a variant meant to be ONLY about the bike
+    still generated shots mixing in the car from the other variant's subject. Stripping `idea` (and
+    the equally combined `_last_option_labels`) from the brief passed to each variant's own
+    generation call removes that bleed-through; every other real field (approval_mode, brand/
+    product grounding scratch fields) stays intact and still applies to every variant equally."""
+    return {k: v for k, v in brief.items() if k not in ("idea", "_last_option_labels")}
+
+
+def _combine_multi_generation_results(results: list[LeadResult], *, requested_count: int | None = None) -> LeadResult:
+    """The first variant becomes the turn's MAIN result (the element `session_service.py` creates
+    directly); every other variant becomes an `extra_elements` entry — reusing the exact same
+    mechanism already built for a Lead's real intermediate byproducts (scene stills, raw clips,
+    voiceover tracks), rather than inventing a second "multiple results" shape. A variant's OWN
+    `extra_elements` (e.g. each video variant's own scene-still/raw-clip/voiceover) are preserved
+    too, not dropped.
+
+    `requested_count` (2026-09-22, a real bug caught via live testing, not just review): a real
+    request for "2 images" once produced only 1, with zero indication anything had gone wrong —
+    `_run_multi_generation`'s own per-variant failure handling (correctly) keeps the turn from
+    failing outright when one variant errors, but that silently degraded "2 requested" into "1
+    delivered" with the exact same "Generated — check the canvas" message a full success gets
+    (Rules.md: no fabricated success). When fewer variants succeeded than were actually asked for,
+    a real, honest note is attached here so the caller can surface it instead of staying silent."""
+    main = results[0]
+    extras = list(main.extra_elements)
+    for i, r in enumerate(results[1:], start=2):
+        extras.append({
+            "storage_ref": r.storage_ref,
+            "element_type": r.element_type,
+            "produced_by_specialist": r.produced_by_specialist,
+            "metadata": {**r.metadata, "label": f"variant_{i}_of_{len(results)}"},
+        })
+        extras.extend(r.extra_elements)
+    metadata = {**main.metadata, "multi_generation_count": len(results)}
+    if requested_count is not None and len(results) < requested_count:
+        metadata["partial_generation_note"] = (
+            f"Only {len(results)} of the {requested_count} requested variants could be generated "
+            f"— the rest failed and were skipped rather than failing the whole request."
+        )
+    return LeadResult(
+        storage_ref=main.storage_ref,
+        produced_by_specialist=main.produced_by_specialist,
+        element_type=main.element_type,
+        extra_elements=extras,
+        metadata=metadata,
+    )
+
 
 @traceable(name="visual_design_lead_node")
 async def _visual_design_lead_node(state: GraphState) -> GraphState:
     emit("lead_started", lead="visual_design_lead")
+    brief = state.get("brief") or {}
+    user_message = state.get("user_message") or ""
     try:
-        result = await run_visual_design_lead(brief=state.get("brief") or {})
+        plan = await _plan_multi_generation(
+            user_message, brief.get("idea") or "", medium="image", max_count=_MAX_MULTI_IMAGE_COUNT
+        )
+        if len(plan.prompts) <= 1:
+            result = await run_visual_design_lead(brief=brief, user_message=user_message)
+        else:
+            emit("multi_generation_plan", medium="image", count=len(plan.prompts), sequential=plan.sequential)
+
+            async def _run_one(prompt: str, prior_desc: str | None) -> LeadResult:
+                msg = (
+                    prompt if not prior_desc
+                    else f"{prompt}\n\n(For visual consistency, the previous image in this sequence depicted: {prior_desc})"
+                )
+                return await run_visual_design_lead(brief=_variant_brief(brief), user_message=msg)
+
+            results = await _run_multi_generation(plan, run_one=_run_one)
+            if not results:
+                raise SpecialistFailed("visual_design_lead", "none of the requested image variants could be produced")
+            result = _combine_multi_generation_results(results, requested_count=len(plan.prompts))
         # LeadResult -> dict only here, at the LangGraph-mandated TypedDict boundary (GraphState) —
         # the one accepted exception to "no dict crossing a layer boundary" (Rules.md section 2).
         state["result"] = result.to_dict()
+        # A real fix for the "stale idea leaking forever" bug (2026-09-22, confirmed live via a
+        # real user session whose `brief.idea` stayed "a modern minimalist logo" for hours,
+        # bleeding into every later, completely unrelated request as "broader campaign context").
+        # `ideation_service.py` deliberately freezes `brief.idea` the instant a session's first
+        # element exists, to protect against a DIFFERENT bug (numeric erosion across ideation's own
+        # option-picking rounds) — correct for THAT case, but it also meant `brief.idea` could never
+        # again reflect reality once a session moved on to a genuinely new subject. This node only
+        # runs for a real, FRESH `full_image` generation (never `direct_fix`), so a successful run
+        # here really is the user's new current subject — updating `brief.idea` to it means the
+        # NEXT turn's "earlier campaign notes" (leads/base.py's `stale_campaign_context_block`)
+        # reflects what was actually just made, not something from hours or days earlier.
+        if _is_substantive_request(user_message):
+            brief["idea"] = user_message.strip()
+            state["brief"] = brief
         emit("lead_completed", lead="visual_design_lead")
     except SpecialistFailed as exc:
         log.error("visual_design_lead_failed", extra={"_extra_error": exc.message})
-        state["error"] = exc.message
-        state["result"] = {"message": f"Could not produce an image: {exc.message}"}
+        state["result"] = {
+            "message": f"Ran into an issue with visual_design_lead: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
         emit("lead_failed", lead="visual_design_lead", reason=exc.message)
+    return state
+
+
+_DURATION_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s\b|minutes?|mins?|m\b)", re.IGNORECASE)
+
+
+def _extract_requested_duration_seconds(message: str) -> float | None:
+    """A real, honest best-effort parse of an explicit clip length the user asked for (e.g. "a 10
+    second audio", "30 seconds") — Kokoro (`providers/audio/local_kokoro.py`) has no duration
+    parameter at all, so the only real lever Sound Designer has is how long a script it writes;
+    this hands the target down as guidance instead of silently dropping it (2026-09-22, a real
+    live-found bug: a user asked for 10 seconds and got ~4, because nothing upstream of Sound
+    Designer's own prompt ever looked at the number in their message at all — it wrote whatever
+    length line it felt like, unguided)."""
+    match = _DURATION_PATTERN.search(message)
+    if not match:
+        return None
+    value = float(match.group(1))
+    unit = match.group(2).lower()
+    return value * 60 if unit.startswith("m") else value
+
+
+@traceable(name="full_audio_node")
+async def _full_audio_node(state: GraphState) -> GraphState:
+    """A brand-new standalone audio clip (2026-09-22, orchestrator.py's 4th route) — Sound
+    Designer alone, no Lead sequence, since there's only one specialist that can do this at all.
+    Deliberately NOT `_direct_fix_node` even though the mechanics look similar: that node's whole
+    framing is "act on THIS existing asset" (it always includes `latest_element_*` context when
+    available), which doesn't fit a genuinely fresh generation with no element assumed. Sound
+    Designer's own prompt (sound_designer.md) never actually depended on an existing element's
+    storage_ref — only campaign/shot context — so this reuses it directly, unconditionally without
+    that framing. Only ever produces a spoken voiceover (`text_to_speech`) — Sound Designer has no
+    real music-generation tool in this build; an honest limit stated in its own prompt, not hidden
+    here either."""
+    brief = state.get("brief") or {}
+    user_message = state.get("user_message") or ""
+    context_parts = [f"User request:\n{user_message}"]
+    context_parts.append(f"{stale_campaign_context_block(brief)}{referenced_element_block(brief)}")
+    requested_duration = _extract_requested_duration_seconds(user_message)
+    if requested_duration:
+        context_parts.append(
+            f"Target spoken duration: approximately {requested_duration:.0f} seconds. There is NO "
+            f"direct duration control on the TTS engine — hitting this depends entirely on writing "
+            f"a script of roughly the right length (see your own instructions for the real "
+            f"words-per-second guidance)."
+        )
+    context = "\n\n".join(context_parts)
+
+    emit("lead_started", lead="full_audio")
+    try:
+        step = await run_specialist_with_review(
+            "sound_designer",
+            context=context,
+            needs_retry=lambda r: not (
+                r.latest_call("text_to_speech") and r.latest_call("text_to_speech").ok
+            ),
+            reminder=(
+                "REMINDER: the user explicitly asked for a real audio clip. You MUST call "
+                "text_to_speech with a real spoken line now — recommending 'music_only' or "
+                "'silent' is not a valid response to an explicit request for audio."
+            ),
+        )
+    except SpecialistFailed as exc:
+        log.error("full_audio_failed", extra={"_extra_error": exc.message})
+        state["result"] = {
+            "message": f"Ran into an issue with full_audio: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
+        emit("lead_failed", lead="full_audio", reason=exc.message)
+        return state
+
+    call = step.latest_call("text_to_speech")
+    if not call or not call.ok or not call.data.get("storage_ref"):
+        # A real, honest non-result (Rules.md section 2) — never fabricated as if audio was
+        # produced. The most likely real cause: the request wanted music, which this specialist
+        # genuinely cannot make.
+        state["result"] = {
+            "message": "Sound Designer considered the request but did not produce an audio clip "
+            "(only a spoken voiceover is supported here, never music).",
+            "specialist_notes": step.data,
+        }
+        emit("lead_completed", lead="full_audio", no_op=True)
+        return state
+
+    state["result"] = {
+        "storage_ref": call.data["storage_ref"],
+        "produced_by_specialist": "sound_designer",
+        "element_type": "audio",
+        "metadata": {"voiceover_line": step.get("voiceover_line", ""), "notes": step.get("notes", "")},
+    }
+    # Same real "stop the stale idea leaking forever" fix as `_visual_design_lead_node`'s own —
+    # this route always means a genuinely fresh, standalone audio request. `_is_substantive_request`
+    # guards against a misrouted bare reply word corrupting it (see that function's own docstring).
+    if _is_substantive_request(user_message):
+        brief["idea"] = user_message.strip()
+        state["brief"] = brief
+    emit("lead_completed", lead="full_audio")
     return state
 
 
@@ -65,6 +438,9 @@ def _pending_approval_result(*, stage: str, message: str, proposal: dict) -> dic
         "options": [
             {"id": "approve", "label": "Approve", "description": "Proceed to the next stage"},
             {"id": "revise", "label": "Request changes", "description": "Describe what to change"},
+            # 2026-09-22, a real live-found gap (core/approval.py's own docstring) — the one real
+            # escape hatch this gate was missing.
+            {"id": "cancel", "label": "Cancel", "description": "Discard this proposal and start over"},
         ],
         "allow_free_text": True,
         "proposal": proposal,
@@ -86,14 +462,300 @@ def _pending_motion_approval_result(*, message: str, proposal: dict) -> dict:
     }
 
 
+async def _run_batch(items: list[Any], *, sequential: bool, run_one: Callable[[Any], Awaitable[Any]]) -> list[Any]:
+    """Generic sequential-vs-parallel executor for a batch of otherwise-independent inputs — no
+    per-item failure swallowing (unlike `_run_multi_generation` below): a real failure here
+    propagates and fails the whole batch, which is the right call for the narrative/scene PLANNING
+    stages specifically — the user is about to review/approve a set of proposals, and silently
+    dropping one without saying so would mean approving something incomplete without knowing it.
+    `sequential=True` (a real dependency between variants) or `multi_generation_parallel_enabled`
+    being off both force one-at-a-time execution — the same correctness/cost-control rule
+    `_run_multi_generation` already applies, just generic over any return type (not just
+    `LeadResult`) so both the planning stages here and the image path can share one real rule."""
+    if sequential or not settings.multi_generation_parallel_enabled:
+        return [await run_one(item) for item in items]
+    return list(await asyncio.gather(*[run_one(item) for item in items]))
+
+
 @traceable(name="full_video_pipeline_node")
 async def _motion_lead_node(state: GraphState) -> GraphState:
     """
-    The real full-video pipeline: Narrative Lead -> Scene Lead -> Motion Lead (Architecture.md
-    section 2.1).
+    The real full-video pipeline entry point — dispatches to the single-video flow (unchanged,
+    `_run_single_video_node`) or the multi-video flow (`_run_multi_video_node`, 2026-09-22),
+    depending on whether this request is asking for more than one DISTINCT video. Detected once,
+    at the very start of a fresh request (`stage is None`), and persisted into
+    `brief["multi_video_plan"]` so every later turn of a possibly-multi-turn approval flow keeps
+    using the same plan rather than re-classifying an unrelated later message (an approval reply
+    like "yes" is not itself a new video request to classify)."""
+    brief = state.get("brief") or {}
+    approval_mode = brief.get("approval_mode", "auto")
+    stage = brief.get("video_stage")  # None | "narrative_pending" | "scene_pending" | "motion_pending" | "done"
+    user_message = state.get("user_message") or ""
 
-    In "auto" mode (default, unchanged from before): runs straight through with no pauses, exactly
-    as it always has.
+    if stage is None and "multi_video_plan" not in brief:
+        plan = await _plan_multi_generation(
+            user_message, brief.get("idea") or "", medium="video", max_count=_MAX_MULTI_VIDEO_COUNT
+        )
+        if len(plan.prompts) > 1:
+            emit("multi_generation_plan", medium="video", count=len(plan.prompts), sequential=plan.sequential)
+            brief["multi_video_plan"] = {"prompts": plan.prompts, "sequential": plan.sequential}
+
+    multi_plan = brief.get("multi_video_plan")
+    if multi_plan:
+        return await _run_multi_video_node(state, brief, approval_mode, stage, user_message, multi_plan)
+    return await _run_single_video_node(state, brief, approval_mode, stage, user_message)
+
+
+async def _run_multi_video_node(
+    state: GraphState,
+    brief: dict,
+    approval_mode: str,
+    stage: str | None,
+    user_message: str,
+    multi_plan: dict,
+) -> GraphState:
+    """The multi-video counterpart to `_run_single_video_node` below — the SAME 3 real gates
+    (narrative/scene/motion-spend) in "approve" mode, but each gate now carries a LIST of N
+    proposals and is approved/revised as ONE BATCH (2026-09-22, per the user's explicit ask that
+    parallel execution work in both auto AND approve/manual mode). A real, disclosed
+    simplification: revision feedback applies to every video in the batch, not to one specific
+    video by name — per-item revision targeting is a separate, larger feature this doesn't take on.
+
+    Parallel vs sequential, in BOTH modes: genuinely INDEPENDENT videos (`multi_plan['sequential']`
+    is False) run their narrative/scene/motion calls CONCURRENTLY across variants, at every stage —
+    real parallel execution, not just "parallel after all approvals happen to be done". A
+    genuinely DEPENDENT sequence always runs one variant's stage fully before the next starts
+    (`_run_batch`'s own rule). `settings.multi_generation_parallel_enabled` can force everything
+    sequential regardless — real cost/predictability control, since the motion stage's parallel
+    branches are real, simultaneous paid Replicate renders."""
+    prompts: list[str] = multi_plan["prompts"]
+    sequential: bool = multi_plan["sequential"]
+    n = len(prompts)
+
+    def _stage_narratives_for_approval(narratives: list[NarrativePlan], *, revised: bool) -> GraphState:
+        brief["video_stage"] = "narrative_pending"
+        brief["narrative_plans"] = [x.to_dict() for x in narratives]
+        state["brief"] = brief
+        prefix = "Revised shots" if revised else "Proposed shots"
+        lines = [f"Video {i + 1}: {'; '.join(x.shots)}. Story: {x.overall_story}" for i, x in enumerate(narratives)]
+        state["result"] = _pending_approval_result(
+            stage="narrative",
+            message=f"{prefix} for {n} videos:\n" + "\n".join(lines),
+            proposal={"narratives": [x.to_dict() for x in narratives]},
+        )
+        return state
+
+    def _stage_scenes_for_approval(scenes: list[ScenePlan], *, revised: bool) -> GraphState:
+        brief["video_stage"] = "scene_pending"
+        brief["scene_plans"] = [x.to_dict() for x in scenes]
+        state["brief"] = brief
+        prefix = "Revised scenes" if revised else "Proposed scenes"
+        lines = [
+            f"Video {i + 1}: {x.environment_description} Lighting: {x.lighting_description}"
+            for i, x in enumerate(scenes)
+        ]
+        state["result"] = _pending_approval_result(
+            stage="scene",
+            message=f"{prefix} for {n} videos:\n" + "\n".join(lines),
+            proposal={"scenes": [x.to_dict() for x in scenes]},
+        )
+        return state
+
+    def _stage_motion_for_approval(narratives: list[NarrativePlan], scenes: list[ScenePlan]) -> GraphState:
+        brief["video_stage"] = "motion_pending"
+        brief["narrative_plans"] = [x.to_dict() for x in narratives]
+        brief["scene_plans"] = [x.to_dict() for x in scenes]
+        state["brief"] = brief
+        state["result"] = _pending_motion_approval_result(
+            message=(
+                f"All {n} shots and scenes are approved. Ready to render {n} real videos — this "
+                f"step calls a paid provider (Replicate) {n} time{'s' if n != 1 else ''} — approve "
+                f"to spend on all {n} renders, or send anything else to cancel with nothing spent."
+            ),
+            proposal={
+                "narratives": [x.to_dict() for x in narratives],
+                "scenes": [x.to_dict() for x in scenes],
+            },
+        )
+        return state
+
+    def _clear_multi_video_state() -> None:
+        brief["video_stage"] = None
+        brief.pop("multi_video_plan", None)
+        brief.pop("narrative_plans", None)
+        brief.pop("scene_plans", None)
+
+    try:
+        # === Stage 1: N NarrativePlans ===
+        if stage == "narrative_pending":
+            if is_approval(user_message):
+                narratives = [NarrativePlan.from_dict(d) for d in brief["narrative_plans"]]
+            elif is_cancel(user_message):
+                _clear_multi_video_state()
+                return _cancel_pending_video(state, brief, lead="narrative_lead", message=(
+                    "Cancelled — the proposed shots were discarded and nothing was spent. Send a "
+                    "new idea whenever you're ready."
+                ))
+            else:
+                emit("lead_started", lead="narrative_lead", revision=True)
+                revised_prompts = [f"{p}\n\nRevision feedback on the proposed shots: {user_message}" for p in prompts]
+                narratives = await _run_batch(
+                    revised_prompts, sequential=sequential,
+                    run_one=lambda p: run_narrative_lead(brief=_variant_brief(brief), user_message=p),
+                )
+                emit("lead_completed", lead="narrative_lead", revision=True)
+                return _stage_narratives_for_approval(narratives, revised=True)
+        elif stage in ("scene_pending", "motion_pending"):
+            narratives = [NarrativePlan.from_dict(d) for d in brief["narrative_plans"]]
+        else:
+            emit("lead_started", lead="narrative_lead")
+            narratives = await _run_batch(
+                prompts, sequential=sequential,
+                run_one=lambda p: run_narrative_lead(brief=_variant_brief(brief), user_message=p),
+            )
+            emit("lead_completed", lead="narrative_lead")
+            # Same real "stop the stale idea leaking forever" fix as `_visual_design_lead_node`'s
+            # own — a genuinely fresh multi-video request, the real moment to refresh `brief.idea`.
+            if _is_substantive_request(user_message):
+                brief["idea"] = user_message.strip()
+                state["brief"] = brief
+            if approval_mode == "approve":
+                return _stage_narratives_for_approval(narratives, revised=False)
+
+        # === Stage 2: N ScenePlans ===
+        if stage == "scene_pending":
+            if is_approval(user_message):
+                scenes = [ScenePlan.from_dict(d) for d in brief["scene_plans"]]
+            elif is_cancel(user_message):
+                _clear_multi_video_state()
+                return _cancel_pending_video(state, brief, lead="scene_lead", message=(
+                    "Cancelled — the proposed scenes were discarded and nothing was spent. Send a "
+                    "new idea whenever you're ready."
+                ))
+            else:
+                emit("lead_started", lead="scene_lead", revision=True)
+                scenes = await _run_batch(
+                    list(range(n)), sequential=sequential,
+                    run_one=lambda i: run_scene_lead(
+                        shot_description=f"{narratives[i].shots[0]}\n\nRevision feedback on the proposed scene: {user_message}"
+                    ),
+                )
+                emit("lead_completed", lead="scene_lead", revision=True)
+                return _stage_scenes_for_approval(scenes, revised=True)
+        elif stage == "motion_pending":
+            scenes = [ScenePlan.from_dict(d) for d in brief["scene_plans"]]
+        else:
+            emit("lead_started", lead="scene_lead")
+            scenes = await _run_batch(
+                list(range(n)), sequential=sequential, run_one=lambda i: run_scene_lead(shot_description=narratives[i].shots[0])
+            )
+            emit("lead_completed", lead="scene_lead")
+            if approval_mode == "approve":
+                return _stage_scenes_for_approval(scenes, revised=False)
+
+        # === Stage 3: N paid Motion Lead renders — same "spend confirmation, not a text revision"
+        # rule as the single-video flow, just covering the whole batch at once. ===
+        if stage == "motion_pending":
+            if not is_approval(user_message):
+                _clear_multi_video_state()
+                return _cancel_pending_video(state, brief, message=(
+                    "Video generation cancelled — nothing was rendered and nothing was spent. Send "
+                    "a new idea whenever you're ready."
+                ))
+        elif approval_mode == "approve":
+            return _stage_motion_for_approval(narratives, scenes)
+
+        emit("lead_started", lead="motion_lead")
+
+        async def _render_one(i: int) -> LeadResult:
+            return await run_motion_lead(brief=brief, narrative=narratives[i], scene=scenes[i])
+
+        results: list[LeadResult] = []
+        indices = list(range(n))
+        if sequential or not settings.multi_generation_parallel_enabled:
+            for i in indices:
+                try:
+                    results.append(await _render_one(i))
+                except SpecialistFailed as exc:
+                    log.warning("multi_video_variant_failed", extra={"_extra_error": exc.message})
+        else:
+            # A real, already-PAID-for render succeeding must never be lost because a SIBLING
+            # render failed — `return_exceptions=True` (same rule Motion Lead's own internal
+            # concurrency already uses for Sound Designer/Overlay Artist vs. the video path).
+            raw = await asyncio.gather(*[_render_one(i) for i in indices], return_exceptions=True)
+            for r in raw:
+                if isinstance(r, SpecialistFailed):
+                    log.warning("multi_video_variant_failed", extra={"_extra_error": r.message})
+                elif isinstance(r, BaseException):
+                    raise r
+                else:
+                    results.append(r)
+        emit("lead_completed", lead="motion_lead")
+
+        if not results:
+            raise SpecialistFailed("motion_lead", "none of the requested video variants could be produced")
+
+        _clear_multi_video_state()
+        state["brief"] = brief
+        # LeadResult -> dict only here, at the LangGraph-mandated TypedDict boundary — see the
+        # matching comment in `_visual_design_lead_node` above.
+        state["result"] = _combine_multi_generation_results(results, requested_count=n).to_dict()
+    except SpecialistFailed as exc:
+        log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
+        state["result"] = {
+            "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
+        emit("lead_failed", lead="full_video_pipeline", reason=exc.message)
+    return state
+
+
+def _is_substantive_request(text: str) -> bool:
+    """A real, live-found bug (2026-09-22): the "refresh `brief.idea` instead of leaving it frozen
+    forever" fix (see `_visual_design_lead_node`'s own comment) trusted that REACHING a fresh
+    -generation node meant the current message was a real, new subject worth remembering — true
+    most of the time, but a real user session's `brief.idea` was found corrupted to the literal
+    string `"approve"` after the orchestrator's own well-documented classification flakiness
+    (Memory.md, 2026-09-21) misrouted a bare approval/reply word into a fresh-generation route
+    instead of wherever it actually belonged. A short reply word is never a real campaign subject —
+    this is a real, deterministic backstop (same reasoning as `_is_bare_greeting`/
+    `_check_price_stated`: a plain check beats trusting an LLM's routing to always be right) so
+    `brief.idea` can only ever be overwritten by something that actually looks like real content,
+    never a stray "approve"/"yes"/"ok" that slipped through a misroute."""
+    stripped = text.strip()
+    if not stripped or is_approval(stripped) or is_cancel(stripped):
+        return False
+    return len(stripped) >= 12 or len(stripped.split()) >= 3
+
+
+def _cancel_pending_video(state: GraphState, brief: dict, *, message: str, lead: str = "motion_lead") -> GraphState:
+    """Shared reset for every "abandon this staged video pipeline" exit — the narrative/scene
+    cancel option (2026-09-22) and the pre-existing motion-spend cancel both need the exact same
+    real cleanup: clear the stage marker and whatever plan(s) were staged, so the NEXT message
+    starts completely fresh rather than resuming into a dead stage."""
+    brief["video_stage"] = None
+    brief.pop("narrative_plan", None)
+    brief.pop("scene_plan", None)
+    state["brief"] = brief
+    state["result"] = {"message": message}
+    emit("lead_failed", lead=lead, reason="cancelled_before_spend")
+    return state
+
+
+async def _run_single_video_node(
+    state: GraphState, brief: dict, approval_mode: str, stage: str | None, user_message: str
+) -> GraphState:
+    """
+    The real, ORIGINAL single-video pipeline: Narrative Lead -> Scene Lead -> Motion Lead
+    (Architecture.md section 2.1) — completely unchanged by the 2026-09-22 multi-video work above
+    (that work dispatches here whenever a request isn't asking for more than one distinct video, so
+    this function's own real, already-tested behavior stays exactly as it was).
+
+    In "auto" mode (default): runs straight through with no pauses, exactly as it always has.
 
     In "approve" mode (Memory.md, Phase 4 — a real user ask for genuine approval checkpoints, not
     just after-the-fact fixes): pauses after Narrative Lead, after Scene Lead, AND before Motion
@@ -105,10 +767,6 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
     just extended to gate between Leads too, rather than adopting LangGraph's own
     interrupt/checkpointer machinery.
     """
-    brief = state.get("brief") or {}
-    approval_mode = brief.get("approval_mode", "auto")
-    stage = brief.get("video_stage")  # None | "narrative_pending" | "scene_pending" | "motion_pending" | "done"
-    user_message = state.get("user_message") or ""
 
     def _stage_narrative_for_approval(narrative: NarrativePlan, *, revised: bool) -> GraphState:
         brief["video_stage"] = "narrative_pending"
@@ -154,13 +812,44 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
         if stage == "narrative_pending":
             if is_approval(user_message):
                 narrative = NarrativePlan.from_dict(brief["narrative_plan"])
+            elif is_cancel(user_message):
+                return _cancel_pending_video(state, brief, lead="narrative_lead", message=(
+                    "Cancelled — the proposed shots were discarded and nothing was spent. Send a "
+                    "new idea whenever you're ready."
+                ))
             else:
                 emit("lead_started", lead="narrative_lead", revision=True)
-                revised_brief = {
-                    **brief,
-                    "idea": f"{brief.get('idea', '')}\n\nRevision feedback on the proposed shots: {user_message}",
-                }
-                narrative = await run_narrative_lead(brief=revised_brief)
+                # Real, live-found bug (2026-09-22): this used to build `idea` by blindly appending
+                # the new message as "revision feedback" onto the OLD `brief.idea` — which silently
+                # assumed every non-approval reply is incremental feedback on the SAME shots. A
+                # message that's actually a genuinely different request (e.g. referencing a
+                # different existing element than whatever grounded the original proposal) got
+                # buried as an afterthought behind stale context instead of driving the result, the
+                # same class of bug already fixed once for `_check_followup_clarity`/
+                # `visual_design_lead.py` — just not yet here, since this resume path never goes
+                # through either of those. Now matches their same "current message first, old
+                # context second, only as real supporting detail" shape, and explicitly includes
+                # `latest_element_description` (session_service.py) — the fix that made audio
+                # references actually work everywhere else, extended to apply here too.
+                old_shots = NarrativePlan.from_dict(brief["narrative_plan"]).shots
+                revision_message = user_message
+                referenced_elements = brief.get("referenced_elements_context", [])
+                if referenced_elements:
+                    elements_desc = []
+                    for i, el in enumerate(referenced_elements, 1):
+                        kind = el.get("element_type", "unknown kind")
+                        desc = el.get("description", "(no description recorded)")
+                        elements_desc.append(f"Element {i} (Type: {kind}): {desc}")
+                    elements_str = "\n".join(elements_desc)
+                    revision_message += (
+                        f"\n\n(This request references the following existing elements:\n{elements_str})"
+                    )
+                revision_message += (
+                    f"\n\n(Previously proposed shots — revise THESE only if the message above is "
+                    f"feedback on them; ignore them entirely if the message above is really a new "
+                    f"or different request: {json.dumps(old_shots)})"
+                )
+                narrative = await run_narrative_lead(brief=brief, user_message=revision_message)
                 emit("lead_completed", lead="narrative_lead", revision=True)
                 return _stage_narrative_for_approval(narrative, revised=True)
         elif stage in ("scene_pending", "motion_pending"):
@@ -171,8 +860,20 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
             narrative = NarrativePlan.from_dict(brief["narrative_plan"])
         else:
             emit("lead_started", lead="narrative_lead")
-            narrative = await run_narrative_lead(brief=brief)
+            # `user_message` passed through as the real, live current-request driver — same fix
+            # (2026-09-22) as `_visual_design_lead_node`'s own: a fresh video request must not be
+            # generated against a stale, frozen `brief.idea` left over from an earlier, unrelated
+            # part of this same session.
+            narrative = await run_narrative_lead(brief=brief, user_message=user_message)
             emit("lead_completed", lead="narrative_lead")
+            # Same real "stop the stale idea leaking forever" fix as `_visual_design_lead_node`'s
+            # own (see that node's comment) — this branch only runs for a genuinely FRESH video
+            # request (never a revision/resume), so it's the right moment to update `brief.idea` to
+            # what was actually just asked for, rather than leaving it frozen at whatever it was
+            # when this session's first element was ever created.
+            if _is_substantive_request(user_message):
+                brief["idea"] = user_message.strip()
+                state["brief"] = brief
             if approval_mode == "approve":
                 return _stage_narrative_for_approval(narrative, revised=False)
 
@@ -180,6 +881,11 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
         if stage == "scene_pending":
             if is_approval(user_message):
                 scene = ScenePlan.from_dict(brief["scene_plan"])
+            elif is_cancel(user_message):
+                return _cancel_pending_video(state, brief, lead="scene_lead", message=(
+                    "Cancelled — the proposed scene was discarded and nothing was spent. Send a "
+                    "new idea whenever you're ready."
+                ))
             else:
                 emit("lead_started", lead="scene_lead", revision=True)
                 scene = await run_scene_lead(
@@ -205,16 +911,10 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
                 # No text to revise here, only a spend decision — an unclear reply must never be
                 # treated as "spend the money anyway" (core/approval.py's own rule), so anything
                 # short of a clear approval cancels rather than looping or silently proceeding.
-                brief["video_stage"] = None
-                brief.pop("narrative_plan", None)
-                brief.pop("scene_plan", None)
-                state["brief"] = brief
-                state["result"] = {
-                    "message": "Video generation cancelled — nothing was rendered and nothing was "
-                    "spent. Send a new idea whenever you're ready."
-                }
-                emit("lead_failed", lead="motion_lead", reason="cancelled_before_spend")
-                return state
+                return _cancel_pending_video(state, brief, message=(
+                    "Video generation cancelled — nothing was rendered and nothing was spent. Send "
+                    "a new idea whenever you're ready."
+                ))
             # Approved — fall through to the real, paid render below.
         elif approval_mode == "approve":
             return _stage_motion_for_approval(narrative, scene)
@@ -229,10 +929,34 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
         state["result"] = result.to_dict()
     except SpecialistFailed as exc:
         log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
-        state["error"] = exc.message
-        state["result"] = {"message": f"Could not produce a video: {exc.message}"}
+        state["result"] = {
+            "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
         emit("lead_failed", lead="full_video_pipeline", reason=exc.message)
     return state
+
+
+_INTENT_FIELDS = (
+    "overlay_text", "image_prompt", "motion_prompt", "aesthetic_direction",
+    "scene_description", "notes", "message",
+)
+
+
+def _describe_specialist_intent(data: dict) -> str | None:
+    """A short, honest summary of what a specialist WAS thinking, pulled from whichever of its own
+    final-JSON fields actually has real content — used only to make a real dead-end clarifying
+    question more specific (2026-09-22, `_direct_fix_node`'s own comment), never fabricated: if
+    none of these fields has anything, returns None and the caller's question stays generic."""
+    for field in _INTENT_FIELDS:
+        value = data.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 @traceable(name="direct_fix_node")
@@ -251,57 +975,228 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
     context_parts = [f"User request:\n{state.get('user_message', '')}"]
     if brief.get("idea"):
         context_parts.append(f"Campaign idea so far:\n{brief['idea']}")
-    latest_ref = brief.get("latest_element_storage_ref")
-    if latest_ref:
-        # The exact original generation prompt, not just the general campaign idea — real
-        # grounding a text-only specialist needs, since it has no memory of its own prior run and
-        # can't see the storage_ref's actual pixels (Memory.md, Phase 4: the same real bug found
-        # in regenerate/comment resolution — without this, a fix could invent an unrelated image).
-        description = brief.get("latest_element_description")
+    referenced_elements = brief.get("referenced_elements_context", [])
+    if referenced_elements:
+        context_parts.append("The following existing generated elements are available to reference or fix:")
+        for i, el in enumerate(referenced_elements, 1):
+            ref = el.get("storage_ref")
+            kind = el.get("element_type", "unknown")
+            desc = el.get("description") or "(no original prompt was recorded for this element)"
+            context_parts.append(
+                f"Element {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
+            )
         context_parts.append(
-            f"The most recent generated element (storage_ref: {latest_ref}, "
-            f"type: {brief.get('latest_element_type', 'unknown')}) depicts:\n"
-            f"{description or '(no original prompt was recorded for this element)'}\n"
-            f"Act on THIS existing asset, keeping everything the same except what the user's "
-            f"request asks to change — do not generate an unrelated new one."
+            "Act on the relevant existing asset(s), keeping everything the same except what the user's "
+            "request asks to change — do not generate an unrelated new one."
         )
 
+    def _produced_ref(step) -> tuple[str | None, str | None]:
+        for call in reversed(step.tool_calls):
+            if call.ok and call.data.get("storage_ref"):
+                return call.data["storage_ref"], call.tool_name
+        return None, None
+
+    direct_fix_context = "\n\n".join(context_parts)
     emit("lead_started", lead="direct_fix", target_specialist=target)
     try:
-        step = await run_specialist_agentic(target, context="\n\n".join(context_parts))
+        # Real, live-found issue (2026-09-22, cross-check pass): a specialist can decline to act
+        # at all even when the user gave an explicit, specific instruction — its own prompt's
+        # legitimate "skip if nothing needs changing" escape hatch firing on a genuine direct
+        # request instead. Routed through the same shared review/retry mechanism as Illustrator
+        # and Sound Designer (Tasks.md #3): one bounded reconsideration, not a forced action — the
+        # specialist may still legitimately decline a second time if a change truly isn't
+        # warranted, but it gets one real chance to reconsider first, same as every other
+        # "claimed vs. actually did" gap already found and fixed this session.
+        step = await run_specialist_with_review(
+            target,
+            context=direct_fix_context,
+            needs_retry=lambda r: _produced_ref(r)[0] is None,
+            reminder=(
+                "REMINDER: the user gave an explicit, specific instruction and your previous "
+                "attempt made no tool call at all. If a real change is genuinely warranted, make "
+                "it now — only skip again if you have a concrete reason no change applies."
+            ),
+        )
     except SpecialistFailed as exc:
         log.error("direct_fix_failed", extra={"_extra_specialist": target, "_extra_error": exc.message})
-        state["error"] = exc.message
-        state["result"] = {"message": f"Could not apply the fix via {target}: {exc.message}"}
+        state["result"] = {
+            "message": f"Ran into an issue with {target}: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
         emit("lead_failed", lead="direct_fix", reason=exc.message)
         return state
 
-    produced_ref, produced_tool = None, None
-    for call in reversed(step.tool_calls):
-        if call.ok and call.data.get("storage_ref"):
-            produced_ref, produced_tool = call.data["storage_ref"], call.tool_name
-            break
+    produced_ref, produced_tool = _produced_ref(step)
 
     if not produced_ref:
         # The specialist ran and reasoned, but genuinely made no tool call that produced a new
         # asset — an honest non-result, not an error (Rules.md section 2: no fabricated success).
+        # A real, live-found gap (2026-09-22, per an explicit user ask: "don't assume, make the
+        # agent ask a question if there are doubts"): this used to be a flat, dead-end statement —
+        # true, but not actually a QUESTION, and gave the user nothing to react to even though free
+        # text was already silently accepted here. Deliberately does NOT offer a "try again" pickable
+        # OPTION — that would resend just that option's own short label as the next `user_message`
+        # (`session_service.py`'s `_last_option_labels` lookup), the exact same fragment-loss bug
+        # just fixed for `ideation_service.py`'s own clarification loop, just reintroduced here if
+        # copied naively. Free text stays open (already the default) so the user's own real reply
+        # is what actually gets read next turn — never a resent label standing in for it.
+        specialist_intent = _describe_specialist_intent(step.data)
         state["result"] = {
-            "message": f"{target} considered the request but did not produce a new asset.",
+            "message": (
+                f"{target} considered this{f' — it was thinking: {specialist_intent}' if specialist_intent else ''}, "
+                f"but wasn't confident enough to actually apply a change. Could you say more "
+                f"specifically what you'd like — the exact text/placement/detail — so it can act on "
+                f"it directly?"
+            ),
             "specialist_notes": step.data,
         }
         emit("lead_completed", lead="direct_fix", no_op=True)
         return state
 
+    # Real, live-found bug (2026-09-22): If Sound Designer was called directly, it doesn't mux
+    # audio by itself, only sets `should_mux`. The caller must run the muxing tool directly.
+    if target == "sound_designer" and step.data.get("should_mux"):
+        base_ref = brief.get("latest_element_storage_ref")
+        if base_ref:
+            from ...services.tools.registry import get_tool
+            mux_result = await get_tool("mux_audio_into_video").run(
+                {"video_storage_ref": base_ref, "audio_storage_ref": produced_ref}
+            )
+            if mux_result.ok and mux_result.data.get("storage_ref"):
+                produced_ref = mux_result.data["storage_ref"]
+                produced_tool = "mux_audio_into_video"
+            else:
+                log.warning("direct_fix_mux_failed", extra={"_extra_error": mux_result.error})
+
     result: dict = {
         "storage_ref": produced_ref,
         "produced_by_specialist": target,
-        "element_type": brief.get("latest_element_type", "image"),
+        # Real, live-found bug (2026-09-21): this used to inherit the PREVIOUS element's type from
+        # the brief regardless of what the tool actually just produced — so a direct_fix that
+        # genuinely generates a video (video_editor_cutter -> video_stitcher) onto an element that
+        # started life as an image kept `element_type: "image"`, and the frontend tried to render
+        # the real MP4 bytes inside an `<img>` tag, which silently fails — looking to the user like
+        # the whole canvas tile just vanished, when the video itself was actually produced fine.
+        # Derived from which tool genuinely produced this result instead; an unrecognized tool
+        # (there shouldn't be one, but a future addition might be missed here) falls back to the
+        # old brief-based guess rather than crashing the turn outright.
+        "element_type": _ELEMENT_TYPE_BY_TOOL.get(
+            produced_tool, brief.get("latest_element_type", "image")
+        ),
         "metadata": {"direct_fix": True, "tool_used": produced_tool, **step.data},
     }
-    if brief.get("latest_element_id"):
+    if brief.get("latest_element_id") and produced_tool not in _ANNOTATION_ONLY_TOOLS:
         result["update_existing_element_id"] = brief["latest_element_id"]
     state["result"] = result
     emit("lead_completed", lead="direct_fix")
+    return state
+
+
+@traceable(name="dynamic_executor_node")
+async def _dynamic_executor_node(state: GraphState) -> GraphState:
+    """Dynamically executes a plan of specialists generated by the Orchestrator.
+    Handles sequential execution, state passing, and robust error recovery."""
+    plan = state.get("dynamic_plan")
+    if not plan:
+        state["result"] = {"message": "Dynamic plan was empty."}
+        return state
+
+    brief = state.get("brief") or {}
+    user_message = state.get("user_message") or ""
+    current_context = f"Campaign idea so far:\n{brief.get('idea') or user_message}"
+    
+    referenced_elements = brief.get("referenced_elements_context", [])
+    if referenced_elements:
+        current_context += "\n\nThe following existing generated elements are available to reference or fix:"
+        for i, el in enumerate(referenced_elements, 1):
+            ref = el.get("storage_ref")
+            kind = el.get("element_type", "unknown")
+            desc = el.get("description") or "(no original prompt was recorded for this element)"
+            current_context += f"\nElement {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
+            
+    latest_storage_ref = None
+    latest_tool = None
+    all_metadata = {}
+
+    emit("lead_started", lead="dynamic_executor")
+    try:
+        for i, step_info in enumerate(plan):
+            specialist = step_info.get("specialist")
+            instruction = step_info.get("instruction", "")
+            
+            if not specialist:
+                continue
+
+            step_context = current_context + f"\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
+            if latest_storage_ref:
+                step_context += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
+                
+            def _produced_ref(r) -> tuple[str | None, str | None]:
+                for call in reversed(r.tool_calls):
+                    if call.ok and call.data.get("storage_ref"):
+                        return call.data["storage_ref"], call.tool_name
+                return None, None
+
+            # Only enforce asset generation for specialists that actually produce assets,
+            # not for planning/strategy specialists (like reference_curator or palette_strategist)
+            generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
+            
+            # Run the specialist with self-correction retry
+            step_result = await run_specialist_with_review(
+                specialist,
+                context=step_context,
+                needs_retry=lambda r: specialist in generating_specialists and _produced_ref(r)[0] is None,
+                reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
+            )
+            
+            produced_ref, produced_tool = _produced_ref(step_result)
+            if produced_ref:
+                latest_storage_ref = produced_ref
+                latest_tool = produced_tool
+            
+            all_metadata[f"step_{i}_{specialist}"] = step_result.data
+            
+    except SpecialistFailed as exc:
+        log.error("dynamic_plan_failed", extra={"_extra_error": exc.message})
+        state["result"] = {
+            "message": f"Ran into an issue while executing the plan: {exc.message}. How should we proceed?",
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+            ],
+            "allow_free_text": True
+        }
+        emit("lead_failed", lead="dynamic_executor", reason=exc.message)
+        return state
+
+    if not latest_storage_ref:
+        state["result"] = {
+            "message": "The plan executed but did not produce any visible assets.",
+            "specialist_notes": all_metadata,
+        }
+        emit("lead_completed", lead="dynamic_executor", no_op=True)
+        return state
+
+    result: dict = {
+        "storage_ref": latest_storage_ref,
+        "produced_by_specialist": plan[-1].get("specialist", "dynamic_executor"),
+        "element_type": _ELEMENT_TYPE_BY_TOOL.get(
+            latest_tool, brief.get("latest_element_type", "image")
+        ),
+        "metadata": {"dynamic_plan": True, "tool_used": latest_tool, **all_metadata},
+    }
+    
+    # If this was an edit plan on an existing element, update it. If it generated something new, don't.
+    has_generator = any(s.get("specialist") in ("illustrator", "camera_director", "environment_designer") for s in plan)
+    if brief.get("latest_element_id") and not has_generator and latest_tool not in _ANNOTATION_ONLY_TOOLS:
+        result["update_existing_element_id"] = brief["latest_element_id"]
+        
+    state["result"] = result
+    emit("lead_completed", lead="dynamic_executor")
     return state
 
 
@@ -312,7 +1207,9 @@ def build_graph():
     graph.add_node("orchestrator", route)
     graph.add_node("visual_design_lead", _visual_design_lead_node)
     graph.add_node("motion_lead_pipeline", _motion_lead_node)
+    graph.add_node("full_audio", _full_audio_node)
     graph.add_node("direct_fix", _direct_fix_node)
+    graph.add_node("dynamic_executor", _dynamic_executor_node)
 
     graph.set_entry_point("ideation")
     graph.add_conditional_edges(
@@ -324,13 +1221,18 @@ def build_graph():
         "orchestrator",
         route_condition,
         {
+            "approval_required": END,
+            "dynamic": "dynamic_executor",
             "full_image": "visual_design_lead",
             "full_video": "motion_lead_pipeline",
+            "full_audio": "full_audio",
             "direct_fix": "direct_fix",
         },
     )
+    graph.add_edge("dynamic_executor", END)
     graph.add_edge("visual_design_lead", END)
     graph.add_edge("motion_lead_pipeline", END)
+    graph.add_edge("full_audio", END)
     graph.add_edge("direct_fix", END)
 
     return graph.compile()
