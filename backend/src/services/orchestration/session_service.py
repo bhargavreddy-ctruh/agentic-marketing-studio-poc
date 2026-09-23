@@ -402,19 +402,14 @@ class SessionService:
         brief_for_graph["referenced_elements_context"] = ref_context
 
         from ..knowledge.guardrail_service import GuardrailService
-        from ...core.guardrails import coerce_set
         guardrail_svc = GuardrailService(self._sessions)
         
-        # Check if the session currently has any guardrails. If not, we should infer them.
-        existing_guardrails = coerce_set(session.brief.get("guardrails"))
-        has_rules = existing_guardrails and len(existing_guardrails.rules) > 0
-        
-        # Automatically infer guardrails from the user's prompt if none exist, or if this is the first turn.
-        if (not recent_turns or not has_rules) and user_message:
-            context_for_guardrails = session.brief.get("idea") or user_message
-            await guardrail_svc.infer_initial_guardrails(session.id, context_for_guardrails)
-            
-        # Guarantees the state has deterministic guardrails before hitting any agents
+        # Per the reference design (guardrails.py::resolve): guardrails are derived ONCE from
+        # brand/product at session creation and live in the session brief forever.
+        # They are NEVER re-inferred from chat messages — doing so causes mid-session rules like
+        # "do not show prices" to block the agent on a "try again" turn.
+        # The ONLY way to add new rules is via the explicit user action: clicking Add in the
+        # Guardrails UI, which calls add_rule_from_user_context() via POST /guardrails.
         guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
         brief_for_graph["guardrails"] = guardrail_set.model_dump()
 

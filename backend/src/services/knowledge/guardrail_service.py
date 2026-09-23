@@ -77,7 +77,7 @@ class GuardrailService:
         self.index_guardrails(session_id, updated_set)
         
         return updated_set
-    async def add_enhanced_rule(self, session_id: str, raw_text: str, scope: str, source: str) -> GuardrailSet:
+    async def add_rule_from_user_context(self, session_id: str, raw_text: str, scope: str, source: str) -> GuardrailSet:
         """
         Enhances a short user instruction into a robust guardrail using an LLM,
         then adds it to the session's active GuardrailSet.
@@ -133,80 +133,6 @@ Return ONLY a JSON object with one key "rule" containing your rewritten text.
         self.index_guardrails(session_id, guardrail_set)
         
         return guardrail_set
-
-    async def infer_initial_guardrails(self, session_id: str, user_message: str) -> GuardrailSet:
-        """
-        Called on the first turn of a session to automatically infer a set of robust
-        guardrails directly from the user's initial prompt.
-        """
-        from ...providers.llm.router import get_llm_provider
-        from ...providers.llm.base import ModelTier
-        from ...core.json_extract import extract_json
-        import uuid
-        
-        prompt = f"""You are an expert brand compliance guardian. 
-Your job is to read the user's initial campaign request and extract an exhaustive set of strict, exclusionary rules (guardrails) to prevent AI hallucinations.
-The user has just started a new session with the following request:
-"{user_message}"
-
-Based strictly on this request, generate an exhaustive list of rules using this exact reasoning framework:
-1. **Identity & Attributes**: For every specific detail mentioned (e.g., subject, setting, aesthetic), explicitly forbid contradicting it (e.g., "The campaign is about X. Imagery must not depict anything inconsistent with this").
-2. **Options & Exclusivity**: If a specific list of options is given (e.g., colors, sizes, themes), strictly bound them (e.g., "The only colors allowed are red and blue. Never depict, state, or imply any color outside this list").
-3. **Pricing & Figures**: If a price or discount is mentioned, lock it down exactly (e.g., "When price appears it must read exactly $X. Never a different figure, and never rounded or approximated").
-4. **Claims & Hallucinations**: ALWAYS include a catch-all rule forbidding the invention of unstated facts (e.g., "Never state a price, discount, specification, or fact that was not explicitly provided. If something is absent, leave it out rather than inventing a plausible value").
-
-Do NOT limit yourself to 2-3 rules. Generate as many rules as necessary to fully lock down every constraint implied by the request.
-Be specific, unambiguous, and use imperative exclusionary language ("Never use...", "Always ensure...").
-
-Return ONLY a JSON object containing a list of strings under the key "rules".
-Example:
-{{
-  "rules": [
-    "The only colors allowed are red and blue. Never depict, state, or imply any color outside this list.",
-    "When price appears it must read exactly $199. Never a different figure, and never rounded or approximated.",
-    "Never state a price, discount, specification, or fact that was not explicitly provided. If something is absent, leave it out rather than inventing a plausible value."
-  ]
-}}
-"""
-        try:
-            result = await get_llm_provider().complete(
-                tier=ModelTier.TIER_1,
-                system=prompt,
-                messages=[],
-                max_tokens=800
-            )
-            parsed = extract_json(result.text)
-            rules_text = parsed.get("rules", [])
-        except Exception as e:
-            log.warning("infer_initial_guardrails_failed", extra={"_extra_error": str(e)})
-            rules_text = []
-
-        session = await self._sessions.get(session_id)
-        if not session:
-            return GuardrailSet()
-            
-        guardrail_set = coerce_set(session.brief.get("guardrails"))
-        if not guardrail_set:
-            guardrail_set = GuardrailSet()
-            
-        for text in rules_text:
-            if not isinstance(text, str):
-                continue
-            new_rule = GuardrailRule(
-                id=f"rule_{uuid.uuid4().hex[:8]}",
-                source="custom",
-                rule=text,
-                scope="all"
-            )
-            guardrail_set.rules.append(new_rule)
-        
-        if rules_text:
-            session.brief = {**session.brief, "guardrails": guardrail_set.model_dump()}
-            await self._sessions.update(session)
-            self.index_guardrails(session_id, guardrail_set)
-            
-        return guardrail_set
-
     def index_guardrails(self, session_id: str, guardrail_set: GuardrailSet) -> None:
         """
         Ingests the session's strict guardrails into a dedicated LlamaIndex collection 

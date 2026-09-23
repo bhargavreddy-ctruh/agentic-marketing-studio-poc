@@ -57,7 +57,7 @@ async def add_guardrail(
         if not raw_rule:
             raise ValueError("rule text is required")
             
-        updated_set = await svc.add_enhanced_rule(session_id, raw_rule, scope, source)
+        updated_set = await svc.add_rule_from_user_context(session_id, raw_rule, scope, source)
         return updated_set.model_dump()
     except NotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
