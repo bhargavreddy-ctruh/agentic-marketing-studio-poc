@@ -40,6 +40,7 @@ class VideoStitcherTool(Tool):
             tmp_path = Path(tmp)
             concat_lines = []
             for i, ref in enumerate(storage_refs):
+                ref = str(ref).strip()
                 loaded = load_asset(ref)
                 if loaded is None:
                     return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {ref}")

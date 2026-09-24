@@ -34,7 +34,7 @@ class BaseVideoGeneratorTool(Tool):
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         prompt = str(args.get("prompt") or "").strip()
-        source_ref = str(args.get("source_image_storage_ref") or "")
+        source_ref = str(args.get("source_image_storage_ref") or "").strip()
         if not prompt or not source_ref:
             return ToolResult(
                 ok=False, data={}, error="prompt and source_image_storage_ref are required"
