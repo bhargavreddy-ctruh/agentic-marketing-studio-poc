@@ -32,6 +32,19 @@ class LocalLLMProvider(LLMProvider):
         self._base_url = (base_url or settings.local_llm_base_url).rstrip("/")
         self._model = model or settings.local_llm_model_tier_1
 
+    def _strip_images(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        stripped = []
+        for msg in messages:
+            if isinstance(msg.get("content"), list):
+                new_content = [
+                    part for part in msg["content"] 
+                    if not (isinstance(part, dict) and part.get("type") == "image_url")
+                ]
+                stripped.append({**msg, "content": new_content})
+            else:
+                stripped.append(msg)
+        return stripped
+
     async def complete(
         self,
         *,
@@ -43,7 +56,8 @@ class LocalLLMProvider(LLMProvider):
         prefer_local: bool = True,  # unused here — LLMRouter already decided to call this provider
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
-        full_messages = [{"role": "system", "content": system}, *messages]
+        safe_messages = self._strip_images(messages)
+        full_messages = [{"role": "system", "content": system}, *safe_messages]
         return await call_openai_compatible_chat(
             provider_name="local_llm",
             base_url=self._base_url,
