@@ -206,7 +206,16 @@ async def run_specialist_agentic(
                         # specialist's own log.
                         async with trace(name=f"tool:{tool_name}", run_type="tool", inputs=args) as tool_run:
                             try:
-                                tool_context = {"user_id": brief.get("user_id")} if brief and brief.get("user_id") else None
+                                tool_context: dict | None = None
+                                if brief:
+                                    tool_context = {
+                                        k: v for k, v in {
+                                            "user_id": brief.get("user_id"),
+                                            "product_photo_storage_ref": brief.get("product_photo_storage_ref"),
+                                            "style_ref_storage_ref": brief.get("style_ref_storage_ref"),
+                                            "style_seed": brief.get("style_seed"),
+                                        }.items() if v is not None
+                                    } or None
                                 tool_result = await get_tool(tool_name).run(args, context=tool_context)
                                 record = ToolCallRecord(
                                     tool_name=tool_name, args=args, ok=tool_result.ok,

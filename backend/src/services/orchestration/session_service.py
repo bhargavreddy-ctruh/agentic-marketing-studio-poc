@@ -515,6 +515,16 @@ class SessionService:
         guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
         brief_for_graph["guardrails"] = guardrail_set.model_dump()
 
+        # Inject product photo storage ref into the brief so base_image_generator can
+        # auto-use it as image-to-image reference when no explicit reference_storage_ref is given.
+        if session.product_profile_id and not brief_for_graph.get("product_photo_storage_ref"):
+            async with async_session_factory() as db:
+                from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+                product_repo = SqliteProductRepository(db)
+                product = await product_repo.get(session.product_profile_id)
+                if product and product.photo_storage_ref:
+                    brief_for_graph["product_photo_storage_ref"] = product.photo_storage_ref
+
         from ...core.events import set_current_guardrails_xml
         set_current_guardrails_xml(guardrail_set.render())
 
