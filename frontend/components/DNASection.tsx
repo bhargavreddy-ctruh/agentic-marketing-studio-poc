@@ -6,9 +6,27 @@ interface DNASectionProps {
 }
 
 export default function DNASection({ sessionId }: DNASectionProps) {
-  const [activeTab, setActiveTab] = useState<"brand" | "product">("brand");
-  const [brandDna, setBrandDna] = useState("");
-  const [productDna, setProductDna] = useState("");
+  const [activeTab, setActiveTab] = useState<"campaign" | "brand" | "product">("campaign");
+  
+  const [campaignDetails, setCampaignDetails] = useState({
+    campaignIdea: "",
+    audience: "",
+    goal: ""
+  });
+
+  const [brandDetails, setBrandDetails] = useState({
+    voiceAndTone: "",
+    visualIdentity: "",
+    logoRules: "",
+    logoImage: ""
+  });
+
+  const [productDetails, setProductDetails] = useState({
+    name: "",
+    category: "",
+    productDescription: ""
+  });
+
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,8 +37,19 @@ export default function DNASection({ sessionId }: DNASectionProps) {
       setLoading(true);
       try {
         const data = await request<any>(`/api/v1/sessions/${sessionId}`);
-        setBrandDna(data.brief?.brand_dna || "");
-        setProductDna(data.brief?.product_dna || "");
+        if (data.brief?.campaignDetails) setCampaignDetails(data.brief.campaignDetails);
+        
+        if (data.brief?.brandDetails) {
+          setBrandDetails(data.brief.brandDetails);
+        } else if (data.brief?.brand_dna) {
+          setBrandDetails(prev => ({ ...prev, visualIdentity: data.brief.brand_dna }));
+        }
+
+        if (data.brief?.productDetails) {
+          setProductDetails(data.brief.productDetails);
+        } else if (data.brief?.product_dna) {
+          setProductDetails(prev => ({ ...prev, productDescription: data.brief.product_dna }));
+        }
       } catch (e) {
         console.error(e);
         setError("Failed to load DNA");
@@ -41,7 +70,14 @@ export default function DNASection({ sessionId }: DNASectionProps) {
       await request(`/api/v1/sessions/${sessionId}/dna`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ brand_dna: brandDna, product_dna: productDna }),
+        body: JSON.stringify({ 
+          campaignDetails,
+          brandDetails,
+          productDetails,
+          // keep backward compatibility for backend schema
+          brand_dna: brandDetails.visualIdentity, 
+          product_dna: productDetails.productDescription
+        }),
       });
       setSuccessMsg("DNA updated and guardrails re-derived!");
       setTimeout(() => setSuccessMsg(null), 3000);
@@ -69,12 +105,22 @@ export default function DNASection({ sessionId }: DNASectionProps) {
     <div className="flex h-full flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-surface-700/50 p-4 shrink-0">
         <div>
-          <h2 className="text-base font-semibold text-white">Brand & Product DNA</h2>
+          <h2 className="text-base font-semibold text-white">Campaign, Brand & Product DNA</h2>
           <p className="mt-0.5 text-xs text-surface-400">Provide the foundational facts. The AI will synthesize these into strict Guardrails.</p>
         </div>
       </div>
 
       <div className="flex border-b border-surface-700/50 bg-surface-900/50 shrink-0">
+        <button
+          onClick={() => setActiveTab("campaign")}
+          className={`flex-1 py-3 text-sm font-medium transition-colors ${
+            activeTab === "campaign"
+              ? "border-b-2 border-brand-500 text-brand-400"
+              : "text-surface-400 hover:text-surface-200"
+          }`}
+        >
+          Campaign
+        </button>
         <button
           onClick={() => setActiveTab("brand")}
           className={`flex-1 py-3 text-sm font-medium transition-colors ${
@@ -109,15 +155,65 @@ export default function DNASection({ sessionId }: DNASectionProps) {
       )}
 
       <div className="flex-1 p-4 overflow-y-auto space-y-4">
-        {activeTab === "brand" ? (
+        {activeTab === "campaign" && (
           <div className="h-full flex flex-col space-y-4">
-            <div className="flex-1 flex flex-col">
-              <label className="text-xs font-semibold text-surface-300 mb-2">Brand Guidelines</label>
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Campaign Idea / Tagline</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Summer vibes collection..."
+                value={campaignDetails.campaignIdea}
+                onChange={(e) => setCampaignDetails({ ...campaignDetails, campaignIdea: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Audience / Persona</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Gen Z, urban lifestyle..."
+                value={campaignDetails.audience}
+                onChange={(e) => setCampaignDetails({ ...campaignDetails, audience: e.target.value })}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Primary Goals</label>
               <textarea
-                className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none min-h-[140px]"
-                placeholder="E.g. We are a modern, minimalist brand. Our primary colors are #FF0000 and white. Our logo should always be in the bottom right corner..."
-                value={brandDna}
-                onChange={(e) => setBrandDna(e.target.value)}
+                className="w-full h-[100px] rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"
+                placeholder="E.g. Brand awareness, direct sales..."
+                value={campaignDetails.goal}
+                onChange={(e) => setCampaignDetails({ ...campaignDetails, goal: e.target.value })}
+              />
+            </div>
+          </div>
+        )}
+
+        {activeTab === "brand" && (
+          <div className="h-full flex flex-col space-y-4">
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Voice and Tone</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Playful, energetic, professional..."
+                value={brandDetails.voiceAndTone}
+                onChange={(e) => setBrandDetails({ ...brandDetails, voiceAndTone: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Visual Identity & Colors</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Neon colors, futuristic styling..."
+                value={brandDetails.visualIdentity}
+                onChange={(e) => setBrandDetails({ ...brandDetails, visualIdentity: e.target.value })}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Logo Rules & Constraints</label>
+              <textarea
+                className="w-full h-[100px] rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"
+                placeholder="E.g. Logo must always have 20px padding..."
+                value={brandDetails.logoRules}
+                onChange={(e) => setBrandDetails({ ...brandDetails, logoRules: e.target.value })}
               />
             </div>
 
@@ -167,15 +263,35 @@ export default function DNASection({ sessionId }: DNASectionProps) {
               </div>
             </div>
           </div>
-        ) : (
+        )}
+
+        {activeTab === "product" && (
           <div className="h-full flex flex-col space-y-4">
-            <div className="flex-1 flex flex-col">
-              <label className="text-xs font-semibold text-surface-300 mb-2">Product Specifics</label>
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Product Name</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Audit Test Sneaker"
+                value={productDetails.name}
+                onChange={(e) => setProductDetails({ ...productDetails, name: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Category</label>
+              <input
+                className="w-full rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                placeholder="E.g. Footwear"
+                value={productDetails.category}
+                onChange={(e) => setProductDetails({ ...productDetails, category: e.target.value })}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="text-xs font-semibold text-surface-300 mb-1 block">Product Description & Specs</label>
               <textarea
-                className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none min-h-[140px]"
-                placeholder="E.g. The Audit Test Sneaker. Price: $150. Key features: lightweight, breathable mesh, red accents. Never show it being used in mud..."
-                value={productDna}
-                onChange={(e) => setProductDna(e.target.value)}
+                className="w-full h-[100px] rounded-lg border border-surface-700 bg-surface-800 p-2.5 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"
+                placeholder="E.g. Price: $150. Key features: lightweight..."
+                value={productDetails.productDescription}
+                onChange={(e) => setProductDetails({ ...productDetails, productDescription: e.target.value })}
               />
             </div>
 

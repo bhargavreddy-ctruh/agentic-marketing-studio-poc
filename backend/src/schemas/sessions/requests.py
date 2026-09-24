@@ -35,6 +35,26 @@ class PostTurnRequest(BaseModel):
     # recently created. Falls back to today's auto-inferred behavior when absent or stale.
     referenced_element_ids: list[str] | None = None
 
+class CampaignDetails(BaseModel):
+    campaignIdea: str | None = None
+    audience: str | None = None
+    goal: str | None = None
+
+class BrandDetails(BaseModel):
+    voiceAndTone: str | None = None
+    visualIdentity: str | None = None
+    logoRules: str | None = None
+    logoImage: str | None = None
+
+class ProductDetails(BaseModel):
+    name: str | None = None
+    category: str | None = None
+    productPhotos: list[str] | None = None
+    productDescription: str | None = None
+
 class UpdateDnaRequest(BaseModel):
     brand_dna: str | None = None
     product_dna: str | None = None
+    campaignDetails: CampaignDetails | None = None
+    brandDetails: BrandDetails | None = None
+    productDetails: ProductDetails | None = None

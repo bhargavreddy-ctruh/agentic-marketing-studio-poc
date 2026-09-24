@@ -67,6 +67,14 @@ async def update_dna(
     
     session_model.brief["brand_dna"] = body.brand_dna or ""
     session_model.brief["product_dna"] = body.product_dna or ""
+    
+    if body.campaignDetails is not None:
+        session_model.brief["campaignDetails"] = body.campaignDetails.model_dump()
+    if body.brandDetails is not None:
+        session_model.brief["brandDetails"] = body.brandDetails.model_dump()
+    if body.productDetails is not None:
+        session_model.brief["productDetails"] = body.productDetails.model_dump()
+
     await svc._sessions.update(session_model)
     
     from ....services.knowledge.guardrail_service import GuardrailService
