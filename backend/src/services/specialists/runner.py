@@ -81,7 +81,7 @@ class AgenticStepResult:
 
 
 async def run_specialist_agentic(
-    specialist_name: str, *, context: str, max_iterations: int = 6
+    specialist_name: str, *, context: str, max_iterations: int = 6, brief: dict | None = None
 ) -> AgenticStepResult:
     """
     Runs one specialist's full agentic turn: offers its `allowed_tools` as real function-calling
@@ -93,6 +93,13 @@ async def run_specialist_agentic(
     malformed final JSON, exceeding max_iterations — surfaces as SpecialistFailed specifically, so
     a Lead executor only ever needs to catch one exception type (Rules.md section 1: DRY, section
     4: typed errors).
+
+    `brief` — optional; when provided, the real `_recent_chat_history` turns inside it are injected
+    as proper conversation-history messages (user/assistant pairs) BEFORE the current context message.
+    This is what makes the MASTER_DIRECTIVE's user-override logic actually work: the specialist LLM
+    can see "its okay go ahead" as a real prior user turn, not just as a string buried inside a JSON
+    dump in the context. Without real message history, the model has no reliable way to detect that
+    the user already confirmed proceeding past a guardrail conflict.
     """
     spec = get_specialist(specialist_name)
     system_prompt = spec.load_prompt()
@@ -121,7 +128,14 @@ async def run_specialist_agentic(
 
     emit("specialist_started", specialist=specialist_name, tier=spec.tier.name)
 
-    messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
+    # Build the messages array: real prior chat turns (if brief provided) + current context.
+    # This is the mechanism that makes "go ahead" / user confirmations visible to the LLM — they
+    # exist as real user/assistant message pairs, not just as text inside a JSON blob.
+    from ...core.chat_history import build_history_messages
+    if brief is not None:
+        messages: list[dict[str, Any]] = build_history_messages(brief, context)
+    else:
+        messages = [{"role": "user", "content": context}]
     tool_calls: list[ToolCallRecord] = []
     # Real, live-found bug (2026-09-24, per a real user report — `reference_curator` failed twice
     # in a row with "could not parse JSON from model response: Expecting value: line 1 column 1
@@ -301,6 +315,7 @@ async def run_specialist_with_review(
     reminder: str,
     max_iterations: int = 6,
     first_result: AgenticStepResult | None = None,
+    brief: dict | None = None,
 ) -> AgenticStepResult:
     """Runs a specialist, then a real, bounded "did it actually do what it claims" check — a Lead
     calling this instead of `run_specialist_agentic` directly is genuinely reviewing its sub-agent's
@@ -328,7 +343,7 @@ async def run_specialist_with_review(
     inside this function) still route the review/retry decision through this one shared place,
     rather than reimplementing the check-and-log-and-retry logic a second time."""
     result = first_result or await run_specialist_agentic(
-        specialist_name, context=context, max_iterations=max_iterations
+        specialist_name, context=context, max_iterations=max_iterations, brief=brief
     )
     if not needs_retry(result):
         return result
@@ -340,7 +355,7 @@ async def run_specialist_with_review(
     # card, with no sign a review/correction ever happened.
     emit("specialist_review_retry", specialist=specialist_name)
     return await run_specialist_agentic(
-        specialist_name, context=f"{context}\n\n{reminder}", max_iterations=max_iterations
+        specialist_name, context=f"{context}\n\n{reminder}", max_iterations=max_iterations, brief=brief
     )
 
 

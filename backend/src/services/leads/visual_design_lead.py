@@ -76,7 +76,8 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
 
     illustrator_context = (
         f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}\n\n"
-        f"Palette direction:\n{palette.get('palette_direction', '')}"
+        f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
+        f"Brief so far:\n{json.dumps(brief)}"
     )
     # Real, live-found failure mode (2026-09-21): a smaller model — specifically router.py's local
     # last-resort fallback, confirmed live at roughly a 1-in-3 rate even after tightening
@@ -98,6 +99,7 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
                 "called base_image_generator. You MUST call base_image_generator with your image "
                 "prompt now, before responding with final JSON."
             ),
+            brief=brief,
         )
     except SpecialistFailed as exc:
         # If illustrator generated an asset via base_image_generator but THEN failed (e.g. guardrail conflict),
