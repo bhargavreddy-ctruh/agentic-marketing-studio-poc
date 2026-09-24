@@ -74,10 +74,13 @@ class GroqProvider(LLMProvider):
                         messages=full_messages,
                         tools=tools,
                         max_tokens=max_tokens,
+                        retries=0,  # fail fast per user request to shift to fallback rather than retrying multiple times
                         on_delta=on_delta,
                     )
                 except ProviderUnavailable as exc:
                     last_error = exc
+                    # If it's a rate limit, the API key is exhausted. We can try the next key.
+                    # But if we exhaust all keys, it raises last_error quickly without internal backoff loops.
                     continue
 
         raise last_error or ProviderUnavailable("groq", "all models and keys failed")

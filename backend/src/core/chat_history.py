@@ -20,11 +20,13 @@ real `messages` array an LLM call actually sends.
 from __future__ import annotations
 
 
-def build_history_messages(brief: dict, final_user_content: str) -> list[dict[str, str]]:
+from typing import Any
+
+def build_history_messages(brief: dict, final_user_content: str | list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Real prior turns (if any) + the caller's own current-turn content as the final user
     message — the same context every existing call already built, just no longer standing alone.
     Empty/missing history degrades to exactly the old single-message behavior, unchanged."""
-    messages: list[dict[str, str]] = []
+    messages: list[dict[str, Any]] = []
     for turn in brief.get("_recent_chat_history") or []:
         user_text = turn.get("user")
         if user_text:

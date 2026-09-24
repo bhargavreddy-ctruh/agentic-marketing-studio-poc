@@ -30,7 +30,7 @@ class DiscountMathCalculatorTool(Tool):
         "required": ["base_price", "discount_percent"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         try:
             base_price = float(args["base_price"])
             discount_percent = float(args["discount_percent"])

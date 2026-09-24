@@ -171,11 +171,10 @@ class TextOverlayTool(Tool):
                         font-size: {font_size}px;
                         font-weight: bold;
                         fill: {text_color_hex};
-                        filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.8));
+                        filter: drop-shadow(0px 4px 8px rgba(0,0,0,0.9)) drop-shadow(0px 2px 4px rgba(0,0,0,0.7));
                       }}
                     </style>
                   </defs>
-                  <rect x="{x - font_size // 2}" y="{y - font_size // 4}" width="{text_w + font_size}" height="{text_h + font_size // 2}" rx="6" fill="#000000" fill-opacity="0.65"/>
                   <text x="{center_x}" y="{center_y + font_size // 3}" class="overlay-text" text-anchor="middle" dominant-baseline="middle">{text}</text>
                 </svg>"""
 
@@ -203,12 +202,9 @@ class TextOverlayTool(Tool):
         text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
         x, y = place_fn(width, height, text_w, text_h)
 
-        pad = font_size // 2
-        draw.rectangle(
-            [x - pad, y - pad // 2, x + text_w + pad, y + text_h + pad],
-            fill=(0, 0, 0, 170),
-        )
-        draw.text((x, y), text, font=font, fill=text_color)
+        # Draw a text stroke (outline) for legibility instead of an ugly black box
+        stroke_width = max(1, font_size // 15)
+        draw.text((x, y), text, font=font, fill=text_color, stroke_width=stroke_width, stroke_fill=(0, 0, 0, 200))
 
         combined = Image.alpha_composite(base, overlay).convert("RGB")
         buf = io.BytesIO()

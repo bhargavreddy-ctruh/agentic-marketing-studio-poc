@@ -31,7 +31,7 @@ class VideoStitcherTool(Tool):
         "required": ["storage_refs"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         storage_refs = args.get("storage_refs") or []
         if not storage_refs or not isinstance(storage_refs, list):
             return ToolResult(ok=False, data={}, error="storage_refs must be a non-empty list")

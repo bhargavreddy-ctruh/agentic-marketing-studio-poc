@@ -1145,19 +1145,29 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     brief = state.get("brief") or {}
     user_message = state.get("user_message") or ""
     import json
-    current_context = f"Campaign idea so far:\n{brief.get('idea') or user_message}"
+    
+    current_context = [{"type": "text", "text": f"Campaign idea so far:\n{brief.get('idea') or user_message}"}]
     
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
-        current_context += "\n\nThe following existing generated elements are available to reference or fix:"
+        text_part = "\n\nThe following existing generated elements are available to reference or fix:"
+        from ...providers.storage.local import load_asset
+        import base64
         for i, el in enumerate(referenced_elements, 1):
             ref = el.get("storage_ref")
             kind = el.get("element_type", "unknown")
             desc = el.get("description") or "(no original prompt was recorded for this element)"
-            current_context += f"\nElement {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
+            text_part += f"\nElement {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}\n(Note: If generating a new visual base from this, pass this storage_ref as 'reference_storage_ref' to base_image_generator)"
+            if kind == "image" and ref:
+                loaded = load_asset(ref)
+                if loaded:
+                    img_bytes, mime = loaded
+                    b64_img = base64.b64encode(img_bytes).decode("utf-8")
+                    current_context.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_img}"}})
+        current_context[0]["text"] += text_part
             
     # Include the full brief so the specialist has access to `_recent_chat_history`, guardrails metadata, etc.
-    current_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+    current_context[0]["text"] += f"\n\nFull session brief context:\n{json.dumps(brief)}"
 
     latest_storage_ref = None
     latest_tool = None
@@ -1167,6 +1177,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
     emit("lead_started", lead="dynamic_executor")
     try:
+        import copy
         for i, step_info in enumerate(plan):
             specialist = step_info.get("specialist")
             instruction = step_info.get("instruction", "")
@@ -1174,10 +1185,17 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             if not specialist:
                 continue
 
-            step_context = current_context + f"\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
+            step_context = copy.deepcopy(current_context)
+            instruction_text = f"\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
             if latest_storage_ref:
-                step_context += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
-                
+                instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
+            
+            # Find the text dict and append the instruction to it
+            for part in step_context:
+                if part.get("type") == "text":
+                    part["text"] += instruction_text
+                    break
+
             # Only enforce asset generation for specialists that actually produce assets,
             # not for planning/strategy specialists (like reference_curator or palette_strategist)
             generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}

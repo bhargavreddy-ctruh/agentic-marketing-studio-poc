@@ -35,7 +35,7 @@ class DiscountClaimsCalculatorTool(Tool):
         "required": ["product_id"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         product_id = str(args.get("product_id") or "").strip()
         if not product_id:
             return ToolResult(ok=False, data={}, error="product_id is required")

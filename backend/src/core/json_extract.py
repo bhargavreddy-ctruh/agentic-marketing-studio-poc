@@ -50,4 +50,7 @@ def extract_json(text: str) -> dict[str, Any]:
                     return parsed
             except json.JSONDecodeError:
                 pass
-    raise ValueError(f"could not parse JSON from model response: {last_error}")
+    
+    # Provide a snippet of the text in the error message so we can see what the model actually returned
+    text_snippet = (text[:100] + '...') if len(text) > 100 else text
+    raise ValueError(f"could not parse JSON from model response (starts with: {repr(text_snippet)}): {last_error}")

@@ -30,7 +30,7 @@ class AudioTranscriberTool(Tool):
         "required": ["storage_ref"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         storage_ref = str(args.get("storage_ref") or "").strip()
         if not storage_ref:
             return ToolResult(ok=False, data={}, error="storage_ref is required")

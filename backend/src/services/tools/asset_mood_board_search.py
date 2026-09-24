@@ -25,7 +25,7 @@ class AssetMoodBoardSearchTool(Tool):
     description = "Searches internal prior-campaign assets for mood-board references."
     input_schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         query = str(args.get("query") or "").strip()
         if not query:
             return ToolResult(ok=False, data={}, error="query is required")

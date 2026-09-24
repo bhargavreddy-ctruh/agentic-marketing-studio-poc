@@ -278,26 +278,22 @@ async def call_openai_compatible_chat(
                 resp = await client.post(url, headers=headers, json=body)
 
             if resp.status_code == 429:
+                last_error = ProviderUnavailable(provider_name, f"{model} rate limited")
+                if attempt == retries:
+                    break
                 wait = 1.5 * (attempt + 1)
                 log.warning(
                     "llm_http_rate_limited",
                     extra={"_extra_provider": provider_name, "_extra_model": model, "_extra_wait_s": wait},
                 )
-                # Real, live-found bug (2026-09-24, per an explicit user report: "the node model
-                # has latency its not showing the current status of nodes properly its taking
-                # atleast 30 seconds lag sometimes"): this retry/backoff loop is the REAL source of
-                # that lag — real, heavily-documented Groq/OpenRouter rate limiting means a single
-                # LLM call can genuinely spend 20-30+ seconds retrying across this and the caller's
-                # own provider-to-provider fallback chain — but NOTHING was ever emitted here, so
-                # the frontend received zero events for the entire wait. It wasn't stale data, it
-                # was a real, silent gap with nothing to show. `emit()` is a safe no-op if no turn
-                # is active (`core/events.py`), so this costs nothing outside a real live turn.
                 emit("llm_retry", provider=provider_name, model=model, wait_s=wait, reason="rate_limited")
                 await asyncio.sleep(wait)
-                last_error = ProviderUnavailable(provider_name, f"{model} rate limited")
                 continue
 
             if resp.status_code >= 500:
+                last_error = ProviderUnavailable(provider_name, f"{model} HTTP {resp.status_code}")
+                if attempt == retries:
+                    break
                 wait = 1.0 * (attempt + 1)
                 log.warning(
                     "llm_http_5xx",
@@ -305,7 +301,6 @@ async def call_openai_compatible_chat(
                 )
                 emit("llm_retry", provider=provider_name, model=model, wait_s=wait, reason="server_error")
                 await asyncio.sleep(wait)
-                last_error = ProviderUnavailable(provider_name, f"{model} HTTP {resp.status_code}")
                 continue
 
             if resp.status_code >= 400:

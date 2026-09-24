@@ -26,7 +26,7 @@ class TextToSpeechTool(Tool):
         "required": ["text"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         text = str(args.get("text") or "").strip()
         voice = args.get("voice")
         if not text:

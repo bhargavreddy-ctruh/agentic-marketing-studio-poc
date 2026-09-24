@@ -29,7 +29,7 @@ class ColorPaletteExtractorTool(Tool):
         "required": ["storage_ref"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         storage_ref = str(args.get("storage_ref") or "")
         num_colors = int(args.get("num_colors") or 5)
         loaded = load_asset(storage_ref)

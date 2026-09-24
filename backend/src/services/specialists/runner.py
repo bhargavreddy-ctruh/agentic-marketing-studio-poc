@@ -81,7 +81,7 @@ class AgenticStepResult:
 
 
 async def run_specialist_agentic(
-    specialist_name: str, *, context: str, max_iterations: int = 6, brief: dict | None = None
+    specialist_name: str, *, context: str | list[dict[str, Any]], max_iterations: int = 6, brief: dict | None = None
 ) -> AgenticStepResult:
     """
     Runs one specialist's full agentic turn: offers its `allowed_tools` as real function-calling
@@ -314,7 +314,7 @@ async def run_specialist_agentic(
 async def run_specialist_with_review(
     specialist_name: str,
     *,
-    context: str,
+    context: str | list[dict[str, Any]],
     needs_retry: Callable[[AgenticStepResult], bool],
     reminder: str,
     max_iterations: int = 6,

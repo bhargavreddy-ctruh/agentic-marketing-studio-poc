@@ -17,7 +17,7 @@ class WebTrendSearchTool(Tool):
     description = "Searches the web for current visual trend references matching a style brief."
     input_schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         query = str(args.get("query") or "").strip()
         if not query:
             return ToolResult(ok=False, data={}, error="query is required")

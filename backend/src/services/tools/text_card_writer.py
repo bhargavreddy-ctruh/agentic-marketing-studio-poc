@@ -40,7 +40,7 @@ class TextCardWriterTool(Tool):
         "required": ["label", "text"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         label = str(args.get("label") or "note").strip() or "note"
         text = str(args.get("text") or "").strip()
         if not text:

@@ -41,7 +41,7 @@ class AudioVideoMuxerTool(Tool):
         "required": ["video_storage_ref", "audio_storage_ref"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         video_ref = str(args.get("video_storage_ref") or "")
         audio_ref = str(args.get("audio_storage_ref") or "")
         if not video_ref or not audio_ref:
