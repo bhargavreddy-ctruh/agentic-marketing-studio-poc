@@ -3,9 +3,13 @@ Replicate LLM Provider for text generation using google/gemini-2.5-flash.
 NOTE: Replicate's wrapper for this model currently does not support native
 OpenAI-style tool calling or multi-turn messages array. It only accepts a single
 prompt string. This provider will serialize the chat history into the prompt.
+
+Retry policy: retries up to _MAX_RETRIES times with exponential backoff on transient
+errors (unlike Groq which tries each key once and moves on).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Callable
 
@@ -13,7 +17,12 @@ import replicate
 
 from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable
+from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
+
+log = get_logger(__name__)
+_MAX_RETRIES = 3
+_REPLICATE_LLM_MODEL = "google/gemini-2.5-flash"
 
 
 class ReplicateLLMProvider(LLMProvider):
@@ -59,29 +68,39 @@ class ReplicateLLMProvider(LLMProvider):
             "temperature": 0.7,
         }
 
-        try:
-            # We run this in a thread since replicate.stream is synchronous
-            import asyncio
-            loop = asyncio.get_running_loop()
-            
-            def _run():
-                full_text = ""
-                for event in replicate.stream("google/gemini-2.5-flash", input=input_data):
-                    chunk = str(event)
-                    full_text += chunk
-                    if on_delta:
-                        on_delta(chunk)
-                return full_text
+        loop = asyncio.get_running_loop()
+        last_error: Exception | None = None
 
-            content = await loop.run_in_executor(None, _run)
-            return LLMResult(
-                content=content.strip(),
-                tool_calls=[],
-                provider_name="replicate_llm",
-                model_name="google/gemini-2.5-flash"
-            )
-        except Exception as e:
-            raise ProviderUnavailable("replicate_llm", str(e))
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                def _run():
+                    full_text = ""
+                    for event in replicate.stream(_REPLICATE_LLM_MODEL, input=input_data):
+                        chunk = str(event)
+                        full_text += chunk
+                        if on_delta:
+                            on_delta(chunk)
+                    return full_text
+
+                content = await loop.run_in_executor(None, _run)
+                return LLMResult(
+                    text=content.strip(),
+                    model=_REPLICATE_LLM_MODEL,
+                    tool_calls=[],
+                    stop_reason="stop",
+                )
+            except Exception as e:
+                last_error = e
+                if attempt < _MAX_RETRIES:
+                    wait = 2.0 * (attempt + 1)
+                    log.warning(
+                        "replicate_llm_retry",
+                        extra={"_extra_attempt": attempt + 1, "_extra_wait_s": wait, "_extra_error": str(e)},
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+
+        raise ProviderUnavailable("replicate_llm", str(last_error))
 
 
 _singleton: ReplicateLLMProvider | None = None
