@@ -114,7 +114,7 @@ class TextOverlayTool(Tool):
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        storage_ref = str(args.get("storage_ref") or "")
+        storage_ref = str(args.get("storage_ref") or "").strip()
         text = _sanitize_for_default_font(str(args.get("text") or "").strip())
         placement = str(args.get("placement") or "lower third").strip().lower()
         font_family = str(args.get("font_family") or "montserrat")

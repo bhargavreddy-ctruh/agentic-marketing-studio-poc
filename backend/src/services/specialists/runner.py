@@ -215,6 +215,13 @@ async def run_specialist_agentic(
                                             # base_image_generator checks ctx first if the LLM
                                             # didn't explicitly pass reference_storage_ref as an arg.
                                             "product_photo_storage_ref": brief.get("product_photo_storage_ref"),
+                                            "reference_storage_ref": next(
+                                                (
+                                                    el["storage_ref"] for el in brief.get("referenced_elements_context", [])
+                                                    if el.get("element_type") == "image" and el.get("storage_ref")
+                                                ),
+                                                None
+                                            ),
                                             "style_ref_storage_ref": brief.get("style_ref_storage_ref"),
                                             "style_seed": brief.get("style_seed"),
                                         }.items() if v is not None
