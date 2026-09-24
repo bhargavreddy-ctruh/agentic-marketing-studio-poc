@@ -1151,7 +1151,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
         text_part = "\n\nThe following existing generated elements are available to reference or fix:"
-        from ...providers.storage.local import load_asset
+        from ...core.local_storage import load_asset
         import base64
         for i, el in enumerate(referenced_elements, 1):
             ref = el.get("storage_ref")
