@@ -42,13 +42,23 @@ async def init_models() -> None:
         
         # Lightweight column migrations for SQLite
         migrations = [
+            ("product_profiles", "user_id", "VARCHAR(36)"),
             ("product_profiles", "photo_storage_ref", "VARCHAR(255)"),
+            ("brand_profiles", "user_id", "VARCHAR(36)"),
             ("brand_profiles", "logo_storage_ref", "VARCHAR(255)"),
             ("brand_profiles", "font_storage_refs", "JSON"),
+            ("sessions", "user_id", "VARCHAR(36)"),
             ("sessions", "style_ref_storage_ref", "VARCHAR(255)"),
             ("sessions", "style_seed", "INTEGER"),
+            ("sessions", "approval_mode", "VARCHAR(16)"),
+            ("sessions", "next_prompt_json", "JSON"),
+            ("canvas_elements", "pending_storage_ref", "VARCHAR(255)"),
+            ("canvas_elements", "pending_metadata", "JSON"),
+            ("canvas_elements", "pending_action", "VARCHAR(32)"),
+            ("canvas_elements", "compliance_status", "VARCHAR(16)"),
             ("canvas_elements", "ad_spec_name", "VARCHAR(64)"),
             ("canvas_elements", "safe_zone_pct", "FLOAT"),
+            ("canvas_element_versions", "element_type", "VARCHAR(32)"),
         ]
         from sqlalchemy import text
         for table, col, col_type in migrations:
