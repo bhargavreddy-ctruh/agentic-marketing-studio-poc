@@ -46,28 +46,60 @@ class BaseImageGeneratorTool(Tool):
             # so a referenced element only ever reached generation as a text description
             # (`session_service.py`'s `_describe_uploaded_image`), never the real pixels. Wired
             # through now — real, not a text-only proxy.
+            "style_reference_storage_ref": {
+                "type": "string",
+                "description": "storage_ref of a campaign style reference image to guide visual aesthetic.",
+            },
             "reference_storage_ref": {
                 "type": "string",
                 "description": "storage_ref of an existing image to visually ground this generation in (image-to-image), when one is available and relevant.",
+            },
+            "width": {
+                "type": "integer",
+                "description": "Explicit output width in pixels.",
+            },
+            "height": {
+                "type": "integer",
+                "description": "Explicit output height in pixels.",
             },
         },
         "required": ["prompt"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return ToolResult(ok=False, data={}, error="prompt is required")
 
+        ctx = context or {}
+
+        # 1. Image-to-image reference (explicit arg takes precedence over context product photo)
         reference_image_bytes: bytes | None = None
         reference_mime_type: str | None = None
-        reference_storage_ref = str(args.get("reference_storage_ref") or "").strip()
+        reference_storage_ref = (
+            str(args.get("reference_storage_ref") or "").strip()
+            or str(ctx.get("product_photo_storage_ref") or "").strip()
+            or str(ctx.get("reference_storage_ref") or "").strip()
+        )
         if reference_storage_ref:
-            loaded = load_asset(reference_storage_ref)
-            if loaded is not None:
-                reference_image_bytes, reference_mime_type = loaded
-            # A stale/unknown storage_ref falls back to a text-only generation rather than
-            # failing the whole call — the prompt still carries the description either way.
+            loaded_ref = load_asset(reference_storage_ref)
+            if loaded_ref is not None:
+                reference_image_bytes, reference_mime_type = loaded_ref
+
+        # 2. Campaign style reference (explicit arg takes precedence over context session style lock)
+        style_reference_bytes: bytes | None = None
+        style_reference_mime_type: str | None = None
+        style_ref_storage = (
+            str(args.get("style_reference_storage_ref") or "").strip()
+            or str(ctx.get("style_ref_storage_ref") or "").strip()
+        )
+        if style_ref_storage:
+            loaded_style = load_asset(style_ref_storage)
+            if loaded_style is not None:
+                style_reference_bytes, style_reference_mime_type = loaded_style
+
+        # 3. Seed fallback from context style_seed if not explicitly given
+        seed = int(args["seed"]) if args.get("seed") is not None else ctx.get("style_seed")
 
         provider = get_image_gen_provider()
         try:
@@ -76,9 +108,13 @@ class BaseImageGeneratorTool(Tool):
                 aspect_ratio=str(args.get("aspect_ratio") or "1:1"),
                 negative_prompt=str(args["negative_prompt"]).strip() or None if args.get("negative_prompt") else None,
                 enable_prompt_expansion=bool(args.get("enable_prompt_expansion", True)),
-                seed=int(args["seed"]) if args.get("seed") is not None else None,
+                seed=seed,
                 reference_image_bytes=reference_image_bytes,
                 reference_mime_type=reference_mime_type,
+                style_reference_bytes=style_reference_bytes,
+                style_reference_mime_type=style_reference_mime_type,
+                width=int(args["width"]) if args.get("width") is not None else None,
+                height=int(args["height"]) if args.get("height") is not None else None,
             )
         except ProviderUnavailable as exc:
             return ToolResult(ok=False, data={}, error=exc.message)

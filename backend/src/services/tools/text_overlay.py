@@ -84,6 +84,13 @@ _PLACEMENTS = {
 }
 
 
+try:
+    import cairosvg
+    _CAIROSVG_AVAILABLE = True
+except Exception:
+    _CAIROSVG_AVAILABLE = False
+
+
 @register_tool("text_overlay")
 class TextOverlayTool(Tool):
     name = "text_overlay"
@@ -96,16 +103,23 @@ class TextOverlayTool(Tool):
             "placement": {"type": "string", "default": "lower third"},
             "font_family": {"type": "string", "description": "e.g., Montserrat, Oswald, Playfair Display, Roboto"},
             "text_color": {"type": "string", "description": "Hex color code, e.g., #ffffff"},
+            "backend": {
+                "type": "string",
+                "enum": ["pillow", "svg"],
+                "default": "svg",
+                "description": "Rendering backend ('svg' for vector text with drop shadow, 'pillow' for basic raster text)",
+            },
         },
         "required": ["storage_ref", "text"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         storage_ref = str(args.get("storage_ref") or "")
         text = _sanitize_for_default_font(str(args.get("text") or "").strip())
         placement = str(args.get("placement") or "lower third").strip().lower()
         font_family = str(args.get("font_family") or "montserrat")
         text_color_hex = str(args.get("text_color") or "#ffffff").strip()
+        backend = str(args.get("backend") or "svg").strip().lower()
         
         try:
             hex_str = text_color_hex.lstrip('#')
@@ -129,12 +143,64 @@ class TextOverlayTool(Tool):
         font_size = max(18, width // 18)
         font = _get_font(font_family, font_size)
 
+        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
+
+        # Try SVG backend if requested and cairosvg is installed
+        if backend == "svg" and _CAIROSVG_AVAILABLE:
+            try:
+                font_path = _FONT_DIR / f"{font_family.lower().strip().replace(' ', '_')}.ttf"
+                font_src = f"file://{font_path.absolute()}" if font_path.exists() else ""
+                
+                # Approximate bounding box
+                temp_draw = ImageDraw.Draw(base)
+                bbox = temp_draw.textbbox((0, 0), text, font=font)
+                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+                x, y = place_fn(width, height, text_w, text_h)
+                
+                center_x = x + text_w // 2
+                center_y = y + text_h // 2
+                
+                font_face_rule = f"@font-face {{ font-family: '{font_family}'; src: url('{font_src}'); }}" if font_src else ""
+
+                svg_content = f"""<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">
+                  <defs>
+                    <style>
+                      {font_face_rule}
+                      .overlay-text {{
+                        font-family: '{font_family}', sans-serif;
+                        font-size: {font_size}px;
+                        font-weight: bold;
+                        fill: {text_color_hex};
+                        filter: drop-shadow(0px 2px 4px rgba(0,0,0,0.8));
+                      }}
+                    </style>
+                  </defs>
+                  <rect x="{x - font_size // 2}" y="{y - font_size // 4}" width="{text_w + font_size}" height="{text_h + font_size // 2}" rx="6" fill="#000000" fill-opacity="0.65"/>
+                  <text x="{center_x}" y="{center_y + font_size // 3}" class="overlay-text" text-anchor="middle" dominant-baseline="middle">{text}</text>
+                </svg>"""
+
+                png_bytes = cairosvg.svg2png(bytestring=svg_content.encode("utf-8"))
+                overlay_img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+                combined = Image.alpha_composite(base, overlay_img).convert("RGB")
+                buf = io.BytesIO()
+                combined.save(buf, format="JPEG", quality=92)
+                res_bytes = buf.getvalue()
+
+                new_ref = save_asset(
+                    res_bytes,
+                    "image/jpeg",
+                    metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "svg", "edited_from": storage_ref},
+                )
+                return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg", "backend": "svg"})
+            except Exception:
+                # Fall back cleanly to Pillow rendering below
+                pass
+
+        # Fallback / Pillow backend
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
         bbox = draw.textbbox((0, 0), text, font=font)
         text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
         x, y = place_fn(width, height, text_w, text_h)
 
         pad = font_size // 2
@@ -152,6 +218,6 @@ class TextOverlayTool(Tool):
         new_ref = save_asset(
             result_bytes,
             "image/jpeg",
-            metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "edited_from": storage_ref},
+            metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "pillow", "edited_from": storage_ref},
         )
-        return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg"})
+        return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg", "backend": "pillow"})

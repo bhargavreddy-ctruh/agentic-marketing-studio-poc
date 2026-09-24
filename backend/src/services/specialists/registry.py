@@ -235,4 +235,11 @@ def load_all_specialists() -> None:
         tier=ModelTier.TIER_2,
         description="Writes a real text card describing an existing image/video/audio element, or a narrative/summary in writing — never generates or edits an image/video/audio asset itself. The right target whenever the user asks for something to be DESCRIBED, narrated, or summarized in text, not generated/edited as a new media asset.",
     ))
+    register_specialist(SpecialistSpec(
+        name="brand_asset_applier",
+        prompt_file="brand_asset_applier.md",
+        allowed_tools=("brand_kit_lookup", "logo_compositor", "text_overlay", "image_crop_resize"),
+        tier=ModelTier.TIER_2,
+        description="Applies brand identity assets (logos, brand fonts, colors, safe-zone overlays) to canvas images. Handles logo placement, brand watermark overlay, and ad-spec compliant asset formatting.",
+    ))
     log.info("specialists_loaded", extra={"_extra_count": len(SPECIALIST_REGISTRY)})
