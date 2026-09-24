@@ -23,7 +23,10 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
     def __init__(self):
         # We explicitly pass the token from settings because pydantic-settings loads .env
         # but does not inject into os.environ automatically.
-        self._client = replicate.Client(api_token=settings.replicate_api_token)
+        self._client = replicate.Client(
+            api_token=settings.replicate_api_token,
+            timeout=httpx.Timeout(600.0)
+        )
 
     async def generate(
         self,

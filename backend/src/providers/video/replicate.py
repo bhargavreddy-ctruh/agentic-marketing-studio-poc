@@ -73,7 +73,10 @@ class ReplicateVideoProvider(VideoGenProvider):
         if camera_motion and camera_motion.lower() not in prompt.lower():
             effective_prompt = f"{prompt}. Camera motion: {camera_motion}."
 
-        client = replicate_sdk.Client(api_token=self._api_key)
+        client = replicate_sdk.Client(
+            api_token=self._api_key,
+            timeout=httpx.Timeout(600.0)
+        )
         input_payload = {
             "image": io.BytesIO(effective_image_bytes),
             "prompt": effective_prompt,
