@@ -151,31 +151,55 @@ class TextOverlayTool(Tool):
                 font_path = _FONT_DIR / f"{font_family.lower().strip().replace(' ', '_')}.ttf"
                 font_src = f"file://{font_path.absolute()}" if font_path.exists() else ""
                 
-                # Approximate bounding box
-                temp_draw = ImageDraw.Draw(base)
-                bbox = temp_draw.textbbox((0, 0), text, font=font)
-                text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-                x, y = place_fn(width, height, text_w, text_h)
+                lines = [l.strip() for l in text.split('\n') if l.strip()]
+                if not lines:
+                    lines = [text]
+
+                headline = lines[0]
+                subheads = lines[1:]
+
+                headline_size = max(32, width // 12)
+                subhead_size = max(20, width // 26)
+
+                # Approximate total height for placement
+                total_text_h = headline_size + (len(subheads) * subhead_size * 1.3)
+                # Approximate width using the longest string
+                max_chars = max(len(l) for l in lines)
+                approx_text_w = max_chars * (headline_size * 0.6)
+
+                place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
+                x, y = place_fn(width, height, approx_text_w, total_text_h)
                 
-                center_x = x + text_w // 2
-                center_y = y + text_h // 2
+                center_x = x + approx_text_w // 2
                 
                 font_face_rule = f"@font-face {{ font-family: '{font_family}'; src: url('{font_src}'); }}" if font_src else ""
+
+                # Build tspan elements
+                tspan_html = f'<tspan x="{center_x}" dy="0" class="overlay-headline">{headline}</tspan>'
+                for sub in subheads:
+                    tspan_html += f'\n<tspan x="{center_x}" dy="{subhead_size * 1.4}" class="overlay-subhead">{sub}</tspan>'
 
                 svg_content = f"""<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">
                   <defs>
                     <style>
                       {font_face_rule}
-                      .overlay-text {{
+                      .overlay-headline {{
                         font-family: '{font_family}', sans-serif;
-                        font-size: {font_size}px;
-                        font-weight: bold;
+                        font-size: {headline_size}px;
+                        font-weight: 800;
                         fill: {text_color_hex};
-                        filter: drop-shadow(0px 4px 8px rgba(0,0,0,0.9)) drop-shadow(0px 2px 4px rgba(0,0,0,0.7));
+                        filter: drop-shadow(0px 4px 12px rgba(0,0,0,0.85)) drop-shadow(0px 2px 4px rgba(0,0,0,0.7));
+                      }}
+                      .overlay-subhead {{
+                        font-family: '{font_family}', sans-serif;
+                        font-size: {subhead_size}px;
+                        font-weight: 400;
+                        fill: {text_color_hex};
+                        filter: drop-shadow(0px 2px 6px rgba(0,0,0,0.85));
                       }}
                     </style>
                   </defs>
-                  <text x="{center_x}" y="{center_y + font_size // 3}" class="overlay-text" text-anchor="middle" dominant-baseline="middle">{text}</text>
+                  <text x="{center_x}" y="{y + headline_size}" text-anchor="middle">{tspan_html}</text>
                 </svg>"""
 
                 png_bytes = cairosvg.svg2png(bytestring=svg_content.encode("utf-8"))
@@ -191,20 +215,56 @@ class TextOverlayTool(Tool):
                     metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "svg", "edited_from": storage_ref},
                 )
                 return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg", "backend": "svg"})
-            except Exception:
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
                 # Fall back cleanly to Pillow rendering below
                 pass
 
         # Fallback / Pillow backend
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        bbox = draw.textbbox((0, 0), text, font=font)
-        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-        x, y = place_fn(width, height, text_w, text_h)
+        
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if not lines:
+            lines = [text]
+            
+        headline = lines[0]
+        subheads = lines[1:]
 
-        # Draw a text stroke (outline) for legibility instead of an ugly black box
-        stroke_width = max(1, font_size // 15)
-        draw.text((x, y), text, font=font, fill=text_color, stroke_width=stroke_width, stroke_fill=(0, 0, 0, 200))
+        headline_size = max(32, width // 12)
+        subhead_size = max(20, width // 26)
+        
+        font_headline = _get_font(font_family, headline_size)
+        font_subhead = _get_font(font_family, subhead_size)
+        
+        # Calculate bounding boxes
+        h_bbox = draw.textbbox((0,0), headline, font=font_headline)
+        h_w, h_h = h_bbox[2] - h_bbox[0], h_bbox[3] - h_bbox[1]
+        
+        s_h = 0
+        s_w = 0
+        if subheads:
+            s_bbox = draw.multiline_textbbox((0,0), "\n".join(subheads), font=font_subhead)
+            s_w, s_h = s_bbox[2] - s_bbox[0], s_bbox[3] - s_bbox[1]
+            
+        total_w = max(h_w, s_w)
+        total_h = h_h + s_h + (subhead_size // 2 if subheads else 0)
+        
+        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
+        x, y = place_fn(width, height, total_w, total_h)
+        
+        # Draw Headline
+        hx = x + (total_w - h_w) // 2
+        stroke_width_h = max(1, headline_size // 15)
+        draw.text((hx, y), headline, font=font_headline, fill=text_color, stroke_width=stroke_width_h, stroke_fill=(0, 0, 0, 200))
+        
+        # Draw Subheads
+        if subheads:
+            sx = x + (total_w - s_w) // 2
+            sy = y + h_h + (subhead_size // 2)
+            stroke_width_s = max(1, subhead_size // 15)
+            draw.multiline_text((sx, sy), "\n".join(subheads), font=font_subhead, fill=text_color, align="center", stroke_width=stroke_width_s, stroke_fill=(0, 0, 0, 200))
 
         combined = Image.alpha_composite(base, overlay).convert("RGB")
         buf = io.BytesIO()
