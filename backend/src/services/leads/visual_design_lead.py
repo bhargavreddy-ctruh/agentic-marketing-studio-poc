@@ -79,6 +79,19 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
         f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
         f"Brief so far:\n{json.dumps(brief)}"
     )
+    # One-pass product compositing: if a product photo exists, tell the illustrator to pass it as
+    # reference_storage_ref to base_image_generator. Qwen image-to-image generates the background
+    # scene WITH the product naturally lit and composited in a single API call — no separate
+    # rembg/PIL step needed, saving one Qwen credit and producing far better lighting/shadow
+    # integration than a post-hoc pixel paste could achieve.
+    product_photo_ref = brief.get("product_photo_storage_ref")
+    if product_photo_ref:
+        illustrator_context += (
+            f"\n\nPRODUCT PHOTO AVAILABLE — storage_ref: {product_photo_ref}\n"
+            "You MUST pass this storage_ref as 'reference_storage_ref' to base_image_generator so the "
+            "product is naturally composited INTO the generated scene in a single pass. "
+            "Write the prompt to describe the full scene (background + product placement), not the product alone."
+        )
     # Real, live-found failure mode (2026-09-21): a smaller model — specifically router.py's local
     # last-resort fallback, confirmed live at roughly a 1-in-3 rate even after tightening
     # illustrator.md's own wording — sometimes stops after its two lookup tool calls without ever
@@ -158,24 +171,9 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     if edit_result and edit_result.get("storage_ref"):
         storage_ref = edit_result["storage_ref"]
 
-    # Product subject fidelity pipeline (Requirement 4): composite real product photo subject onto background
-    product_photo_ref = brief.get("product_photo_storage_ref")
-    if product_photo_ref:
-        from ...core.local_storage import load_asset, save_asset
-        from ..canvas.product_compositor import composite_product_onto_background
-
-        prod_loaded = load_asset(str(product_photo_ref))
-        bg_loaded = load_asset(storage_ref)
-        if prod_loaded and bg_loaded:
-            try:
-                comp_bytes = composite_product_onto_background(prod_loaded[0], bg_loaded[0])
-                storage_ref = save_asset(
-                    comp_bytes,
-                    "image/jpeg",
-                    metadata={"product_composited": True, "product_photo_storage_ref": product_photo_ref, "edited_from": storage_ref},
-                )
-            except Exception as exc:
-                log.warning("product_compositing_failed", extra={"_extra_error": str(exc)})
+    # Product subject fidelity is now handled in one pass by the illustrator above (passing
+    # reference_storage_ref to base_image_generator when a product photo exists). Qwen generates
+    # the scene with the product already composited — no separate PIL overlay step needed.
 
     all_steps = (reference, palette, illustration, composition)
     # A real, visible "creative brief" text card (2026-09-22) — the reference product this POC is
