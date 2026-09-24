@@ -158,6 +158,25 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     if edit_result and edit_result.get("storage_ref"):
         storage_ref = edit_result["storage_ref"]
 
+    # Product subject fidelity pipeline (Requirement 4): composite real product photo subject onto background
+    product_photo_ref = brief.get("product_photo_storage_ref")
+    if product_photo_ref:
+        from ...core.local_storage import load_asset, save_asset
+        from ..canvas.product_compositor import composite_product_onto_background
+
+        prod_loaded = load_asset(str(product_photo_ref))
+        bg_loaded = load_asset(storage_ref)
+        if prod_loaded and bg_loaded:
+            try:
+                comp_bytes = composite_product_onto_background(prod_loaded[0], bg_loaded[0])
+                storage_ref = save_asset(
+                    comp_bytes,
+                    "image/jpeg",
+                    metadata={"product_composited": True, "product_photo_storage_ref": product_photo_ref, "edited_from": storage_ref},
+                )
+            except Exception as exc:
+                log.warning("product_compositing_failed", extra={"_extra_error": str(exc)})
+
     all_steps = (reference, palette, illustration, composition)
     # A real, visible "creative brief" text card (2026-09-22) — the reference product this POC is
     # modeled on shows exactly this kind of card on its own canvas. Written by Composition Artist
