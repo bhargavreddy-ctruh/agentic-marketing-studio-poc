@@ -341,7 +341,8 @@ async def _visual_design_lead_node(state: GraphState) -> GraphState:
             state["brief"] = brief
         emit("lead_completed", lead="visual_design_lead")
     except SpecialistFailed as exc:
-        log.error("visual_design_lead_failed", extra={"_extra_error": exc.message})
+        storage_ref = getattr(exc, "partial_storage_ref", None)
+        log.error("visual_design_lead_failed", extra={"_extra_error": exc.message, "_extra_storage_ref": storage_ref})
         state["result"] = {
             "message": f"Ran into an issue with visual_design_lead: {exc.message}. How should we proceed?",
             "options": [
@@ -350,6 +351,10 @@ async def _visual_design_lead_node(state: GraphState) -> GraphState:
             ],
             "allow_free_text": True
         }
+        if storage_ref:
+            state["result"]["storage_ref"] = storage_ref
+            state["result"]["element_type"] = "image"
+            state["result"]["produced_by_specialist"] = "illustrator"
         emit("lead_failed", lead="visual_design_lead", reason=exc.message)
     return state
 

@@ -85,19 +85,33 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     # one bounded corrective retry this used to hand-roll here — same guardrail philosophy as
     # discount_math_calculator (never just trust the prompt), now shared across every Lead instead
     # of duplicated per call site.
-    illustration = await run_specialist_with_review(
-        "illustrator",
-        context=illustrator_context,
-        needs_retry=lambda r: not (
-            r.latest_call("base_image_generator", "image_editor")
-            and r.latest_call("base_image_generator", "image_editor").data.get("storage_ref")
-        ),
-        reminder=(
-            "REMINDER: your previous attempt looked up brand/product facts but never actually "
-            "called base_image_generator. You MUST call base_image_generator with your image "
-            "prompt now, before responding with final JSON."
-        ),
-    )
+    try:
+        illustration = await run_specialist_with_review(
+            "illustrator",
+            context=illustrator_context,
+            needs_retry=lambda r: not (
+                r.latest_call("base_image_generator", "image_editor")
+                and r.latest_call("base_image_generator", "image_editor").data.get("storage_ref")
+            ),
+            reminder=(
+                "REMINDER: your previous attempt looked up brand/product facts but never actually "
+                "called base_image_generator. You MUST call base_image_generator with your image "
+                "prompt now, before responding with final JSON."
+            ),
+        )
+    except SpecialistFailed as exc:
+        # If illustrator generated an asset via base_image_generator but THEN failed (e.g. guardrail conflict),
+        # we want to surface the error BUT STILL KEEP the generated asset.
+        illustration = getattr(exc, "partial_result", None)
+        if not illustration or not illustration.latest_call("base_image_generator", "image_editor"):
+            raise
+
+        # We have a real image, so we attach it to the exception and raise it so the caller can return it!
+        image_call = illustration.latest_call("base_image_generator", "image_editor")
+        if image_call and image_call.data.get("storage_ref"):
+            exc.partial_storage_ref = image_call.data["storage_ref"]
+        raise
+
     image_call = illustration.latest_call("base_image_generator", "image_editor")
     if not image_call or not image_call.data.get("storage_ref"):
         raise SpecialistFailed(

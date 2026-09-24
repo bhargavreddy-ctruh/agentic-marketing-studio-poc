@@ -264,7 +264,12 @@ async def run_specialist_agentic(
                 
             if "error" in parsed and len(parsed.keys()) == 1:
                 # The model followed the MASTER_DIRECTIVE to fail gracefully
-                raise SpecialistFailed(specialist_name, parsed["error"])
+                partial = AgenticStepResult(
+                    specialist_name=specialist_name, model=result.model, data=parsed, tool_calls=tool_calls
+                )
+                exc = SpecialistFailed(specialist_name, parsed["error"])
+                exc.partial_result = partial
+                raise exc
 
             log.info(
                 "specialist_step_ok",
