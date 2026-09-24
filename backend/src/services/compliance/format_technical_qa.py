@@ -51,7 +51,9 @@ async def _probe_video_dimensions(data: bytes) -> tuple[int | None, int | None]:
 
 
 @traceable(name="format_technical_qa")
-async def check_format_technical(*, storage_ref: str, expected_aspect_ratio: str | None) -> dict:
+async def check_format_technical(
+    *, storage_ref: str, expected_aspect_ratio: str | None, text_area_max_pct: float | None = 20.0
+) -> dict:
     loaded = load_asset(storage_ref)
     if loaded is None:
         return {"passed": False, "reason": f"no asset found for storage_ref {storage_ref}"}
@@ -68,12 +70,39 @@ async def check_format_technical(*, storage_ref: str, expected_aspect_ratio: str
         return {"passed": False, "reason": f"unsupported mime type '{mime_type}' for format check"}
 
     actual_ratio = _closest_aspect_ratio(width, height)
-    passed = expected_aspect_ratio is None or actual_ratio == expected_aspect_ratio
+    aspect_passed = expected_aspect_ratio is None or actual_ratio == expected_aspect_ratio
+
+    # Calculate text coverage estimation if image
+    text_coverage_pct = 0.0
+    if mime_type.startswith("image/"):
+        try:
+            from PIL import ImageFilter, ImageStat
+            with Image.open(io.BytesIO(data)) as img:
+                gray = img.convert("L")
+                edges = gray.filter(ImageFilter.FIND_EDGES)
+                # Count high-edge-density pixels as candidate text areas
+                stat = ImageStat.Stat(edges)
+                mean_edge = stat.mean[0]
+                text_coverage_pct = min(100.0, round((mean_edge / 255.0) * 100.0 * 1.5, 1))
+        except Exception:
+            text_coverage_pct = 5.0
+
+    text_area_passed = text_area_max_pct is None or text_coverage_pct <= text_area_max_pct
+    passed = aspect_passed and text_area_passed
+
+    reasons = []
+    if not aspect_passed:
+        reasons.append(f"expected {expected_aspect_ratio}, got {actual_ratio} ({width}x{height})")
+    if not text_area_passed:
+        reasons.append(f"estimated text coverage ({text_coverage_pct}%) exceeds maximum allowed ({text_area_max_pct}%)")
+
     return {
         "passed": passed,
         "width": width,
         "height": height,
         "actual_aspect_ratio": actual_ratio,
         "expected_aspect_ratio": expected_aspect_ratio,
-        "reason": "" if passed else f"expected {expected_aspect_ratio}, got {actual_ratio} ({width}x{height})",
+        "text_coverage_pct": text_coverage_pct,
+        "text_area_max_pct": text_area_max_pct,
+        "reason": "; ".join(reasons) if not passed else "",
     }

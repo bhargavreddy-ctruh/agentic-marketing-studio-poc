@@ -7,6 +7,7 @@ import CanvasView, { ReferencedElement } from "@/components/CanvasView";
 import NodeGraphView from "@/components/NodeGraphView";
 import GuardrailsSection from "@/components/GuardrailsSection";
 import DNASection from "@/components/DNASection";
+import StyleLockModal from "@/components/StyleLockModal";
 import { LiveEvent } from "@/lib/events";
 import { ApiError, User, me } from "@/lib/auth";
 
@@ -46,6 +47,7 @@ export default function StudioPage() {
   const [generatingKind, setGeneratingKind] = useState<"image" | "video" | "audio" | "text" | null>(null);
   const [showGuardrails, setShowGuardrails] = useState(false);
   const [showDna, setShowDna] = useState(false);
+  const [showStyleLock, setShowStyleLock] = useState(false);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
 
   async function checkAuth() {
@@ -220,8 +222,20 @@ export default function StudioPage() {
           >
             DNA
           </button>
+          <button
+            onClick={() => setShowStyleLock(true)}
+            className="rounded-full px-4 py-1.5 transition-all duration-300 text-brand-300 hover:text-white hover:bg-surface-800"
+          >
+            Style Lock 🔒
+          </button>
         </div>
       </div>
+
+      <StyleLockModal
+        sessionId={sessionId}
+        isOpen={showStyleLock}
+        onClose={() => setShowStyleLock(false)}
+      />
 
       {showGuardrails && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">

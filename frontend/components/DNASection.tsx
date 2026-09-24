@@ -108,26 +108,98 @@ export default function DNASection({ sessionId }: DNASectionProps) {
         </div>
       )}
 
-      <div className="flex-1 p-4 overflow-y-auto">
+      <div className="flex-1 p-4 overflow-y-auto space-y-4">
         {activeTab === "brand" ? (
-          <div className="h-full flex flex-col">
-            <label className="text-xs font-semibold text-surface-300 mb-2">Brand Guidelines</label>
-            <textarea
-              className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"
-              placeholder="E.g. We are a modern, minimalist brand. Our primary colors are #FF0000 and white. Our logo should always be in the bottom right corner..."
-              value={brandDna}
-              onChange={(e) => setBrandDna(e.target.value)}
-            />
+          <div className="h-full flex flex-col space-y-4">
+            <div className="flex-1 flex flex-col">
+              <label className="text-xs font-semibold text-surface-300 mb-2">Brand Guidelines</label>
+              <textarea
+                className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none min-h-[140px]"
+                placeholder="E.g. We are a modern, minimalist brand. Our primary colors are #FF0000 and white. Our logo should always be in the bottom right corner..."
+                value={brandDna}
+                onChange={(e) => setBrandDna(e.target.value)}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <div className="rounded-xl border border-surface-700/60 bg-surface-800/60 p-3">
+                <label className="block text-xs font-semibold text-surface-200 mb-1">Brand Logo (PNG)</label>
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/svg+xml"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const formData = new FormData();
+                    formData.append("file", file);
+                    try {
+                      setSuccessMsg("Uploading logo...");
+                      await fetch(`/api/v1/brands/default/logo`, { method: "POST", body: formData });
+                      setSuccessMsg("Brand logo saved!");
+                    } catch {
+                      setError("Logo upload failed");
+                    }
+                  }}
+                  className="block w-full text-xs text-surface-400 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:bg-surface-700 file:text-xs file:text-surface-200 hover:file:bg-surface-600"
+                />
+              </div>
+
+              <div className="rounded-xl border border-surface-700/60 bg-surface-800/60 p-3">
+                <label className="block text-xs font-semibold text-surface-200 mb-1">Custom Font (TTF/OTF)</label>
+                <input
+                  type="file"
+                  accept=".ttf,.otf"
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    const formData = new FormData();
+                    formData.append("file", file);
+                    try {
+                      setSuccessMsg("Uploading font...");
+                      await fetch(`/api/v1/brands/default/fonts`, { method: "POST", body: formData });
+                      setSuccessMsg("Custom brand font saved!");
+                    } catch {
+                      setError("Font upload failed");
+                    }
+                  }}
+                  className="block w-full text-xs text-surface-400 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:bg-surface-700 file:text-xs file:text-surface-200 hover:file:bg-surface-600"
+                />
+              </div>
+            </div>
           </div>
         ) : (
-          <div className="h-full flex flex-col">
-            <label className="text-xs font-semibold text-surface-300 mb-2">Product Specifics</label>
-            <textarea
-              className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none"
-              placeholder="E.g. The Audit Test Sneaker. Price: $150. Key features: lightweight, breathable mesh, red accents. Never show it being used in mud..."
-              value={productDna}
-              onChange={(e) => setProductDna(e.target.value)}
-            />
+          <div className="h-full flex flex-col space-y-4">
+            <div className="flex-1 flex flex-col">
+              <label className="text-xs font-semibold text-surface-300 mb-2">Product Specifics</label>
+              <textarea
+                className="flex-1 w-full rounded-xl border border-surface-700 bg-surface-800 p-3 text-sm text-white focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 resize-none min-h-[140px]"
+                placeholder="E.g. The Audit Test Sneaker. Price: $150. Key features: lightweight, breathable mesh, red accents. Never show it being used in mud..."
+                value={productDna}
+                onChange={(e) => setProductDna(e.target.value)}
+              />
+            </div>
+
+            <div className="rounded-xl border border-surface-700/60 bg-surface-800/60 p-3">
+              <label className="block text-xs font-semibold text-surface-200 mb-1">Product Subject Photo (Grounding PNG/JPG)</label>
+              <input
+                type="file"
+                accept="image/*"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  const formData = new FormData();
+                  formData.append("file", file);
+                  try {
+                    setSuccessMsg("Uploading product photo...");
+                    await fetch(`/api/v1/products/default/photo`, { method: "POST", body: formData });
+                    setSuccessMsg("Product subject photo saved!");
+                  } catch {
+                    setError("Product photo upload failed");
+                  }
+                }}
+                className="block w-full text-xs text-surface-400 file:mr-2 file:py-1 file:px-2 file:rounded-md file:border-0 file:bg-surface-700 file:text-xs file:text-surface-200 hover:file:bg-surface-600"
+              />
+            </div>
           </div>
         )}
       </div>
