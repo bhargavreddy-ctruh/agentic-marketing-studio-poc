@@ -717,6 +717,11 @@ export default function CanvasEngine({
             style={{ left: pos.x, top: pos.y, width: TILE_SIZE, cursor: mode === "pan" ? "grab" : undefined }}
             onPointerDown={(e) => handleTileDown(e, tile.id, pos)}
           >
+            {/* Dedicated drag handle so elements with native controls (video, audio) can still be dragged */}
+            <div className="flex h-6 w-full cursor-grab active:cursor-grabbing items-center justify-center bg-black/20 hover:bg-black/40 transition-colors">
+              <div className="h-1 w-8 rounded-full bg-white/40" />
+            </div>
+            
             {tile.kind === "video" ? (
               <video src={tile.url} controls className="w-full" />
             ) : tile.kind === "audio" ? (
