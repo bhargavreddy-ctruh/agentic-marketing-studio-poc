@@ -47,6 +47,8 @@ export interface SessionResponse {
   status: string;
   approval_mode: "auto" | "approve";
   brief: Record<string, unknown>;
+  style_ref_storage_ref?: string | null;
+  style_seed?: number | null;
   created_at: string;
   updated_at: string;
   next_prompt: IdeationPrompt | null;
@@ -75,6 +77,21 @@ export async function createSession(
  * data source, newest-updated first (matches the backend's own ordering). */
 export async function listSessions(): Promise<SessionResponse[]> {
   return request<SessionResponse[]>("/api/v1/sessions");
+}
+
+export async function updateSessionStyle(
+  sessionId: string,
+  styleRefStorageRef: string | null,
+  styleSeed: number | null
+): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/style`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      style_ref_storage_ref: styleRefStorageRef,
+      style_seed: styleSeed,
+    }),
+  });
 }
 
 /** Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be able

@@ -44,6 +44,8 @@ export interface CanvasElement {
   // model" warning that was never fully wired up on the backend — so this stays functionally
   // inert until that's built, but the type should match what the backend actually returns.
   alignment_warning: string | null;
+  ad_spec_name?: string | null;
+  safe_zone_pct?: number | null;
 }
 
 export interface CanvasElementVersion {
@@ -128,4 +130,23 @@ export async function undoElement(elementId: string): Promise<CanvasElement> {
 
 export async function redoElement(elementId: string): Promise<CanvasElement> {
   return request<CanvasElement>(`/api/v1/canvas/elements/${elementId}/redo`, { method: "POST" });
+}
+
+export async function maskedEditElement(
+  elementId: string,
+  instruction: string,
+  maskStorageRef: string
+): Promise<CanvasElement> {
+  return request<CanvasElement>(`/api/v1/canvas/elements/${elementId}/masked-edit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ instruction, mask_storage_ref: maskStorageRef }),
+  });
+}
+
+export async function exportAllAdSpecs(elementId: string): Promise<{ element_id: string; exports: Record<string, any> }> {
+  return request<{ element_id: string; exports: Record<string, any> }>(
+    `/api/v1/canvas/elements/${elementId}/export-all-specs`,
+    { method: "POST" }
+  );
 }
