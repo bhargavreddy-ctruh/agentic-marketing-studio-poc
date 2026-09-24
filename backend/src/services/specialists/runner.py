@@ -211,6 +211,10 @@ async def run_specialist_agentic(
                                     tool_context = {
                                         k: v for k, v in {
                                             "user_id": brief.get("user_id"),
+                                            # product_photo_storage_ref is the safety-net fallback:
+                                            # base_image_generator checks ctx first if the LLM
+                                            # didn't explicitly pass reference_storage_ref as an arg.
+                                            "product_photo_storage_ref": brief.get("product_photo_storage_ref"),
                                             "style_ref_storage_ref": brief.get("style_ref_storage_ref"),
                                             "style_seed": brief.get("style_seed"),
                                         }.items() if v is not None
