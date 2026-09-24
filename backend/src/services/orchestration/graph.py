@@ -1182,12 +1182,15 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             # not for planning/strategy specialists (like reference_curator or palette_strategist)
             generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
             
-            # Run the specialist with self-correction retry
+            # Run the specialist with self-correction retry, passing brief so the real
+            # _recent_chat_history is injected as proper conversation messages (enabling
+            # user "go ahead" / override confirmations to actually reach the LLM).
             step_result = await run_specialist_with_review(
                 specialist,
                 context=step_context,
                 needs_retry=lambda r: specialist in generating_specialists and _produced_ref(r)[0] is None,
                 reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
+                brief=brief,
             )
             
             produced_ref, produced_tool = _produced_ref(step_result)
@@ -1269,9 +1272,22 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         return state
 
     if not latest_storage_ref:
+        # Surface the most meaningful specialist note — prefer an "error" field (MASTER_DIRECTIVE
+        # graceful-fail response) over a generic message so the user sees WHY nothing was generated
+        # (e.g. "which phone model?" rather than the opaque "did not produce any visible assets").
+        specialist_error = None
+        for key, meta in all_metadata.items():
+            if isinstance(meta, dict) and meta.get("error"):
+                specialist_error = meta["error"]
+                break
         state["result"] = {
-            "message": "The plan executed but did not produce any visible assets.",
+            "message": specialist_error or "The plan executed but did not produce any visible assets.",
             "specialist_notes": all_metadata,
+            "options": [
+                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"},
+            ],
+            "allow_free_text": True,
         }
         emit("lead_completed", lead="dynamic_executor", no_op=True)
         return state
