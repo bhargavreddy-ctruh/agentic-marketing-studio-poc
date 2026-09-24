@@ -77,6 +77,14 @@ def get_mood_board_service(db: DbSession) -> MoodBoardService:
     return MoodBoardService(assets=SqliteMoodBoardRepository(db))
 
 
+def get_brand_repository(db: DbSession) -> SqliteBrandRepository:
+    return SqliteBrandRepository(db)
+
+
+def get_product_repository(db: DbSession) -> SqliteProductRepository:
+    return SqliteProductRepository(db)
+
+
 def get_user_repository(db: DbSession) -> SqliteUserRepository:
     return SqliteUserRepository(db)
 
@@ -112,6 +120,8 @@ SessionRepositoryDep = Annotated[SqliteSessionRepository, Depends(get_session_re
 VersioningServiceDep = Annotated[CanvasVersioningService, Depends(get_versioning_service)]
 BrandDnaServiceDep = Annotated[BrandDnaService, Depends(get_brand_dna_service)]
 ProductDnaServiceDep = Annotated[ProductDnaService, Depends(get_product_dna_service)]
+BrandRepositoryDep = Annotated[SqliteBrandRepository, Depends(get_brand_repository)]
+ProductRepositoryDep = Annotated[SqliteProductRepository, Depends(get_product_repository)]
 MoodBoardServiceDep = Annotated[MoodBoardService, Depends(get_mood_board_service)]
 UserRepositoryDep = Annotated[SqliteUserRepository, Depends(get_user_repository)]
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
