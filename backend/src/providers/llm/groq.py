@@ -54,28 +54,33 @@ class GroqProvider(LLMProvider):
     ) -> LLMResult:
         if not self._api_key:
             raise ProviderUnavailable("groq", "GROQ_API_KEY is not set")
+            
+        keys = [k.strip() for k in self._api_key.split(",") if k.strip()]
+        if not keys:
+            raise ProviderUnavailable("groq", "GROQ_API_KEY is empty or invalid")
 
         models = self._resolve_models(tier)
         full_messages = [{"role": "system", "content": system}, *messages]
 
         last_error: Exception | None = None
         for model in models:
-            try:
-                return await call_openai_compatible_chat(
-                    provider_name="groq",
-                    base_url=self._base_url,
-                    api_key=self._api_key,
-                    model=model,
-                    messages=full_messages,
-                    tools=tools,
-                    max_tokens=max_tokens,
-                    on_delta=on_delta,
-                )
-            except ProviderUnavailable as exc:
-                last_error = exc
-                continue
+            for key in keys:
+                try:
+                    return await call_openai_compatible_chat(
+                        provider_name="groq",
+                        base_url=self._base_url,
+                        api_key=key,
+                        model=model,
+                        messages=full_messages,
+                        tools=tools,
+                        max_tokens=max_tokens,
+                        on_delta=on_delta,
+                    )
+                except ProviderUnavailable as exc:
+                    last_error = exc
+                    continue
 
-        raise last_error or ProviderUnavailable("groq", "all models in tier failed")
+        raise last_error or ProviderUnavailable("groq", "all models and keys failed")
 
 
 _singleton: GroqProvider | None = None

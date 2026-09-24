@@ -6,6 +6,7 @@ import ChatPanel, { ChatPanelHandle } from "@/components/ChatPanel";
 import CanvasView, { ReferencedElement } from "@/components/CanvasView";
 import NodeGraphView from "@/components/NodeGraphView";
 import GuardrailsSection from "@/components/GuardrailsSection";
+import DNASection from "@/components/DNASection";
 import { LiveEvent } from "@/lib/events";
 import { ApiError, User, me } from "@/lib/auth";
 
@@ -43,6 +44,8 @@ export default function StudioPage() {
   // actually runs) still shows a real, honest "working" placeholder — never a wrong guess.
   const [generating, setGenerating] = useState(false);
   const [generatingKind, setGeneratingKind] = useState<"image" | "video" | "audio" | "text" | null>(null);
+  const [showGuardrails, setShowGuardrails] = useState(false);
+  const [showDna, setShowDna] = useState(false);
   const chatPanelRef = useRef<ChatPanelHandle>(null);
 
   async function checkAuth() {
@@ -185,7 +188,6 @@ export default function StudioPage() {
           <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" /></svg>
           Workflows
         </button>
-        <GuardrailsSection sessionId={sessionId} />
         <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-surface-700/50 bg-surface-900/40 p-1 text-sm font-medium shadow-xl backdrop-blur-xl transition-all">
           <button
             onClick={() => setOutputMode("canvas")}
@@ -204,7 +206,54 @@ export default function StudioPage() {
             Node
           </button>
         </div>
+        
+        <div className="pointer-events-auto flex items-center gap-1 rounded-full border border-surface-700/50 bg-surface-900/40 p-1 text-sm font-medium shadow-xl backdrop-blur-xl transition-all">
+          <button
+            onClick={() => setShowGuardrails(true)}
+            className="rounded-full px-4 py-1.5 transition-all duration-300 text-surface-300 hover:text-white hover:bg-surface-800"
+          >
+            Guardrails
+          </button>
+          <button
+            onClick={() => setShowDna(true)}
+            className="rounded-full px-4 py-1.5 transition-all duration-300 text-surface-300 hover:text-white hover:bg-surface-800"
+          >
+            DNA
+          </button>
+        </div>
       </div>
+
+      {showGuardrails && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-2xl bg-surface-900 rounded-xl shadow-2xl border border-surface-700 h-[80vh]">
+            <button 
+              onClick={() => setShowGuardrails(false)} 
+              className="absolute top-4 right-4 text-surface-400 hover:text-white z-10"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <GuardrailsSection sessionId={sessionId} />
+          </div>
+        </div>
+      )}
+
+      {showDna && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="relative w-full max-w-2xl bg-surface-900 rounded-xl shadow-2xl border border-surface-700 h-[60vh]">
+            <button 
+              onClick={() => setShowDna(false)} 
+              className="absolute top-4 right-4 text-surface-400 hover:text-white z-10"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+            <DNASection sessionId={sessionId} />
+          </div>
+        </div>
+      )}
 
       <div className="pointer-events-none absolute bottom-4 left-4 z-10 aspect-[9/16] w-[340px] max-w-[calc(100vw-2rem)] max-h-[calc(100vh-2rem)]">
         <div className="pointer-events-auto h-full w-full">

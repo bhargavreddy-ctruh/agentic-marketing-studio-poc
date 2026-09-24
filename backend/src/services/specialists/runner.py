@@ -108,6 +108,10 @@ async def run_specialist_agentic(
         "If your instructions are ambiguous or entirely lack context about the subject you should be creating, "
         "FAIL immediately and explicitly ask for clarity. "
         "Never assume, guess, or hallucinate missing details. "
+        "IMPORTANT: If the user explicitly asks for something that contradicts the Guardrails, "
+        "OR if the user confirms to proceed ('yes', 'go ahead', 'do it') after a guardrail conflict was pointed out in the recent chat history, "
+        "the user's instruction TAKES PRECEDENCE for this run. Do NOT fail again for the same conflict in that case, "
+        "but follow the user's instruction, ignoring the conflicting guardrail. "
         "To fail gracefully, do NOT return your standard output format. Instead, return EXACTLY this JSON: "
         '{"error": "Your clarifying question or explanation of why you cannot proceed here"}'
         "\n</MASTER_DIRECTIVE>"
@@ -119,6 +123,16 @@ async def run_specialist_agentic(
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": context}]
     tool_calls: list[ToolCallRecord] = []
+    # Real, live-found bug (2026-09-24, per a real user report — `reference_curator` failed twice
+    # in a row with "could not parse JSON from model response: Expecting value: line 1 column 1
+    # (char 0)"): a model that returns non-JSON prose with no tool call at all (not the same as an
+    # EMPTY response, which `extract_json` already reports distinctly) used to kill the whole
+    # specialist step immediately — zero retry, anywhere. `reference_curator` specifically prefers
+    # the local model (`spec.prefer_local`), whose instruction-following is genuinely weaker than
+    # Groq/OpenRouter's free models, making this the specialist most likely to hit it. One bounded
+    # corrective retry, same shape as the existing failed-tool-call correction just below (a real
+    # system note telling the model exactly what was wrong), instead of raising on the first miss.
+    _json_parse_retries_left = 1
 
     # A dynamic per-call trace name (`trace()`, not `@traceable`) — this one function runs every
     # specialist, so a static decorator name would make all of them look identical in LangSmith. A
@@ -230,6 +244,22 @@ async def run_specialist_agentic(
             try:
                 parsed = extract_json(result.text)
             except ValueError as exc:
+                if _json_parse_retries_left > 0:
+                    _json_parse_retries_left -= 1
+                    log.warning(
+                        "specialist_final_json_parse_retry",
+                        extra={"_extra_specialist": specialist_name, "_extra_error": str(exc)},
+                    )
+                    messages.append({"role": "assistant", "content": result.text or ""})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your last reply was not valid JSON and had no tool call — "
+                            f"parsing it failed with: {exc}. Return ONLY the required JSON object "
+                            "for your final answer (or call a tool if you're not done yet)."
+                        ),
+                    })
+                    continue
                 raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
                 
             if "error" in parsed and len(parsed.keys()) == 1:

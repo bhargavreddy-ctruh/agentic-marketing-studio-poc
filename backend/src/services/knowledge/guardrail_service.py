@@ -21,6 +21,34 @@ class GuardrailService:
     def __init__(self, sessions: SessionRepository):
         self._sessions = sessions
 
+    @staticmethod
+    async def _load_brand_and_product_json(session: SessionModel) -> tuple[dict, dict]:
+        """The one real place `session.brand_profile_id`/`product_profile_id` actually get
+        resolved into the JSON shapes `derive_guardrails` expects — shared by
+        `get_or_derive_for_session` and `link_profiles` so there's exactly one real fetch path."""
+        brand_json: dict = {}
+        product_json: dict = {}
+        async with async_session_factory() as db:
+            if session.brand_profile_id:
+                brand_repo = SqliteBrandRepository(db)
+                brand = await brand_repo.get(session.brand_profile_id)
+                if brand:
+                    brand_json = brand.raw_profile
+
+            if session.product_profile_id:
+                product_repo = SqliteProductRepository(db)
+                product = await product_repo.get(session.product_profile_id)
+                if product:
+                    # Real, live-found bug (2026-09-24): `product.attributes` alone never has the
+                    # product's own `name` — that's a sibling field on `ProductProfileModel`, not
+                    # inside `attributes` — so `_product_rules`' "identity" rule (Name/Category/
+                    # Description) always fired with the name genuinely missing. This app's real
+                    # `ProductProfile` has no separate category/description fields to add
+                    # (`attributes.summary` already covers description-shaped content via the
+                    # existing dynamic attribute loop), so `name` is the one real gap to close.
+                    product_json = {**product.attributes, "name": product.name}
+        return brand_json, product_json
+
     async def get_or_derive_for_session(self, session_id: str) -> GuardrailSet:
         """
         Gets the active guardrails for a session. If none exist, derives them from the session's
@@ -34,31 +62,58 @@ class GuardrailService:
         if existing and existing.rules:
             return existing
 
-        # We need to derive them.
-        brand_json = {}
-        product_json = {}
-
-        async with async_session_factory() as db:
-            if session.brand_profile_id:
-                brand_repo = SqliteBrandRepository(db)
-                brand = await brand_repo.get(session.brand_profile_id)
-                if brand:
-                    brand_json = brand.raw_profile
-            
-            if session.product_profile_id:
-                product_repo = SqliteProductRepository(db)
-                product = await product_repo.get(session.product_profile_id)
-                if product:
-                    product_json = product.attributes
-
+        brand_json, product_json = await self._load_brand_and_product_json(session)
         new_set = derive_guardrails(brand=brand_json, product=product_json)
-        
+
         # Persist and index immediately.
         session.brief = {**session.brief, "guardrails": new_set.model_dump()}
         await self._sessions.update(session)
         self.index_guardrails(session_id, new_set)
-        
+
         return new_set
+
+    async def link_profiles(
+        self,
+        session_id: str,
+        *,
+        brand_profile_id: str | None = None,
+        product_profile_id: str | None = None,
+    ) -> GuardrailSet:
+        """Real, live-found gap (2026-09-24, per an explicit user report: "it created elements but
+        it didn't generate session/product guardrails"): `SessionModel.brand_profile_id`/
+        `product_profile_id` are real columns nothing anywhere ever wrote to — there was no way to
+        attach a Brand/Product DNA profile to a session AT ALL, so `derive_guardrails` always ran
+        with empty inputs, for every session, always. This is the one place that actually sets
+        them. A `None` argument leaves that field UNCHANGED (not cleared) — this is "link/change
+        one or both", not "replace the whole linkage every call".
+
+        Re-derives guardrails from the newly-linked profile(s) and MERGES them into whatever the
+        session already has (`GuardrailSet.merge` — existing ids win), never overwriting real human
+        edits or previously-added custom rules just because a profile got linked."""
+        session = await self._sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+
+        if brand_profile_id is not None:
+            session.brand_profile_id = brand_profile_id or None
+        if product_profile_id is not None:
+            session.product_profile_id = product_profile_id or None
+
+        brand_json, product_json = await self._load_brand_and_product_json(session)
+        derived = derive_guardrails(brand=brand_json, product=product_json)
+
+        existing = coerce_set(session.brief.get("guardrails")) or GuardrailSet()
+        # Remove old derived rules (brand/product/project) so they are cleanly replaced
+        human_rules = [r for r in existing.rules if r.source not in ("brand", "product", "project")]
+        existing.rules = human_rules
+        
+        merged = existing.merge(derived.rules)
+
+        session.brief = {**session.brief, "guardrails": merged.model_dump()}
+        await self._sessions.update(session)
+        self.index_guardrails(session_id, merged)
+
+        return merged
 
     async def update_guardrails(self, session_id: str, new_rules_dict: dict) -> GuardrailSet:
         """

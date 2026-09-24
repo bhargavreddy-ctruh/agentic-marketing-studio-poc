@@ -15,7 +15,7 @@ from fastapi import APIRouter
 from starlette.responses import StreamingResponse
 
 from ....core.events import stream_events
-from ....schemas.sessions.requests import CreateSessionRequest, PostTurnRequest
+from ....schemas.sessions.requests import CreateSessionRequest, PostTurnRequest, UpdateApprovalModeRequest, UpdateDnaRequest
 from ....schemas.sessions.responses import ChatTurnResponse, SessionResponse
 from ...dependencies import CurrentUserDep, SessionServiceDep
 
@@ -42,6 +42,46 @@ async def list_sessions(svc: SessionServiceDep, current_user: CurrentUserDep) ->
 async def get_session(
     session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
 ) -> SessionResponse:
+    return await svc.get_session(session_id, user_id=current_user.id)
+
+
+@router.put("/{session_id}/approval-mode", response_model=SessionResponse)
+async def update_approval_mode(
+    session_id: str, body: UpdateApprovalModeRequest, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> SessionResponse:
+    """Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be
+    able to select the mode(auto/approve mode)") — mode selection previously only existed on the
+    home page's "new workflow" form, before a session even existed; there was no way to change it
+    for an already-running conversation."""
+    return await svc.update_approval_mode(session_id, user_id=current_user.id, approval_mode=body.approval_mode)
+
+
+@router.put("/{session_id}/dna", response_model=SessionResponse)
+async def update_dna(
+    session_id: str, body: UpdateDnaRequest, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> SessionResponse:
+    """Accepts raw text for Brand and Product DNA, saves it to the session, and triggers
+    rule extraction so downstream agents can follow them immediately."""
+    session = await svc.get_session(session_id, user_id=current_user.id)
+    session_model = await svc._sessions.get(session_id)
+    
+    session_model.brief["brand_dna"] = body.brand_dna or ""
+    session_model.brief["product_dna"] = body.product_dna or ""
+    await svc._sessions.update(session_model)
+    
+    from ....services.knowledge.guardrail_service import GuardrailService
+    guardrail_svc = GuardrailService(svc._sessions)
+    
+    existing = await guardrail_svc.get_or_derive_for_session(session_id)
+    human_rules = [r for r in existing.rules if r.source not in ("brand", "product")]
+    existing.rules = human_rules
+    await guardrail_svc.update_guardrails(session_id, existing.model_dump())
+    
+    if body.brand_dna:
+        await guardrail_svc.add_rule_from_user_context(session_id, body.brand_dna, scope="all", source="brand")
+    if body.product_dna:
+        await guardrail_svc.add_rule_from_user_context(session_id, body.product_dna, scope="all", source="product")
+        
     return await svc.get_session(session_id, user_id=current_user.id)
 
 
@@ -97,4 +137,13 @@ async def stream_session_events(
         async for event in stream_events(session_id):
             yield f"data: {json.dumps(event)}\n\n"
 
-    return StreamingResponse(_sse_body(), media_type="text/event-stream")
+    # Defensive hardening (2026-09-24, alongside the real `llm_retry`/`llm_provider_fallback`
+    # events — see `_openai_compatible.py`/`router.py`): explicit no-buffering headers so no
+    # intermediate proxy/cache between here and the browser can batch/delay real event delivery.
+    # Not the real cause of the reported lag (that was genuine silence during provider retries,
+    # now fixed at the source), but a real, cheap correctness fix with no downside either way.
+    return StreamingResponse(
+        _sse_body(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+    )

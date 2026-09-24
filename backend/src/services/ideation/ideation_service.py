@@ -50,7 +50,12 @@ Given a running brief (what the user has told you so far) and their latest messa
      moody, or minimalist/typographic — all valid, all different): set `ready: false` and offer
      those as pickable `options` instead of guessing, same shape as a subject-clarity option
      (label = short style name, description = what it looks like). Do not do this for minor/generic
-     requests where one sensible default is obviously fine — most requests should NOT stop to ask.
+   requests where one sensible default is obviously fine — most requests should NOT stop to ask.
+
+4. BRAND & PRODUCT DNA (CRITICAL): Both Brand and Product guidelines MUST exist for every session.
+   - Look at the running brief's "guardrails" array. If there are no brand and product guardrails present, and the user hasn't provided any in their latest message, you MUST set `ready: false` and explicitly ask them to provide their brand and product guidelines (or to select them from the UI).
+   - If the user's message CONTAINS new information about the brand (e.g. "our brand colors are...", "we are a modern...") or the product (e.g. "the product is a new shoe...", "never show XYZ in the product"), extract these as distinct, actionable rules in `new_guardrails`.
+   - The same applies if they explicitly ask to update their Product DNA from the chat.
 
 Never ask more than one thing at a time — if content is unclear, resolve that before ever touching
 style. Prefer proposing options over asking an open question. Keep your tone warm and encouraging,
@@ -69,7 +74,8 @@ Return ONLY JSON:
   "merged_brief": {"idea": "a clear, one-paragraph synthesis of the brief so far, including any visual mood/style direction you chose"},
   "style_note": "one short sentence announcing the mood/style you picked, only when ready is true and this was a visual request — omit/empty otherwise",
   "message": "a short line stating what's still needed, only used when ready is false",
-  "options": [{"id": "short_id", "label": "Bold label", "description": "one-line rationale"}]
+  "options": [{"id": "short_id", "label": "Bold label", "description": "one-line rationale"}],
+  "new_guardrails": [{"source": "brand" or "product", "rule": "The explicit rule", "scope": "all"}] // only if the user provided new brand/product guidelines in their message
 }
 """
 
@@ -399,6 +405,12 @@ async def run_ideation(state: GraphState) -> GraphState:
         merged_brief = {"idea": raw_merged.strip()}
     else:
         merged_brief = {}
+    
+    # Extract new guardrails if provided (2026-09-24)
+    new_guardrails = parsed.get("new_guardrails")
+    if isinstance(new_guardrails, list):
+        state["new_guardrails"] = [g for g in new_guardrails if isinstance(g, dict)]
+
     state["brief"] = {**brief, **merged_brief}
 
     raw_options = parsed.get("options")

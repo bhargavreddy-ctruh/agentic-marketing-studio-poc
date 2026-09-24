@@ -13,3 +13,4 @@ class GraphState(TypedDict, total=False):
     dynamic_plan: list[dict[str, Any]] | None  # List of steps for dynamic execution
     result: dict[str, Any] | None
     error: str | None
+    new_guardrails: list[dict[str, Any]] | None

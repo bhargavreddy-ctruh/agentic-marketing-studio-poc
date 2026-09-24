@@ -1015,7 +1015,9 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             "request asks to change — do not generate an unrelated new one."
         )
 
+    import json
     direct_fix_context = "\n\n".join(context_parts)
+    direct_fix_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
     emit("lead_started", lead="direct_fix", target_specialist=target)
     try:
         # Real, live-found issue (2026-09-22, cross-check pass): a specialist can decline to act
@@ -1091,6 +1093,16 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             else:
                 log.warning("direct_fix_mux_failed", extra={"_extra_error": mux_result.error})
 
+    extra_elements = []
+    for c in step.tool_calls:
+        if c.ok and c.data.get("storage_ref") and c.data["storage_ref"] != produced_ref:
+            extra_elements.append({
+                "storage_ref": c.data["storage_ref"],
+                "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
+                "produced_by_specialist": target,
+                "metadata": {"direct_fix": True, "tool_used": c.tool_name},
+            })
+
     result: dict = {
         "storage_ref": produced_ref,
         "produced_by_specialist": target,
@@ -1107,6 +1119,7 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             produced_tool, brief.get("latest_element_type", "image")
         ),
         "metadata": {"direct_fix": True, "tool_used": produced_tool, **step.data},
+        "extra_elements": extra_elements,
     }
     if brief.get("latest_element_id") and produced_tool not in _ANNOTATION_ONLY_TOOLS:
         result["update_existing_element_id"] = brief["latest_element_id"]
@@ -1126,6 +1139,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
     brief = state.get("brief") or {}
     user_message = state.get("user_message") or ""
+    import json
     current_context = f"Campaign idea so far:\n{brief.get('idea') or user_message}"
     
     referenced_elements = brief.get("referenced_elements_context", [])
@@ -1137,9 +1151,14 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             desc = el.get("description") or "(no original prompt was recorded for this element)"
             current_context += f"\nElement {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
             
+    # Include the full brief so the specialist has access to `_recent_chat_history`, guardrails metadata, etc.
+    current_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+
     latest_storage_ref = None
     latest_tool = None
+    last_completed_specialist = None
     all_metadata = {}
+    extra_elements = []
 
     emit("lead_started", lead="dynamic_executor")
     try:
@@ -1167,24 +1186,63 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             )
             
             produced_ref, produced_tool = _produced_ref(step_result)
+            
+            for c in step_result.tool_calls:
+                ref = c.data.get("storage_ref")
+                if c.ok and ref and ref != produced_ref:
+                    extra_elements.append({
+                        "storage_ref": ref,
+                        "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
+                        "produced_by_specialist": specialist,
+                        "metadata": {"dynamic_plan_step": True, "tool_used": c.tool_name},
+                    })
+
             if produced_ref:
+                if latest_storage_ref and latest_storage_ref != produced_ref:
+                    extra_elements.append({
+                        "storage_ref": latest_storage_ref,
+                        "element_type": _ELEMENT_TYPE_BY_TOOL.get(latest_tool, brief.get("latest_element_type", "image")),
+                        "produced_by_specialist": last_completed_specialist,
+                        "metadata": {"dynamic_plan_step": True, "tool_used": latest_tool},
+                    })
                 latest_storage_ref = produced_ref
                 latest_tool = produced_tool
-            
+                last_completed_specialist = specialist
+
             all_metadata[f"step_{i}_{specialist}"] = step_result.data
-            
+
     except SpecialistFailed as exc:
-        log.error("dynamic_plan_failed", extra={"_extra_error": exc.message})
-        state["result"] = {
-            "message": f"Ran into an issue while executing the plan: {exc.message}. How should we proceed?",
-            "options": [
-                {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
-                {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
-            ],
-            "allow_free_text": True
-        }
-        emit("lead_failed", lead="dynamic_executor", reason=exc.message)
-        return state
+        # Real, live-found bug (2026-09-24, per an explicit user report: "most of the generations
+        # are taking place perfectly but they are not being shown"): a LATER step in this plan
+        # failing used to discard EVERYTHING — including a real asset an EARLIER step in the same
+        # plan already produced (`latest_storage_ref`, tracked precisely for this reason but never
+        # actually used on this path before). E.g. a plan of
+        # [reference_curator, illustrator, composition_artist] where illustrator genuinely
+        # generates a real image, then composition_artist fails on an unrelated guardrail conflict
+        # — the real image existed, was never attached to any canvas element, and the user was
+        # shown "ran into an issue, try again" with nothing to show for the real work (and any real
+        # cost) already done. Mirrors the same real degrade `motion_lead.py` already uses when
+        # `video_editor_cutter` fails after Camera Director's real paid render succeeds — a partial,
+        # real result beats a discarded one every time.
+        log.warning(
+            "dynamic_plan_partial_failure" if latest_storage_ref else "dynamic_plan_failed",
+            extra={"_extra_error": exc.message, "_extra_partial_ref": latest_storage_ref},
+        )
+        if not latest_storage_ref:
+            state["result"] = {
+                "message": f"Ran into an issue while executing the plan: {exc.message}. How should we proceed?",
+                "options": [
+                    {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
+                    {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
+                ],
+                "allow_free_text": True
+            }
+            emit("lead_failed", lead="dynamic_executor", reason=exc.message)
+            return state
+        # A real, partial result exists — fall through to the same success-shaped result the loop
+        # would have built had it finished normally, using the LAST STEP THAT ACTUALLY COMPLETED
+        # (not `plan[-1]`, which may never have run at all).
+        all_metadata["partial_failure"] = exc.message
     except SpecialistNotFound as exc:
         # Real, live-found bug (2026-09-23): a raw HTTP 500 in production — a hallucinated
         # specialist name in the plan (e.g. "style_board_planner", never registered anywhere)
@@ -1215,11 +1273,12 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
     result: dict = {
         "storage_ref": latest_storage_ref,
-        "produced_by_specialist": plan[-1].get("specialist", "dynamic_executor"),
+        "produced_by_specialist": last_completed_specialist or plan[-1].get("specialist", "dynamic_executor"),
         "element_type": _ELEMENT_TYPE_BY_TOOL.get(
             latest_tool, brief.get("latest_element_type", "image")
         ),
         "metadata": {"dynamic_plan": True, "tool_used": latest_tool, **all_metadata},
+        "extra_elements": extra_elements,
     }
     
     # If this was an edit plan on an existing element, update it. If it generated something new, don't.

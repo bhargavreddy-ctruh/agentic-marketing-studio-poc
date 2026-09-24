@@ -144,6 +144,20 @@ class SessionService:
         session = await self._sessions.add(session)
         return SessionMapper.to_response(session)
 
+    async def update_approval_mode(
+        self, session_id: str, *, user_id: str, approval_mode: str
+    ) -> SessionResponse:
+        """Real, live-found gap (2026-09-24, per an explicit user ask): `approval_mode` was only
+        ever settable at session creation — switching between "auto" and "approve" mid-conversation
+        meant starting a brand-new session. Safe to change at any point: every real gate that reads
+        it (`brief_for_graph["approval_mode"]` in `_run_turn_inner`, `CanvasVersioningService`'s
+        apply-vs-stage branch) reads the session's CURRENT value fresh on each turn/edit, never a
+        value captured once at creation — there's no stale-snapshot risk to guard against here."""
+        session = await self._get_owned_session(session_id, user_id=user_id)
+        session.approval_mode = approval_mode
+        session = await self._sessions.update(session)
+        return SessionMapper.to_response(session)
+
     async def list_sessions(self, *, user_id: str) -> list[SessionResponse]:
         sessions = await self._sessions.list_for_user(user_id)
         return [SessionMapper.to_response(s) for s in sessions]
@@ -525,6 +539,23 @@ class SessionService:
             "_laya_approved_specialist",
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}
+        
+        # Append any new guardrails extracted during the turn (e.g. from Ideation, 2026-09-24)
+        new_guardrails = result_state.get("new_guardrails")
+        if new_guardrails:
+            from ...core.guardrails import GuardrailRule
+            for g in new_guardrails:
+                if "id" not in g:
+                    g["id"] = f"rule_{uuid.uuid4().hex[:8]}"
+                # default to 'custom' if source not recognized
+                if g.get("source") not in ("brand", "product", "project", "custom"):
+                    g["source"] = "custom"
+                guardrail_set.rules.append(GuardrailRule(**g))
+            await guardrail_svc.update_guardrails(session.id, guardrail_set.model_dump())
+            session.brief["guardrails"] = guardrail_set.model_dump()
+            # update indexing in the background
+            guardrail_svc.index_guardrails(session.id, guardrail_set)
+
         result = result_state.get("result")
 
         prompt: IdeationPrompt | None = None

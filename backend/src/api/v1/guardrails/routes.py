@@ -41,6 +41,31 @@ async def update_guardrails(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+@router.put("/link-profiles", response_model=dict[str, Any])
+async def link_profiles(
+    session_id: str,
+    user_id: CurrentUserDep,
+    payload: dict[str, Any],
+    svc: GuardrailService = Depends(get_guardrail_service),
+) -> dict[str, Any]:
+    """Real, live-found gap (2026-09-24, per an explicit user report): attaches a Brand DNA and/or
+    Product DNA profile to this session so guardrails can actually be derived from real onboarded
+    data — previously there was no way to link a profile to a session at all. Either key omitted
+    (or `null`) leaves that linkage unchanged; an empty string clears it. Re-derives and MERGES
+    guardrails from the newly-linked profile(s) into whatever the session already has."""
+    try:
+        updated_set = await svc.link_profiles(
+            session_id,
+            brand_profile_id=payload.get("brand_profile_id"),
+            product_profile_id=payload.get("product_profile_id"),
+        )
+        return updated_set.model_dump()
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("", response_model=dict[str, Any])
 async def add_guardrail(
     session_id: str,

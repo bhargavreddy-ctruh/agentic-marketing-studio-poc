@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import uuid
 
+from ...core.config import settings
 from ...core.exceptions import NotFoundError, ValidationFailed
+from ...core.middleware.logging import get_logger
 from ...models.canvas_element import CanvasElementModel
 from ...models.canvas_element_version import CanvasElementVersionModel
 from ...repositories.base import CanvasRepository, CanvasVersionRepository
+
+log = get_logger(__name__)
 
 
 class CanvasVersioningService:
@@ -126,6 +130,14 @@ class CanvasVersioningService:
         genuinely disclosed, narrower gap than the one this fixes, since no edit path that changes
         an element's kind (currently only chat-driven direct_fix) is used under "approve" mode in
         practice yet."""
+        if not settings.canvas_versioning_enabled:
+            # Real, live-found user ask (2026-09-24): "every generated element should be displayed
+            # on canvas as individual element, detach the element versioning for now." Applied
+            # immediately regardless of `approval_mode` — see `core/config.py`'s
+            # `canvas_versioning_enabled` for the disclosed reason staging doesn't apply here.
+            return await self._create_standalone_element(
+                element, storage_ref=storage_ref, metadata=metadata, element_type=element_type
+            )
         if approval_mode == "approve":
             return await self.stage_pending_edit(
                 element, storage_ref=storage_ref, metadata=metadata, action=action
@@ -133,6 +145,33 @@ class CanvasVersioningService:
         return await self.record_new_version(
             element, storage_ref=storage_ref, metadata=metadata, element_type=element_type
         )
+
+    async def _create_standalone_element(
+        self,
+        element: CanvasElementModel,
+        *,
+        storage_ref: str,
+        metadata: dict,
+        element_type: str | None = None,
+    ) -> CanvasElementModel:
+        """The `canvas_versioning_enabled=False` path — same real session/specialist/kind the
+        source element already carries, but a genuinely NEW, independent element (its own id,
+        v1, no version history linking it back), never a mutation of `element` itself. `element`
+        is left completely untouched on disk."""
+        new_element = CanvasElementModel(
+            id=uuid.uuid4().hex,
+            session_id=element.session_id,
+            element_type=element_type or element.element_type,
+            produced_by_specialist=element.produced_by_specialist,
+            storage_ref=storage_ref,
+            metadata_json=metadata,
+        )
+        created = await self._canvas.add_element(new_element)
+        log.info(
+            "canvas_versioning_detached_new_element",
+            extra={"_extra_source_element": element.id, "_extra_new_element": created.id},
+        )
+        return created
 
     async def stage_pending_edit(
         self, element: CanvasElementModel, *, storage_ref: str, metadata: dict, action: str

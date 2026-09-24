@@ -17,6 +17,15 @@ class CreateSessionRequest(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class UpdateApprovalModeRequest(BaseModel):
+    # Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be
+    # able to select the mode(auto/approve mode)") — `approval_mode` was only ever settable at
+    # session CREATION (`CreateSessionRequest` above); once a session existed, the chat UI could
+    # only display it, never change it. Same validation as creation, reused here rather than
+    # duplicated.
+    approval_mode: str = Field(pattern="^(auto|approve)$")
+
+
 class PostTurnRequest(BaseModel):
     # Exactly one of these should be set — a card pick, or free text (Architecture.md section 1d).
     picked_option_id: str | None = None
@@ -25,3 +34,7 @@ class PostTurnRequest(BaseModel):
     # element in chat") — grounds direct_fix against THESE elements instead of whichever was most
     # recently created. Falls back to today's auto-inferred behavior when absent or stale.
     referenced_element_ids: list[str] | None = None
+
+class UpdateDnaRequest(BaseModel):
+    brand_dna: str | None = None
+    product_dna: str | None = None

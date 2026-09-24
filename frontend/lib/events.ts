@@ -215,6 +215,37 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
         touchStart(n, event);
         break;
       }
+      // Real, live-found bug (2026-09-24, per an explicit user report: "the node model has
+      // latency its not showing the current status of nodes properly its taking atleast 30
+      // seconds lag sometimes"): a real LLM provider retry/fallback (backend,
+      // `_openai_compatible.py`/`router.py`) can genuinely take 20-30+ seconds, and until now
+      // NOTHING was emitted during that wait — the currently-running node's card just sat
+      // unchanged, looking frozen/stuck even though it genuinely was still working. Neither event
+      // carries which node's own call is retrying (the retry logic is several layers below any
+      // specialist/node identity) — attributed here to every node CURRENTLY "running" instead,
+      // an honest approximation ("something active just hit this"), not a guess at exactly which.
+      case "llm_retry": {
+        const waitS = typeof event.wait_s === "number" ? event.wait_s.toFixed(1) : String(event.wait_s ?? "");
+        const reason = event.reason === "rate_limited" ? "rate limited" : String(event.reason ?? "retrying");
+        const note = `\n⏳ ${event.provider} ${reason} — retrying in ${waitS}s…`;
+        for (const n of nodes.values()) {
+          if (n.status === "running") {
+            n.thinking += note;
+            touchEnd(n, event); // keeps its visible "ongoing" duration honest, not stalled-looking
+          }
+        }
+        break;
+      }
+      case "llm_provider_fallback": {
+        const note = `\n🔁 ${event.from_provider} unavailable — switching to ${event.to_provider}…`;
+        for (const n of nodes.values()) {
+          if (n.status === "running") {
+            n.thinking += note;
+            touchEnd(n, event);
+          }
+        }
+        break;
+      }
       default:
         break;
     }
@@ -333,6 +364,19 @@ export function describeEvent(event: LiveEvent): string | null {
       return `↻ ${event.specialist} reviewed — retrying with a correction`;
     case "tool_call":
       return `${event.ok ? "🔧" : "⚠️"} ${event.specialist} called ${event.tool}`;
+    // Real, live-found bug (2026-09-24, per an explicit user report: "the node model has
+    // latency its not showing the current status of nodes properly its taking atleast 30
+    // seconds lag sometimes") — real Groq/OpenRouter rate limiting means a single LLM call can
+    // genuinely spend 20-30+ seconds retrying, and NOTHING was ever emitted during that wait —
+    // not a stale UI, a real silent gap. `llm_retry`/`llm_provider_fallback` (backend,
+    // `_openai_compatible.py`/`router.py`) close it.
+    case "llm_retry": {
+      const waitS = typeof event.wait_s === "number" ? event.wait_s.toFixed(1) : String(event.wait_s ?? "");
+      const reason = event.reason === "rate_limited" ? "rate limited" : String(event.reason ?? "retrying");
+      return `⏳ ${event.provider} ${reason} — retrying ${event.model} in ${waitS}s…`;
+    }
+    case "llm_provider_fallback":
+      return `🔁 ${event.from_provider} unavailable — switching to ${event.to_provider}…`;
     default:
       return null; // turn_started/turn_completed are structural, not narration lines
   }

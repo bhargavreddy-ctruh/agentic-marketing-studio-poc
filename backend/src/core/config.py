@@ -48,6 +48,19 @@ class Settings(BaseSettings):
     # whether partial text is visible before a node finishes.
     stream_llm_thinking_enabled: bool = True
 
+    # --- Canvas element versioning (versioning_service.py) — real, live-found user ask
+    # (2026-09-24): "every generated element should be displayed on canvas as individual element,
+    # detach the element versioning for now." Default ON keeps the original, still-fully-built
+    # behavior (a targeted regenerate/comment/direct-edit/chat direct_fix versions the SAME
+    # element, undo/redo moves through its history) — set OFF to make every one of those instead
+    # create a brand-new, independent canvas element every time, never touching an existing one.
+    # A real, disclosed simplification while off: "approve" mode's staging (`apply_or_stage`)
+    # doesn't compose with "always create new" without a "pending new element" concept that
+    # doesn't exist, so a new element is applied immediately either way, regardless of
+    # approval_mode, while this is off. Nothing about `undo`/`redo`/`/versions` is removed — only
+    # `apply_or_stage`'s own behavior changes; flipping this back on is the whole rollback.
+    canvas_versioning_enabled: bool = False
+
     # --- Reasoning (OpenRouter) ---
     openrouter_api_key: str | None = None
     openrouter_base_url: str = "https://openrouter.ai/api/v1"

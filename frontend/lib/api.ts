@@ -77,6 +77,21 @@ export async function listSessions(): Promise<SessionResponse[]> {
   return request<SessionResponse[]>("/api/v1/sessions");
 }
 
+/** Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be able
+ * to select the mode(auto/approve mode)") — mode selection previously only existed on the home
+ * page's "new workflow" form, before a session even existed; there was no way to change it for an
+ * already-running conversation. */
+export async function updateApprovalMode(
+  sessionId: string,
+  approvalMode: "auto" | "approve",
+): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/approval-mode`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ approval_mode: approvalMode }),
+  });
+}
+
 export async function postTurn(
   sessionId: string,
   args: { pickedOptionId?: string; freeText?: string; referencedElementIds?: string[] },

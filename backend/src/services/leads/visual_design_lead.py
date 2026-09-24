@@ -19,8 +19,11 @@ from __future__ import annotations
 import json
 
 from ...core.exceptions import SpecialistFailed
-from ..specialists.runner import run_specialist_agentic, run_specialist_with_review
+from ...core.middleware.logging import get_logger
+from ..specialists.runner import AgenticStepResult, run_specialist_agentic, run_specialist_with_review
 from .base import LeadResult, LeadSpec, referenced_element_block, stale_campaign_context_block
+
+log = get_logger(__name__)
 
 VISUAL_DESIGN_LEAD = LeadSpec(
     name="visual_design_lead",
@@ -108,14 +111,33 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     generate_call = illustration.latest_call("base_image_generator")
     aspect_ratio = generate_call.args.get("aspect_ratio", "1:1") if generate_call else "1:1"
 
-    composition = await run_specialist_agentic(
-        "composition_artist",
-        context=(
-            f"The generated image's storage_ref is: {storage_ref}\nIts prompt was:\n{image_prompt}\n\n"
-            f"Aesthetic direction:\n{aesthetic_direction}\n\n"
-            f"Palette direction:\n{palette.get('palette_direction', '')}"
-        ),
-    )
+    # Real, live-found bug (2026-09-24, per an explicit user report: "most of the generations are
+    # taking place perfectly but they are not being shown"): by this point Illustrator has ALREADY
+    # produced a real image via `base_image_generator`/`image_editor` — a real, valid `storage_ref`.
+    # Composition Artist here is a REFINEMENT pass over that already-complete image, not what
+    # produces it — but with no try/except, any failure inside it (a provider outage, an unrelated
+    # guardrail conflict — a real, live-reported case: "The request to add a price discount
+    # conflicts with campaign constraints") propagated straight out of this function, all the way
+    # to `graph.py`'s `except SpecialistFailed`, discarding the already-generated image entirely —
+    # the user saw "ran into an issue, try again" with nothing to show for a real, already-complete
+    # generation. Same real degrade `motion_lead.py` already uses when `video_editor_cutter` fails
+    # after Camera Director's real paid render succeeds: a real, unrefined result beats a discarded
+    # one every time.
+    try:
+        composition = await run_specialist_agentic(
+            "composition_artist",
+            context=(
+                f"The generated image's storage_ref is: {storage_ref}\nIts prompt was:\n{image_prompt}\n\n"
+                f"Aesthetic direction:\n{aesthetic_direction}\n\n"
+                f"Palette direction:\n{palette.get('palette_direction', '')}"
+            ),
+        )
+    except SpecialistFailed as exc:
+        log.warning(
+            "visual_design_lead_composition_failed_keeping_illustration",
+            extra={"_extra_error": exc.message, "_extra_storage_ref": storage_ref},
+        )
+        composition = AgenticStepResult(specialist_name="composition_artist", model="", data={}, tool_calls=[])
     edit_result = composition.latest_result("image_editor")
     if edit_result and edit_result.get("storage_ref"):
         storage_ref = edit_result["storage_ref"]

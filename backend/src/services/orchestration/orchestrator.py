@@ -344,12 +344,10 @@ async def route(state: GraphState) -> GraphState:
             emit("route_decided", route=fallback_route, target_specialist=None, degraded=True)
 
     # `_recent_chat_history` and `_retrieved_memory` were real, useful context for THIS classification 
-    # call (and ideation's own calls before it) — but every Lead/specialist downstream builds its own 
-    # context via a raw `json.dumps(brief)` dump (`leads/base.py` etc.), which would otherwise restate 
-    # the same conversation history a second time in every single specialist call for the rest of this turn.
-    # Stripped here, the one real boundary between "the orchestration layer, which genuinely benefits from 
-    # real memory" and "specialist calls, which already get everything they need via `referenced_element_block`/explicit context".
-    for scratch_key in ("_recent_chat_history", "_retrieved_memory"):
+    # call (and ideation's own calls before it). The previous implementation stripped them to save tokens,
+    # but this broke conversational continuations (like 'go ahead' or 'yes') when a specialist failed.
+    # We now retain them so downstream specialists have the conversational context to understand overrides.
+    for scratch_key in ("_retrieved_memory",): # Kept stripping memory to save space, but kept chat history
         if scratch_key in (state.get("brief") or {}):
             state["brief"] = {k: v for k, v in state["brief"].items() if k != scratch_key}
 

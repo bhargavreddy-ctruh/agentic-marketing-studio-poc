@@ -28,16 +28,20 @@ ALL_SCOPES = (SCOPE_CAMPAIGN, SCOPE_SEGMENT, SCOPE_ASSET_TYPE)
 
 GUARDRAIL_VERSION = 1
 
-# Brand and project fields that become one rule each, with the imperative used to state them.
-_BRAND_RULE_TEMPLATES: dict[str, str] = {
-    "voice_and_tone": "All copy must match this voice and tone: {value}",
-    "visual_identity": "All imagery must match this visual identity: {value}",
-    "positioning_and_pillars": "Messaging must support this positioning: {value}",
-    "audience_segments": "Work must address this audience: {value}",
-    "category_context": "Work must fit this category context: {value}",
-    "logo_rules": "Logo usage must obey: {value}",
-}
-
+# Real, live-found bug (2026-09-24, per an explicit user report: "it created elements but it
+# didn't generate session/product guardrails"): `_BRAND_RULE_TEMPLATES` below was dead on arrival
+# for every real brand ever onboarded through this app. Two compounding mismatches, confirmed by
+# reading the real data both sides actually produce/consume: (1) `BrandProfileModel.raw_profile` is
+# stored as `{"raw_facts": {...}, "guardrails": {...}}` (`brand_dna_service.py`), but this used to
+# be handed the raw_facts VALUE directly with no unwrapping — every `.get(field)` below read a key
+# that was never at that level. (2) Even unwrapped, `raw_facts` is deliberately FREE-FORM (see
+# `lib/brand.ts`'s own comment: "the backend's own LLM-based guardrail synthesis is what extracts
+# real structure from it, not this client") — the real onboarding form only ever saves `colors`/
+# `voice`/`prohibited_imagery`, never any of the 6 fixed keys `_BRAND_RULE_TEMPLATES` looked for.
+# The REAL, already-correct source of structured brand guardrails is the LLM synthesis that
+# already runs at onboarding time (`guardrail_synthesizer.py`'s `visual`/`price_overlay` rule
+# lists, stored right there in `raw_profile["guardrails"]`) — `_rules_from_synthesized_brand`
+# below consumes that directly instead of re-guessing a second, rigid schema over free-form facts.
 _PROJECT_RULE_TEMPLATES: dict[str, str] = {
     "goal": "Work must serve this goal: {value}",
     "audience": "Work must address this audience: {value}",
@@ -140,20 +144,36 @@ def _product_rules(product: dict) -> list[GuardrailRule]:
     if identity:
         add("identity", "Every asset must show and describe this exact product — " + "; ".join(identity))
 
+    # Specific handling for product DNA fields
+    if product.get("must_show"):
+        add("must_show", f"You must always show or clearly depict: {', '.join(product['must_show'])}.")
+    
+    if product.get("never_show"):
+        add("never_show", f"You must never show, imply, or depict: {', '.join(product['never_show'])}.")
+        
+    if product.get("claims_allowed"):
+        add("claims_allowed", f"You are allowed to make the following claims: {', '.join(product['claims_allowed'])}.")
+        
+    if product.get("claims_disallowed"):
+        add("claims_disallowed", f"You are strictly prohibited from making the following claims: {', '.join(product['claims_disallowed'])}.")
+        
+    if product.get("label_visibility"):
+        add("label_visibility", f"Label visibility requirement: {product['label_visibility']}.")
+
     # All other arbitrary attributes in the JSON mapping
+    handled_keys = {"name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility"}
     for key, value in product.items():
-        if key in ("name", "category", "description", "price", "discount"):
+        if key in handled_keys:
             continue
         # Only parse scalar fields as rigid rules, lists as options
         if isinstance(value, str) or isinstance(value, int) or isinstance(value, float):
             add(f"attr.{_slug(key)}",
-                f"{key} is {value}. Copy must not contradict that, and imagery must not "
+                f"The {key} is {value}. Copy must not contradict that, and imagery must not "
                 f"depict something inconsistent with it.")
         elif isinstance(value, list) and all(isinstance(x, str) for x in value):
             add(f"option.{_slug(key)}",
-                f"The only {key} values that exist are: {', '.join(value)}. Never state, "
-                f"imply or depict a {key} outside that list, and never claim a range the "
-                "list does not cover.")
+                f"The only approved {key} options are: {', '.join(value)}. Never state, "
+                f"imply or depict a {key} outside that list.")
 
     add("claims",
         "Never state a price, discount, specification, availability, guarantee or "
@@ -164,6 +184,38 @@ def _product_rules(product: dict) -> list[GuardrailRule]:
     return rules
 
 
+def _rules_from_synthesized_brand(brand: dict) -> list[GuardrailRule]:
+    """Converts the REAL, already-LLM-synthesized brand guardrails
+    (`guardrail_synthesizer.py`'s `visual`/`price_overlay` rule lists, produced once at brand
+    onboarding and stored in `BrandProfileModel.raw_profile["guardrails"]`) into `GuardrailRule`
+    objects — see the real bug this replaces, in the comment above `_PROJECT_RULE_TEMPLATES`."""
+    synthesized = (brand or {}).get("guardrails")
+    if not isinstance(synthesized, dict):
+        return []
+    rules: list[GuardrailRule] = []
+    for category in ("visual", "price_overlay"):
+        for i, item in enumerate(synthesized.get(category) or []):
+            if not isinstance(item, dict):
+                continue
+            rule_text = _clean(item.get("rule"), limit=1200)
+            if not rule_text:
+                continue
+            raw_id = _clean(item.get("id")) or f"{category}_{i + 1}"
+            rule = GuardrailRule(
+                id=f"brand.{_slug(raw_id)}",
+                rule=rule_text,
+                source=SOURCE_BRAND,
+                scope=SCOPE_CAMPAIGN,
+            )
+            severity = _clean(item.get("severity"))
+            if severity:
+                # `Config.extra = "allow"` — a real, additional field the synthesizer produced,
+                # kept rather than discarded, without forcing every OTHER rule source to carry one.
+                rule.severity = severity
+            rules.append(rule)
+    return rules
+
+
 def derive_guardrails(brand: dict = None, product: dict = None, project: dict = None) -> GuardrailSet:
     """
     The rules that follow directly from the JSON fields supplied.
@@ -171,18 +223,7 @@ def derive_guardrails(brand: dict = None, product: dict = None, project: dict = 
     """
     rules: list[GuardrailRule] = []
 
-    brand = brand or {}
-    for field, template in _BRAND_RULE_TEMPLATES.items():
-        value = _clean(brand.get(field))
-        if value:
-            rules.append(
-                GuardrailRule(
-                    id=f"brand.{field}",
-                    rule=template.format(value=value),
-                    source=SOURCE_BRAND,
-                    scope=SCOPE_CAMPAIGN,
-                )
-            )
+    rules.extend(_rules_from_synthesized_brand(brand or {}))
 
     project = project or {}
     for field, template in _PROJECT_RULE_TEMPLATES.items():

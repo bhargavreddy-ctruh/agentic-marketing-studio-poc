@@ -40,12 +40,13 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 from .groq import GroqProvider
 from .local_llm import LocalLLMProvider
-from .openrouter import OpenRouterProvider
+from .replicate_llm import ReplicateLLMProvider
 
 log = get_logger(__name__)
 
@@ -54,7 +55,7 @@ class LLMRouter(LLMProvider):
     def __init__(self):
         self._local = LocalLLMProvider()
         self._primary = GroqProvider()
-        self._fallback = OpenRouterProvider()
+        self._fallback = ReplicateLLMProvider()
 
     async def complete(
         self,
@@ -78,6 +79,12 @@ class LLMRouter(LLMProvider):
                     "llm_router_falling_back_to_groq_from_local",
                     extra={"_extra_tier": tier.name, "_extra_local_error": exc.message},
                 )
+                # Real, live-found bug (2026-09-24, per an explicit user report: "the node model
+                # has latency... 30 seconds lag sometimes"): switching providers here is itself a
+                # real, silent gap in the SAME class `_openai_compatible.py`'s own retry loop had —
+                # the frontend never knew a provider was being abandoned entirely, only that
+                # nothing was happening. `emit()` is a safe no-op with no turn active.
+                emit("llm_provider_fallback", tier=tier.name, from_provider="local", to_provider="groq")
 
         try:
             return await self._primary.complete(
@@ -87,9 +94,10 @@ class LLMRouter(LLMProvider):
         except ProviderUnavailable as exc:
             groq_error = exc
             log.warning(
-                "llm_router_falling_back_to_openrouter",
+                "llm_router_falling_back_to_replicate",
                 extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
             )
+            emit("llm_provider_fallback", tier=tier.name, from_provider="groq", to_provider="replicate_llm")
 
         try:
             return await self._fallback.complete(
@@ -99,8 +107,9 @@ class LLMRouter(LLMProvider):
         except ProviderUnavailable as exc:
             log.warning(
                 "llm_router_falling_back_to_local_last_resort",
-                extra={"_extra_tier": tier.name, "_extra_groq_error": groq_error.message, "_extra_openrouter_error": exc.message},
+                extra={"_extra_tier": tier.name, "_extra_groq_error": groq_error.message, "_extra_replicate_error": exc.message},
             )
+            emit("llm_provider_fallback", tier=tier.name, from_provider="replicate_llm", to_provider="local")
             return await self._local.complete(
                 tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
                 on_delta=on_delta,

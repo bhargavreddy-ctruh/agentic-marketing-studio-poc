@@ -110,10 +110,34 @@ async def run_motion_lead(
         # JSON field — what Format/Technical QA's compliance check verifies the output against.
         aspect_ratio = video_call.args.get("aspect_ratio", "16:9")
 
-        editor = await run_specialist_agentic(
-            "video_editor_cutter",
-            context=f"Raw clip storage_ref: {raw_clip_storage_ref}\nMotion prompt used:\n{motion_prompt}",
-        )
+        # Real, live-found bug (2026-09-24, per a real user report: "it generated video in render
+        # but it didnt show it on the canvas??"): by this point `camera_director` has ALREADY made
+        # the real, PAID Replicate call and `raw_clip_storage_ref` is a real, valid asset on disk —
+        # but `video_editor_cutter` is a genuine LLM call of its own (provider outage, rate
+        # limiting — heavily documented as real today — or exceeding its own iteration cap), and
+        # if IT raises, the old code let that exception propagate straight out of
+        # `_run_video_path()`, past `run_motion_lead`, all the way to `graph.py`'s outer
+        # `except SpecialistFailed` — discarding the already-rendered, already-paid-for clip
+        # entirely. It was never attached to a canvas element anywhere; the user was shown "ran
+        # into an issue, try again" while the real result silently existed on disk, and clicking
+        # "Try again" would spend on a SECOND real render on top of the lost first one. Wrapped the
+        # same way `video_stitcher` choosing not to run is already handled just below — a real,
+        # already-produced clip degrades to "not stitched" rather than being thrown away.
+        try:
+            editor = await run_specialist_agentic(
+                "video_editor_cutter",
+                context=f"Raw clip storage_ref: {raw_clip_storage_ref}\nMotion prompt used:\n{motion_prompt}",
+            )
+        except SpecialistFailed as exc:
+            log.warning(
+                "motion_lead_editor_failed_keeping_raw_clip",
+                extra={"_extra_error": exc.message, "_extra_raw_clip": raw_clip_storage_ref},
+            )
+            # Built directly, not via the `_empty_result` helper below — that helper is defined
+            # AFTER the `asyncio.gather(...)` call that runs this coroutine, so by the time this
+            # except block would run, `_empty_result` doesn't exist yet in the enclosing scope.
+            editor = AgenticStepResult(specialist_name="video_editor_cutter", model="", data={}, tool_calls=[])
+
         stitch_result = editor.latest_result("video_stitcher")
         if stitch_result and stitch_result.get("storage_ref"):
             video_storage_ref = stitch_result["storage_ref"]
