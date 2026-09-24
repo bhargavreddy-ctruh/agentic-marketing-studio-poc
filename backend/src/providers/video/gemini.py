@@ -14,7 +14,7 @@ from .base import VideoGenProvider, VideoResult
 
 class GeminiVideoProvider(VideoGenProvider):
     async def generate(
-        self, *, prompt: str, image_bytes: bytes | None = None, duration_seconds: int = 5
+        self, *, prompt: str, image_bytes: bytes | None = None, duration_seconds: int = 5, **kwargs
     ) -> VideoResult:
         if not settings.gemini_video_active:
             raise ProviderUnavailable(

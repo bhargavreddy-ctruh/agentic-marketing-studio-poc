@@ -48,27 +48,41 @@ class ReplicateVideoProvider(VideoGenProvider):
         duration_seconds: int = 5,
         aspect_ratio: str = "16:9",
         resolution: str = "720p",
+        camera_motion: str | None = None,
+        first_frame_bytes: bytes | None = None,
+        last_frame_bytes: bytes | None = None,
     ) -> VideoResult:
         if not self._api_key:
             raise ProviderUnavailable("replicate", "REPLICATE_API_KEY is not set")
-        if image_bytes is None:
-            raise ProviderUnavailable("replicate", "prunaai/p-video requires a source image")
+        
+        effective_image_bytes = image_bytes or first_frame_bytes
+        if effective_image_bytes is None:
+            raise ProviderUnavailable("replicate", "Video provider requires a source image or first frame")
 
         log.info(
             "replicate_orientation_note",
             extra={
                 "_extra_requested_aspect_ratio": aspect_ratio,
                 "_extra_requested_resolution": resolution,
+                "_extra_camera_motion": camera_motion,
                 "_extra_note": "controlled via the input image's own dimensions on this model, not a request field",
             },
         )
 
+        effective_prompt = prompt
+        if camera_motion and camera_motion.lower() not in prompt.lower():
+            effective_prompt = f"{prompt}. Camera motion: {camera_motion}."
+
         client = replicate_sdk.Client(api_token=self._api_key)
         input_payload = {
-            "image": io.BytesIO(image_bytes),
-            "prompt": prompt,
+            "image": io.BytesIO(effective_image_bytes),
+            "prompt": effective_prompt,
             "prompt_upsampling": False,  # keep the exact prompt as given — don't let the model rewrite it
         }
+        if camera_motion:
+            input_payload["camera_motion"] = camera_motion
+        if last_frame_bytes:
+            input_payload["last_frame"] = io.BytesIO(last_frame_bytes)
 
         start = time.monotonic()
         try:

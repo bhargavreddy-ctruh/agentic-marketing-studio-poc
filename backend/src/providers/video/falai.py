@@ -36,6 +36,9 @@ class FalAiVideoProvider(VideoGenProvider):
         duration_seconds: int = 5,
         aspect_ratio: str = "16:9",
         resolution: str = "720p",
+        camera_motion: str | None = None,
+        first_frame_bytes: bytes | None = None,
+        last_frame_bytes: bytes | None = None,
     ) -> VideoResult:
         if not self._api_key:
             raise ProviderUnavailable("falai", "FALAI_API_KEY is not set")

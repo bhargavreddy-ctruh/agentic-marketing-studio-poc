@@ -35,14 +35,13 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
         seed: int | None = None,
         reference_image_bytes: bytes | None = None,
         reference_mime_type: str | None = None,
+        style_reference_bytes: bytes | None = None,
+        style_reference_mime_type: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> ImageResult:
         start = time.monotonic()
         try:
-            # Real, live-found gap (2026-09-24, per an explicit user ask to check every input
-            # `readme.md` documents for `alibaba/qwen-image-3` against what the tool-calling agent
-            # actually sends): `negative_prompt`/`enable_prompt_expansion`/`seed` were accepted by
-            # neither this provider nor the `base_image_generator` tool's schema above it — real,
-            # documented model inputs the agent had no way to ever set. Wired through now.
             request_input: dict = {
                 "prompt": prompt,
                 "aspect_ratio": aspect_ratio,
@@ -52,15 +51,18 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 request_input["negative_prompt"] = negative_prompt
             if seed is not None:
                 request_input["seed"] = seed
+            if width is not None:
+                request_input["width"] = width
+            if height is not None:
+                request_input["height"] = height
             if reference_image_bytes:
-                # Real image-to-image grounding (2026-09-24) — the same real `image` input the
-                # edit path already uses, now also reachable from generation, so a referenced
-                # element handed to a from-scratch generation step doesn't have to go through a
-                # lossy text description of itself first. `aspect_ratio` is still honored
-                # alongside a reference image — this is generation with visual grounding, not an
-                # edit, so it never implies "keep the reference's own shape" the way editing does.
                 b64_data = base64.b64encode(reference_image_bytes).decode("utf-8")
                 request_input["image"] = f"data:{reference_mime_type or 'image/png'};base64,{b64_data}"
+            if style_reference_bytes:
+                b64_style = base64.b64encode(style_reference_bytes).decode("utf-8")
+                request_input["style_reference"] = (
+                    f"data:{style_reference_mime_type or 'image/png'};base64,{b64_style}"
+                )
             output = await self._client.async_run(
                 "alibaba/qwen-image-3",
                 input=request_input,
@@ -112,21 +114,14 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
         negative_prompt: str | None = None,
         enable_prompt_expansion: bool = True,
         seed: int | None = None,
+        mask_bytes: bytes | None = None,
+        mask_mime_type: str | None = None,
     ) -> ImageResult:
         start = time.monotonic()
         try:
             b64_data = base64.b64encode(image_bytes).decode("utf-8")
             data_uri = f"data:{mime_type};base64,{b64_data}"
 
-            # Real, live-found bug (2026-09-24, per an explicit user report of "very bad output"
-            # on a real edit): this used to send only `prompt`/`image` — none of `aspect_ratio`,
-            # `match_input_image`, `negative_prompt`, `enable_prompt_expansion`, or `seed` ever
-            # reached the model, despite `readme.md` documenting all of them as real inputs
-            # `alibaba/qwen-image-3` accepts for editing. `match_input_image` takes precedence when
-            # true (the common case — most edits shouldn't silently reshape the source image);
-            # an explicit `aspect_ratio` is only sent when the caller actually wants a DIFFERENT
-            # shape than the input (e.g. "make this a 9:16 Instagram post"), which the tool below
-            # signals by passing `match_input_image=False` alongside it.
             request_input: dict = {
                 "prompt": instruction,
                 "image": data_uri,
@@ -140,6 +135,9 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 request_input["negative_prompt"] = negative_prompt
             if seed is not None:
                 request_input["seed"] = seed
+            if mask_bytes:
+                b64_mask = base64.b64encode(mask_bytes).decode("utf-8")
+                request_input["mask"] = f"data:{mask_mime_type or 'image/png'};base64,{b64_mask}"
 
             output = await self._client.async_run(
                 "alibaba/qwen-image-3",

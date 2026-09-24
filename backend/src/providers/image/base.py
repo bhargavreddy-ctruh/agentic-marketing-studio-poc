@@ -23,16 +23,12 @@ class ImageGenProvider(Protocol):
         negative_prompt: str | None = None,
         enable_prompt_expansion: bool = True,
         seed: int | None = None,
-        # Real, live-found gap (2026-09-24, per an explicit user ask: "image generation model
-        # accepts image reference for generation, why are we not using that and its asking for
-        # image to text then text to image"): `readme.md` documents `image` as a real input for
-        # BOTH editing AND image-to-image generation, but only the edit path ever got it — a
-        # referenced element handed to a `dynamic`-route generation step (illustrator) had no way
-        # to ground in the real image bytes, only a lossy text description of it
-        # (`session_service.py`'s `_describe_uploaded_image`), forcing a real image→text→image
-        # round-trip even when the real reference image was one step away the whole time.
         reference_image_bytes: bytes | None = None,
         reference_mime_type: str | None = None,
+        style_reference_bytes: bytes | None = None,
+        style_reference_mime_type: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
     ) -> ImageResult: ...
 
 
@@ -48,4 +44,6 @@ class ImageEditProvider(Protocol):
         negative_prompt: str | None = None,
         enable_prompt_expansion: bool = True,
         seed: int | None = None,
+        mask_bytes: bytes | None = None,
+        mask_mime_type: str | None = None,
     ) -> ImageResult: ...
