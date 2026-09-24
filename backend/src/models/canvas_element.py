@@ -42,3 +42,5 @@ class CanvasElementModel(Base, TimestampMixin):
     # a real infra error running the check itself — an honest, visible flag rather than a silent
     # "unknown" that could look identical to "passed" (see the background task's own docstring).
     compliance_status: Mapped[str] = mapped_column(String(16), default="running")
+    ad_spec_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    safe_zone_pct: Mapped[float | None] = mapped_column(nullable=True)

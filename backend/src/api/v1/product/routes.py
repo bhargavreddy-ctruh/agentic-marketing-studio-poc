@@ -28,3 +28,26 @@ async def onboard_product(
 async def get_product(product_id: str, svc: ProductDnaServiceDep) -> ProductProfileResponse:
     product = await svc.get_product(product_id)
     return ProductMapper.to_response(product)
+
+
+from fastapi import UploadFile
+from ....core.local_storage import save_asset
+from ....core.mime_sniff import sniff_image_mime
+from ....repositories.base import ProductRepository
+from ...dependencies import ProductRepositoryDep
+
+@router.post("/{product_id}/photo")
+async def upload_product_photo(
+    product_id: str,
+    file: UploadFile,
+    svc: ProductDnaServiceDep,
+    repo: ProductRepositoryDep,
+):
+    product = await svc.get_product(product_id)
+    data = await file.read()
+    mime = sniff_image_mime(data, file.content_type)
+    storage_ref = save_asset(data, mime, metadata={"product_id": product_id, "type": "product_photo"})
+    
+    product.photo_storage_ref = storage_ref
+    await repo.add(product)
+    return {"product_id": product_id, "photo_storage_ref": storage_ref}

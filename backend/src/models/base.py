@@ -39,6 +39,23 @@ async def init_models() -> None:
     """Create tables if they don't exist. Fine for a POC; a real migration tool comes later."""
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        
+        # Lightweight column migrations for SQLite
+        migrations = [
+            ("product_profiles", "photo_storage_ref", "VARCHAR(255)"),
+            ("brand_profiles", "logo_storage_ref", "VARCHAR(255)"),
+            ("brand_profiles", "font_storage_refs", "JSON"),
+            ("sessions", "style_ref_storage_ref", "VARCHAR(255)"),
+            ("sessions", "style_seed", "INTEGER"),
+            ("canvas_elements", "ad_spec_name", "VARCHAR(64)"),
+            ("canvas_elements", "safe_zone_pct", "FLOAT"),
+        ]
+        from sqlalchemy import text
+        for table, col, col_type in migrations:
+            try:
+                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+            except Exception:
+                pass
 
 
 def get_engine():

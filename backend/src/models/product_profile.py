@@ -19,4 +19,5 @@ class ProductProfileModel(Base, TimestampMixin):
     # mustShow / neverShow / claimsAllowed / claimsDisallowed / labelVisibility, price, discount —
     # the exact shape run_product_intelligence already produces (Rules.md section 6).
     attributes: Mapped[dict] = mapped_column(JSON, default=dict)
+    photo_storage_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     indexed: Mapped[bool] = mapped_column(default=False)

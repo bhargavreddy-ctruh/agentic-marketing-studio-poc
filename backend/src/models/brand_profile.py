@@ -19,5 +19,7 @@ class BrandProfileModel(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255))
     # Raw brand facts (colors, voice, logo rules, prohibited imagery) before indexing.
     raw_profile: Mapped[dict] = mapped_column(JSON, default=dict)
+    logo_storage_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    font_storage_refs: Mapped[dict] = mapped_column(JSON, default=dict)
     # Set once the Brand DNA Agent has indexed this profile into LlamaIndex.
     indexed: Mapped[bool] = mapped_column(default=False)

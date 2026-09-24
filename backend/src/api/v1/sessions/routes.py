@@ -85,6 +85,32 @@ async def update_dna(
     return await svc.get_session(session_id, user_id=current_user.id)
 
 
+from pydantic import BaseModel
+
+class UpdateStyleRequest(BaseModel):
+    style_ref_storage_ref: str | None = None
+    style_seed: int | None = None
+
+
+@router.put("/{session_id}/style", response_model=SessionResponse)
+async def update_session_style(
+    session_id: str,
+    body: UpdateStyleRequest,
+    svc: SessionServiceDep,
+    current_user: CurrentUserDep,
+) -> SessionResponse:
+    await svc.get_session(session_id, user_id=current_user.id)
+    session_model = await svc._sessions.get(session_id)
+    
+    if body.style_ref_storage_ref is not None:
+        session_model.style_ref_storage_ref = body.style_ref_storage_ref
+    if body.style_seed is not None:
+        session_model.style_seed = body.style_seed
+        
+    await svc._sessions.update(session_model)
+    return await svc.get_session(session_id, user_id=current_user.id)
+
+
 @router.post("/{session_id}/turns", response_model=SessionResponse)
 async def post_turn(
     session_id: str, body: PostTurnRequest, svc: SessionServiceDep, current_user: CurrentUserDep

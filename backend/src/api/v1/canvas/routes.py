@@ -216,3 +216,106 @@ async def list_element_versions(
         CanvasElementVersionResponse(version=v.version, storage_ref=v.storage_ref, created_at=v.created_at)
         for v in versions
     ]
+
+
+from pydantic import BaseModel
+
+AD_SPECS = {
+    "instagram_square": {"name": "Instagram Feed (1:1)", "width": 1080, "height": 1080, "aspect_ratio": "1:1", "safe_zone_pct": 0.05},
+    "instagram_story": {"name": "Instagram Story / Reels (9:16)", "width": 1080, "height": 1920, "aspect_ratio": "9:16", "safe_zone_pct": 0.15},
+    "meta_portrait": {"name": "Meta Feed Portrait (4:5)", "width": 1080, "height": 1350, "aspect_ratio": "4:5", "safe_zone_pct": 0.05},
+    "landscape_banner": {"name": "Google Display / Youtube (16:9)", "width": 1920, "height": 1080, "aspect_ratio": "16:9", "safe_zone_pct": 0.05},
+    "linkedin_post": {"name": "LinkedIn Post (1.91:1)", "width": 1200, "height": 628, "aspect_ratio": "1.91:1", "safe_zone_pct": 0.05},
+}
+
+
+@router.get("/ad-specs")
+async def list_ad_specs():
+    return AD_SPECS
+
+
+class MaskedEditRequest(BaseModel):
+    instruction: str
+    mask_storage_ref: str
+
+
+@router.post("/elements/{element_id}/masked-edit", response_model=CanvasElementResponse)
+async def masked_edit_element(
+    element_id: str,
+    body: MaskedEditRequest,
+    canvas: CanvasRepositoryDep,
+    versioning: VersioningServiceDep,
+    sessions: SessionRepositoryDep,
+):
+    element = await canvas.get_element(element_id)
+    if element is None:
+        raise NotFoundError("CanvasElement", element_id)
+        
+    src_loaded = load_asset(element.storage_ref)
+    mask_loaded = load_asset(body.mask_storage_ref)
+    if src_loaded is None or mask_loaded is None:
+        raise NotFoundError("Asset", element.storage_ref)
+        
+    from ....providers.image.replicate_provider import get_image_edit_provider
+    edit_provider = get_image_edit_provider()
+    
+    result = await edit_provider.edit(
+        image_bytes=src_loaded[0],
+        mime_type=src_loaded[1],
+        instruction=body.instruction,
+        mask_bytes=mask_loaded[0],
+        mask_mime_type=mask_loaded[1],
+    )
+    
+    new_storage_ref = save_asset(
+        result.image_bytes,
+        result.mime_type,
+        metadata={"masked_edit": True, "instruction": body.instruction, "edited_from": element.storage_ref},
+    )
+    
+    session = await sessions.get(element.session_id)
+    updated = await versioning.apply_or_stage(
+        element,
+        storage_ref=new_storage_ref,
+        metadata={**element.metadata_json, "masked_edit": True, "instruction": body.instruction},
+        action="masked_edit",
+        approval_mode=session.approval_mode if session else "auto",
+    )
+    return CanvasMapper.to_response(updated)
+
+
+@router.post("/elements/{element_id}/export-all-specs")
+async def export_all_ad_specs(
+    element_id: str,
+    canvas: CanvasRepositoryDep,
+):
+    element = await canvas.get_element(element_id)
+    if element is None:
+        raise NotFoundError("CanvasElement", element_id)
+        
+    loaded = load_asset(element.storage_ref)
+    if loaded is None:
+        raise NotFoundError("Asset", element.storage_ref)
+        
+    from ....services.tools.image_crop_resize import ImageCropResizeTool
+    crop_tool = ImageCropResizeTool()
+    
+    results = {}
+    for spec_id, spec in AD_SPECS.items():
+        res = await crop_tool.run(
+            {
+                "storage_ref": element.storage_ref,
+                "target_width": spec["width"],
+                "target_height": spec["height"],
+                "crop_mode": "cover",
+            }
+        )
+        if res.ok:
+            results[spec_id] = {
+                "spec_name": spec["name"],
+                "width": spec["width"],
+                "height": spec["height"],
+                "storage_ref": res.data["storage_ref"],
+            }
+            
+    return {"element_id": element_id, "exports": results}

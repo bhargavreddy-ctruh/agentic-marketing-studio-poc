@@ -24,6 +24,8 @@ class SessionModel(Base, TimestampMixin):
     brief: Mapped[dict] = mapped_column(JSON, default=dict)
     brand_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     product_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    style_ref_storage_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    style_seed: Mapped[int | None] = mapped_column(nullable=True)
     # "auto" (default, existing behavior — a Lead runs its whole pipeline through with no pauses)
     # or "approve" (Memory.md, Phase 4: real per-stage pipeline gates and per-edit staging — a
     # user's explicit ask for genuine approval checkpoints, not just after-the-fact fixes).
