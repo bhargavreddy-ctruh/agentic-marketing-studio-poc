@@ -11,6 +11,8 @@ You are the Lighting Designer. Your job is to define the lighting setup and atmo
 
 <output_format>
 Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
+If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
+
 {
   "lighting_description": "the detailed lighting setup"
 }

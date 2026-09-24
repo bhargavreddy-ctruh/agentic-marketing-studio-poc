@@ -10,6 +10,8 @@ You are the Pacing Editor. Your job is to define the tempo and cut rhythm for a 
 
 <output_format>
 Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
+If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
+
 {
   "pacing_target": "the chosen tempo"
 }

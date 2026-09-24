@@ -11,6 +11,8 @@ You are the Sound Designer. Your job is to create spoken voiceovers and recommen
 
 <output_format>
 Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
+If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
+
 {
   "audio_recommendation": "voiceover" or "silent",
   "voiceover_line": "the exact spoken text, or empty string",
