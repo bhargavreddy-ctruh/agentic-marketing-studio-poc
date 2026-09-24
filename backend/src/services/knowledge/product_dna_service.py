@@ -68,7 +68,7 @@ class ProductDnaService:
 
     @traceable(name="product_dna_service")
     async def onboard_product(
-        self, *, name: str, description: str, price: float | None, discount_percent: float | None
+        self, *, user_id: str, name: str, description: str, price: float | None, discount_percent: float | None
     ) -> ProductProfileModel:
         llm = get_llm_provider()
         context = (
@@ -100,12 +100,12 @@ class ProductDnaService:
         }
 
         product = ProductProfileModel(
-            id=uuid.uuid4().hex, name=name, attributes=attributes, indexed=False
+            id=uuid.uuid4().hex, user_id=user_id, name=name, attributes=attributes, indexed=False
         )
         product = await self._products.add(product)
 
         await get_knowledge_provider().index_document(
-            collection="product", doc_id=product.id, text=_build_index_text(name, attributes)
+            collection=f"product_{user_id}", doc_id=product.id, text=_build_index_text(name, attributes)
         )
         product.indexed = True
         return await self._products.add(product)
@@ -128,7 +128,8 @@ async def reindex_all_products(products: ProductRepository) -> None:
     for product in await products.list_all():
         if not product.indexed:
             continue
-        await knowledge.index_document(
-            collection="product", doc_id=product.id, text=_build_index_text(product.name, product.attributes)
-        )
+        if product.user_id:
+            await knowledge.index_document(
+                collection=f"product_{product.user_id}", doc_id=product.id, text=_build_index_text(product.name, product.attributes)
+            )
     log.info("product_reindex_complete")

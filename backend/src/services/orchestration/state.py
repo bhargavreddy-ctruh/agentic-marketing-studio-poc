@@ -6,6 +6,7 @@ from typing import Any, TypedDict
 
 class GraphState(TypedDict, total=False):
     session_id: str
+    user_id: str | None
     user_message: str
     brief: dict[str, Any]
     route: str | None  # "dynamic" | "full_image" | "full_video" | "direct_fix" | None

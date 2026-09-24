@@ -36,3 +36,13 @@ class SqliteCanvasRepository:
         await self._db.commit()
         await self._db.refresh(element)
         return element
+
+    async def update_compliance_status(self, element_id: str, status: str) -> None:
+        """Update just the compliance status of an element."""
+        from sqlalchemy import update
+        await self._db.execute(
+            update(CanvasElementModel)
+            .where(CanvasElementModel.id == element_id)
+            .values(compliance_status=status)
+        )
+        await self._db.commit()

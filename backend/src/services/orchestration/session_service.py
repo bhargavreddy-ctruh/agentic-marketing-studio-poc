@@ -434,6 +434,7 @@ class SessionService:
             if referenced_elements:
                 latest_element = referenced_elements[-1]
         brief_for_graph = dict(session.brief)
+        brief_for_graph["user_id"] = session.user_id
         # Real conversation history (2026-09-22, per an explicit user ask: "make sure the llm has
         # chat history context cache, so it can work in a session") — a real, live-found gap: this
         # app already persists every real turn verbatim (`ChatTurnModel`, `self._chat_turns`), but
@@ -519,7 +520,12 @@ class SessionService:
 
         graph = get_graph()
         result_state = await graph.ainvoke(
-            {"session_id": session.id, "user_message": user_message, "brief": brief_for_graph}
+            {
+                "session_id": session.id,
+                "user_id": session.user_id,
+                "user_message": user_message,
+                "brief": brief_for_graph,
+            }
         )
 
         # Only the fields ideation/orchestrator actually mutate belong in the persisted brief —
@@ -842,15 +848,14 @@ async def _run_compliance_background(element_id: str) -> None:
     already makes rare in practice)."""
     async with async_session_factory() as db:
         canvas = SqliteCanvasRepository(db)
+        if not settings.compliance_qa_enabled:
+            await canvas.update_compliance_status(element_id, "disabled")
+            return
+
         try:
             gate_result = await run_compliance_gate(canvas=canvas, element_id=element_id)
             status = "passed" if gate_result.get("overall_passed") else "failed"
         except Exception:  # noqa: BLE001 — deliberately broad: this must never crash a bg task silently stuck
-            status = "failed"
+            status = "error"
 
-        # Remediation (inside the gate) may have already bumped the element's storage_ref/version —
-        # re-fetch rather than trust a stale local copy before writing the final verdict.
-        element = await canvas.get_element(element_id)
-        if element is not None:
-            element.compliance_status = status
-            await canvas.update_element(element)
+        await canvas.update_compliance_status(element_id, status)

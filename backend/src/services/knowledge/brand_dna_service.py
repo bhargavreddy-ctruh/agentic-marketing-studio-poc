@@ -55,7 +55,7 @@ class BrandDnaService:
         # layer (who can onboard/list/read a BrandProfileModel row), but cross-user RAG retrieval
         # isolation is a separate, larger piece of work not done in this pass.
         await get_knowledge_provider().index_document(
-            collection="brand", doc_id=brand.id, text=_build_index_text(name, raw_facts, guardrails)
+            collection=f"brand_{user_id}", doc_id=brand.id, text=_build_index_text(name, raw_facts, guardrails)
         )
         brand.indexed = True
         return await self._brands.add(brand)
@@ -88,7 +88,8 @@ async def reindex_all_brands(brands: BrandRepository) -> None:
             continue
         raw_facts = brand.raw_profile.get("raw_facts", {})
         guardrails = brand.raw_profile.get("guardrails", {})
-        await knowledge.index_document(
-            collection="brand", doc_id=brand.id, text=_build_index_text(brand.name, raw_facts, guardrails)
-        )
+        if brand.user_id:
+            await knowledge.index_document(
+                collection=f"brand_{brand.user_id}", doc_id=brand.id, text=_build_index_text(brand.name, raw_facts, guardrails)
+            )
     log.info("brand_reindex_complete")

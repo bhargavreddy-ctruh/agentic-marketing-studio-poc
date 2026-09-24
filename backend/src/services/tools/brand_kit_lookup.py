@@ -22,10 +22,14 @@ class BrandKitLookupTool(Tool):
         "required": ["question"],
     }
 
-    async def run(self, args: dict) -> ToolResult:
+    async def run(self, args: dict, context: dict | None = None) -> ToolResult:
+        user_id = context.get("user_id") if context else None
+        if not user_id:
+            return ToolResult(ok=True, data={"facts": "", "configured": False})
+
         question = str(args.get("question") or "").strip()
         try:
-            answer = await get_knowledge_provider().query(collection="brand", question=question)
+            answer = await get_knowledge_provider().query(collection=f"brand_{user_id}", question=question)
         except ProviderUnavailable:
             return ToolResult(ok=True, data={"facts": "", "configured": False})
         return ToolResult(ok=True, data={"facts": answer, "configured": True})

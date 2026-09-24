@@ -123,9 +123,8 @@ async def run_specialist_agentic(
         "after a guardrail conflict was pointed out in the recent chat history, "
         "the user's instruction TAKES PRECEDENCE for this run. Do NOT fail again for the same conflict in that case, "
         "but follow the user's instruction, ignoring the conflicting guardrail. "
-        "To fail gracefully (ONLY when genuinely warranted), do NOT return your standard output format. Instead, return EXACTLY this JSON: "
-        '{"error": "Your clarifying question or explanation of why you cannot proceed here"}'
-        "\n</MASTER_DIRECTIVE>"
+        "To handle ambiguity, ask a clarifying question to the user (e.g., \"Could you specify the product or model you want?\") and wait for their response. Then retry the specialist with the new information. Do NOT return a JSON error or abort execution.\n"
+        "</MASTER_DIRECTIVE>"
     )
     llm = get_llm_provider()
     tool_schemas = [to_openai_tool_schema(get_tool(name)) for name in spec.allowed_tools]
@@ -207,7 +206,8 @@ async def run_specialist_agentic(
                         # specialist's own log.
                         async with trace(name=f"tool:{tool_name}", run_type="tool", inputs=args) as tool_run:
                             try:
-                                tool_result = await get_tool(tool_name).run(args)
+                                tool_context = {"user_id": brief.get("user_id")} if brief and brief.get("user_id") else None
+                                tool_result = await get_tool(tool_name).run(args, context=tool_context)
                                 record = ToolCallRecord(
                                     tool_name=tool_name, args=args, ok=tool_result.ok,
                                     data=tool_result.data, error=tool_result.error,

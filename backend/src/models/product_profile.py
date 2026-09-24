@@ -14,6 +14,7 @@ class ProductProfileModel(Base, TimestampMixin):
     __tablename__ = "product_profiles"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255))
     # mustShow / neverShow / claimsAllowed / claimsDisallowed / labelVisibility, price, discount —
     # the exact shape run_product_intelligence already produces (Rules.md section 6).
