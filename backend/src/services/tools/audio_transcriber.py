@@ -31,7 +31,8 @@ class AudioTranscriberTool(Tool):
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        storage_ref = str(args.get("storage_ref") or "").strip()
+        raw_ref = args.get("storage_ref") or args.get("reference_storage_ref") or args.get("audio_storage_ref") or args.get("video_storage_ref") or ""
+        storage_ref = str(raw_ref).strip()
         if not storage_ref:
             return ToolResult(ok=False, data={}, error="storage_ref is required")
 

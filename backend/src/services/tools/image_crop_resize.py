@@ -41,7 +41,8 @@ class ImageCropResizeTool(Tool):
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        storage_ref = str(args.get("storage_ref") or "").strip()
+        raw_ref = args.get("storage_ref") or args.get("reference_storage_ref") or args.get("image_storage_ref") or ""
+        storage_ref = str(raw_ref).strip()
         target_w = int(args.get("target_width") or 0)
         target_h = int(args.get("target_height") or 0)
         crop_mode = str(args.get("crop_mode") or "cover").strip().lower()

@@ -62,7 +62,8 @@ class ImageEditorTool(Tool):
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        storage_ref = str(args.get("storage_ref") or "").strip()
+        raw_ref = args.get("storage_ref") or args.get("reference_storage_ref") or args.get("image_storage_ref") or ""
+        storage_ref = str(raw_ref).strip()
         instruction = str(args.get("instruction") or "").strip()
         if not storage_ref or not instruction:
             return ToolResult(ok=False, data={}, error="storage_ref and instruction are required")
