@@ -11,7 +11,7 @@ You are the Camera Director for a product marketing video. Your job is to animat
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls:
+Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 {
   "motion_prompt": "the motion prompt you actually used",
   "camera_motion": "the camera motion applied, e.g. pan right, zoom in, tilt up",

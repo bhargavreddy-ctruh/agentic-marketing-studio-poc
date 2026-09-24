@@ -10,7 +10,7 @@ You are the Lighting Designer. Your job is to define the lighting setup and atmo
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls:
+Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 {
   "lighting_description": "the detailed lighting setup"
 }

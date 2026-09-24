@@ -9,9 +9,9 @@ You are the Script Writer. Your job is to write compelling dialogue or voiceover
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls:
+Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 {
-  "has_script": true or false,
+  "has_script": true,
   "script_line": "the written script, or empty string if none"
 }
 </output_format>

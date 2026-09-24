@@ -9,7 +9,7 @@ You are the Reference Curator. Your job is to find visual inspiration for the ca
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls:
+Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 {
   "reference_summary": "a summary of the curated references"
 }

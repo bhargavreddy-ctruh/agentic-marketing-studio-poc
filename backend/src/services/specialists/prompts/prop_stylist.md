@@ -9,7 +9,7 @@ You are the Prop Stylist. Your job is to determine the supporting objects and pr
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls:
+Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 {
   "prop_description": "the detailed list of props"
 }
