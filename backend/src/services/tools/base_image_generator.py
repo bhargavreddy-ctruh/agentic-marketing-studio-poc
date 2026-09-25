@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
-from ...providers.image.pollinations import get_image_gen_provider
+from ...providers.image.replicate_provider import get_image_gen_provider
 from .base import Tool, ToolResult
 from .registry import register_tool
 
@@ -84,7 +84,11 @@ class BaseImageGeneratorTool(Tool):
         if reference_storage_ref:
             loaded_ref = load_asset(reference_storage_ref)
             if loaded_ref is not None:
-                reference_image_bytes, reference_mime_type = loaded_ref
+                if loaded_ref[1] and loaded_ref[1].startswith("image/"):
+                    reference_image_bytes, reference_mime_type = loaded_ref
+                else:
+                    # Ignore non-image references (e.g. video) to prevent provider crashes
+                    pass
 
         # 2. Campaign style reference (explicit arg takes precedence over context session style lock)
         style_reference_bytes: bytes | None = None
@@ -96,10 +100,24 @@ class BaseImageGeneratorTool(Tool):
         if style_ref_storage:
             loaded_style = load_asset(style_ref_storage)
             if loaded_style is not None:
-                style_reference_bytes, style_reference_mime_type = loaded_style
+                if loaded_style[1] and loaded_style[1].startswith("image/"):
+                    style_reference_bytes, style_reference_mime_type = loaded_style
+                else:
+                    # Ignore non-image style references
+                    pass
 
         # 3. Seed fallback from context style_seed if not explicitly given
         seed = int(args["seed"]) if args.get("seed") is not None else ctx.get("style_seed")
+        
+        # 4. Inject visual description into prompt for text-to-image fallback (e.g. Pollinations)
+        if reference_storage_ref:
+            elements = ctx.get("referenced_elements_context") or []
+            for el in elements:
+                if el.get("storage_ref") == reference_storage_ref and el.get("description"):
+                    desc = el.get("description")
+                    if desc.lower() not in prompt.lower():
+                        prompt = f"{prompt}. Visually ground the generation in this reference: {desc}"
+                    break
 
         provider = get_image_gen_provider()
         try:

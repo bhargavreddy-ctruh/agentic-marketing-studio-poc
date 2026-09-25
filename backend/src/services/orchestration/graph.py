@@ -667,7 +667,8 @@ async def _run_multi_video_node(
                 scenes = await _run_batch(
                     list(range(n)), sequential=sequential,
                     run_one=lambda i: run_scene_lead(
-                        shot_description=f"{narratives[i].shots[0]}\n\nRevision feedback on the proposed scene: {user_message}"
+                        shot_description=f"{narratives[i].shots[0]}\n\nRevision feedback on the proposed scene: {user_message}",
+                        brief=brief
                     ),
                 )
                 emit("lead_completed", lead="scene_lead", revision=True)
@@ -677,7 +678,7 @@ async def _run_multi_video_node(
         else:
             emit("lead_started", lead="scene_lead")
             scenes = await _run_batch(
-                list(range(n)), sequential=sequential, run_one=lambda i: run_scene_lead(shot_description=narratives[i].shots[0])
+                list(range(n)), sequential=sequential, run_one=lambda i: run_scene_lead(shot_description=narratives[i].shots[0], brief=brief)
             )
             emit("lead_completed", lead="scene_lead")
             if approval_mode == "approve":
@@ -919,7 +920,8 @@ async def _run_single_video_node(
             else:
                 emit("lead_started", lead="scene_lead", revision=True)
                 scene = await run_scene_lead(
-                    shot_description=f"{narrative.shots[0]}\n\nRevision feedback on the proposed scene: {user_message}"
+                    shot_description=f"{narrative.shots[0]}\n\nRevision feedback on the proposed scene: {user_message}",
+                    brief=brief
                 )
                 emit("lead_completed", lead="scene_lead", revision=True)
                 return _stage_scene_for_approval(scene, revised=True)
@@ -928,7 +930,7 @@ async def _run_single_video_node(
             scene = ScenePlan.from_dict(brief["scene_plan"])
         else:
             emit("lead_started", lead="scene_lead")
-            scene = await run_scene_lead(shot_description=narrative.shots[0])
+            scene = await run_scene_lead(shot_description=narrative.shots[0], brief=brief)
             emit("lead_completed", lead="scene_lead")
             if approval_mode == "approve":
                 return _stage_scene_for_approval(scene, revised=False)

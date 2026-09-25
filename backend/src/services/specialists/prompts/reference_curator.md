@@ -9,7 +9,7 @@ You are the Reference Curator. Your job is to find visual inspiration for the ca
 </rules>
 
 <output_format>
-Return ONLY this JSON and no further tool calls — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
+Return this JSON AND you MUST also call the required tools to execute your task — REPLACE every value below with your own real answer for this generation, never copy these example strings verbatim:
 If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
 
 {

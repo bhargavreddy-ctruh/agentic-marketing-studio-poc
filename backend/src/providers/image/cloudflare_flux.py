@@ -127,7 +127,7 @@ class CloudflareFluxProvider(ImageGenProvider, ImageEditProvider):
         )
         return image_bytes, mime_type
 
-    async def generate(self, *, prompt: str, aspect_ratio: str = "1:1") -> ImageResult:
+    async def generate(self, *, prompt: str, aspect_ratio: str = "1:1", **kwargs) -> ImageResult:
         # `aspect_ratio` is accepted (to satisfy the shared ImageGenProvider Protocol) but not
         # forwarded — Cloudflare's docs for this model never confirmed a real width/height/
         # aspect_ratio request field, unlike the input-image constraints, which ARE documented.
@@ -138,7 +138,7 @@ class CloudflareFluxProvider(ImageGenProvider, ImageEditProvider):
         image_bytes, mime_type = await self._run(fields={"prompt": prompt}, files=None)
         return ImageResult(image_bytes=image_bytes, mime_type=mime_type, provider_name="cloudflare_flux")
 
-    async def edit(self, *, image_bytes: bytes, mime_type: str, instruction: str) -> ImageResult:
+    async def edit(self, *, image_bytes: bytes, mime_type: str, instruction: str, **kwargs) -> ImageResult:
         resized = _downscale_to_limit(image_bytes)
         files = {"input_image_0": ("input.png", resized, "image/png")}
         result_bytes, result_mime_type = await self._run(fields={"prompt": instruction}, files=files)

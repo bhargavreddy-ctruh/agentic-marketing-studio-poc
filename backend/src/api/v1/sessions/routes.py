@@ -65,16 +65,18 @@ async def update_dna(
     session = await svc.get_session(session_id, user_id=current_user.id)
     session_model = await svc._sessions.get(session_id)
     
-    session_model.brief["brand_dna"] = body.brand_dna or ""
-    session_model.brief["product_dna"] = body.product_dna or ""
+    new_brief = dict(session_model.brief)
+    new_brief["brand_dna"] = body.brand_dna or ""
+    new_brief["product_dna"] = body.product_dna or ""
     
     if body.campaignDetails is not None:
-        session_model.brief["campaignDetails"] = body.campaignDetails.model_dump()
+        new_brief["campaignDetails"] = body.campaignDetails.model_dump()
     if body.brandDetails is not None:
-        session_model.brief["brandDetails"] = body.brandDetails.model_dump()
+        new_brief["brandDetails"] = body.brandDetails.model_dump()
     if body.productDetails is not None:
-        session_model.brief["productDetails"] = body.productDetails.model_dump()
+        new_brief["productDetails"] = body.productDetails.model_dump()
 
+    session_model.brief = new_brief
     await svc._sessions.update(session_model)
     
     from ....services.knowledge.guardrail_service import GuardrailService

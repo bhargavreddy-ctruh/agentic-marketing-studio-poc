@@ -252,10 +252,23 @@ async def call_openai_compatible_chat(
     max_tokens: int,
     retries: int = 2,
     on_delta: Callable[[str], None] | None = None,
+    strip_images: bool = False,
 ) -> LLMResult:
     """Retry-with-backoff on ONE model against an OpenAI-compatible /chat/completions endpoint.
     Raises ProviderUnavailable if this model can't complete the call after its retry budget —
     the caller decides whether to fall back to another model or another provider entirely."""
+    
+    if strip_images:
+        safe_messages = []
+        for msg in messages:
+            content = msg.get("content")
+            if isinstance(content, list):
+                text_parts = [p.get("text", "") for p in content if p.get("type") == "text"]
+                safe_messages.append({"role": msg["role"], "content": "\n".join(text_parts)})
+            else:
+                safe_messages.append(msg)
+        messages = safe_messages
+
     body: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
     if tools:
         body["tools"] = tools

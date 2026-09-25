@@ -31,3 +31,8 @@ The `Session.brief` now captures the following structured fields to drive LLM sy
 ```
 
 These inputs are synchronized via `PUT /api/v1/sessions/{session_id}/dna` and are passed to the `GuardrailService` to enforce brand compliance and constraints dynamically across all specialists.
+
+
+## Rule Granularity (2026-09-25)
+- The LLM extraction process within `GuardrailService` now generates an array of distinct, atomic rules instead of a single, monolithic rule, ensuring that Brand colors, tone, and campaign goals are tracked independently by agents.
+

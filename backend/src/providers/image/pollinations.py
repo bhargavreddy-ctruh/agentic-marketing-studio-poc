@@ -39,7 +39,7 @@ class PollinationsImageProvider(ImageGenProvider):
     def __init__(self, base_url: str | None = None):
         self._base_url = (base_url or settings.pollinations_base_url).rstrip("/")
 
-    async def generate(self, *, prompt: str, aspect_ratio: str = "1:1") -> ImageResult:
+    async def generate(self, *, prompt: str, aspect_ratio: str = "1:1", **kwargs) -> ImageResult:
         width, height = _ASPECT_TO_SIZE.get(aspect_ratio, _ASPECT_TO_SIZE["1:1"])
         encoded = urllib.parse.quote(prompt, safe="")
         url = f"{self._base_url}/prompt/{encoded}?width={width}&height={height}&nologo=true"

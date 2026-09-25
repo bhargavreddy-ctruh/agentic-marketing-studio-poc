@@ -66,10 +66,24 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 request_input["style_reference"] = (
                     f"data:{style_reference_mime_type or 'image/png'};base64,{b64_style}"
                 )
-            output = await self._client.async_run(
-                "alibaba/qwen-image-3",
+            # Use explicit create-and-poll so we don't drop the connection or timeout early
+            # and cause the LLM to think it failed and retry.
+            model = await self._client.models.async_get("alibaba/qwen-image-3")
+            version = model.latest_version
+            
+            prediction = await self._client.predictions.async_create(
+                version=version,
                 input=request_input,
             )
+            
+            while prediction.status not in ["succeeded", "failed", "canceled"]:
+                await asyncio.sleep(2)
+                prediction = await self._client.predictions.async_get(prediction.id)
+                
+            if prediction.status != "succeeded":
+                raise ProviderUnavailable("replicate", f"Prediction ended with status: {prediction.status}")
+                
+            output = prediction.output
             
             # Extract the actual file object from the output
             file_obj = output[0] if isinstance(output, list) and len(output) > 0 else output
@@ -79,13 +93,13 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 # It's an IO-like object, read bytes directly
                 image_bytes = file_obj.read()
             elif hasattr(file_obj, "url"):
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
                     resp = await client.get(file_obj.url)
                     resp.raise_for_status()
                     image_bytes = resp.content
             else:
                 # Fallback to assuming it's a raw string URL
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
                     resp = await client.get(str(file_obj))
                     resp.raise_for_status()
                     image_bytes = resp.content
@@ -142,22 +156,34 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 b64_mask = base64.b64encode(mask_bytes).decode("utf-8")
                 request_input["mask"] = f"data:{mask_mime_type or 'image/png'};base64,{b64_mask}"
 
-            output = await self._client.async_run(
-                "alibaba/qwen-image-3",
+            model = await self._client.models.async_get("alibaba/qwen-image-3")
+            version = model.latest_version
+            
+            prediction = await self._client.predictions.async_create(
+                version=version,
                 input=request_input,
             )
+            
+            while prediction.status not in ["succeeded", "failed", "canceled"]:
+                await asyncio.sleep(2)
+                prediction = await self._client.predictions.async_get(prediction.id)
+                
+            if prediction.status != "succeeded":
+                raise ProviderUnavailable("replicate", f"Edit prediction ended with status: {prediction.status}")
+                
+            output = prediction.output
             
             file_obj = output[0] if isinstance(output, list) and len(output) > 0 else output
             
             if hasattr(file_obj, "read"):
                 out_bytes = file_obj.read()
             elif hasattr(file_obj, "url"):
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
                     resp = await client.get(file_obj.url)
                     resp.raise_for_status()
                     out_bytes = resp.content
             else:
-                async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+                async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
                     resp = await client.get(str(file_obj))
                     resp.raise_for_status()
                     out_bytes = resp.content

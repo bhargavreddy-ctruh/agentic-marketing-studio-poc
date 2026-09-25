@@ -4931,3 +4931,15 @@ Overhauled `ChatPanel.tsx` to match the target modern, sleek dark mode aesthetic
 - Addressed frontend lag caused by API rate limit backoff loops (e.g. Groq 429s).
 - **Zero-Retry per Key:** Updated `groq.py` to pass `retries=0` to the HTTP caller. 
 - **Break Artificial Sleeps:** Fixed `_openai_compatible.py` to completely skip `asyncio.sleep` delays if it is on the last allowed retry attempt (or if retries=0), immediately raising the error. This ensures the router fails-fast through exhausted keys and shifts instantly to the fallback model instead of hanging the application for 30+ seconds.
+
+
+## Video Generation Bypassing & Tool Fixes (2026-09-25)
+
+- **Reference Image Video Bypass:** Updated `scene_lead.py` to check for `use_existing_image_as_scene` and pass the reference image directly to the Camera Director (`base_video_generator.py`). This skips the useless `base_image_generator` intermediate step when a user specifically wants to animate an existing asset.
+- **Explicit API Polling & Resiliency:** Hardened `ReplicateImageProvider` with explicit polling loops, rather than relying on underlying SDK abstractions that were masking API timeouts. Increased `httpx` timeouts to 300s to support heavy generations (Luma video, Qwen images).
+
+## DNA & Guardrail Persistence Fixes (2026-09-25)
+
+- **SQLAlchemy JSON Mutation Bug:** Fixed a critical bug in `api/v1/sessions/routes.py` (`update_dna`) where `session_model.brief` was modified in-place. SQLAlchemy fails to detect in-place dict mutations, causing "Save & Synthesize" to silently fail. The fix involves explicitly replacing the dictionary (`session_model.brief = new_brief`) so changes are flushed to SQLite.
+- **LLM Guardrail Extraction Fix:** Upgraded `GuardrailService.add_rule_from_user_context`. Previously, the LLM prompt instructed the model to output a "single, robust instruction (1-3 sentences)", resulting in all Brand DNA (colors, tone, values, tagline) being squashed into one massive, unreadable rule. The prompt now requires the LLM to output a list of distinct, atomic rules, restoring proper guardrail granularity in the UI.
+

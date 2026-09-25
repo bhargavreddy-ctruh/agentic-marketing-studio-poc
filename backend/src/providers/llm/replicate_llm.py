@@ -52,7 +52,18 @@ class ReplicateLLMProvider(LLMProvider):
         for m in messages:
             role = m.get("role", "user").upper()
             content = m.get("content", "")
-            prompt += f"{role}:\n{content}\n\n"
+            
+            if isinstance(content, list):
+                # Extract only text parts, ignore base64 images to prevent token limit errors
+                text_parts = []
+                for part in content:
+                    if part.get("type") == "text":
+                        text_parts.append(part.get("text", ""))
+                content_str = "\n".join(text_parts)
+            else:
+                content_str = str(content)
+                
+            prompt += f"{role}:\n{content_str}\n\n"
 
         if tools:
             # Replicate's google/gemini-2.5-flash doesn't support native tool calling yet.

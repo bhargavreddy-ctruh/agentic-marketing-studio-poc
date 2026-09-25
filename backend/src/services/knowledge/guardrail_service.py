@@ -143,29 +143,29 @@ class GuardrailService:
         import uuid
         
         prompt = f"""You are an expert marketing guardrails engineer.
-The user wants to add a new custom guardrail, but they only provided a short or vague instruction.
-Your job is to rewrite this into a strict, clear, and robust guardrail rule.
-
-Original request: "{raw_text}"
+The user wants to add custom guardrails based on this input:
+"{raw_text}"
 Scope: "{scope}"
 
-Write a single, robust instruction (1-3 sentences) that strictly dictates how the AI should behave.
+Break down this input into one or more strict, clear, and robust guardrail rules (1-2 sentences each).
 Be specific, unambiguous, and use imperative language (e.g., "NEVER use...", "ALWAYS ensure...").
 
-Return ONLY a JSON object with one key "rule" containing your rewritten text.
+Return ONLY a JSON object with one key "rules" containing a list of strings, each being a rewritten rule.
 """
         try:
             result = await get_llm_provider().complete(
                 tier=ModelTier.TIER_1,
                 system=prompt,
                 messages=[],
-                max_tokens=300
+                max_tokens=500
             )
             parsed = extract_json(result.text)
-            enhanced_text = parsed.get("rule", raw_text)
+            enhanced_texts = parsed.get("rules", [raw_text])
+            if not isinstance(enhanced_texts, list):
+                enhanced_texts = [raw_text]
         except Exception as e:
             log.warning("enhance_rule_failed", extra={"_extra_error": str(e)})
-            enhanced_text = raw_text
+            enhanced_texts = [raw_text]
 
         session = await self._sessions.get(session_id)
         if not session:
@@ -175,13 +175,14 @@ Return ONLY a JSON object with one key "rule" containing your rewritten text.
         if not guardrail_set:
             guardrail_set = GuardrailSet()
             
-        new_rule = GuardrailRule(
-            id=f"rule_{uuid.uuid4().hex[:8]}",
-            source=source,
-            rule=enhanced_text,
-            scope=scope
-        )
-        guardrail_set.rules.append(new_rule)
+        for text in enhanced_texts:
+            new_rule = GuardrailRule(
+                id=f"rule_{uuid.uuid4().hex[:8]}",
+                source=source,
+                rule=text,
+                scope=scope
+            )
+            guardrail_set.rules.append(new_rule)
         
         session.brief = {**session.brief, "guardrails": guardrail_set.model_dump()}
         await self._sessions.update(session)

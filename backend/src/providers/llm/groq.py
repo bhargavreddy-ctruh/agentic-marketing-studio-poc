@@ -76,6 +76,7 @@ class GroqProvider(LLMProvider):
                         max_tokens=max_tokens,
                         retries=0,  # fail fast per user request to shift to fallback rather than retrying multiple times
                         on_delta=on_delta,
+                        strip_images=True,
                     )
                 except ProviderUnavailable as exc:
                     last_error = exc

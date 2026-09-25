@@ -222,6 +222,7 @@ async def run_specialist_agentic(
                                                 ),
                                                 None
                                             ),
+                                            "referenced_elements_context": brief.get("referenced_elements_context"),
                                             "style_ref_storage_ref": brief.get("style_ref_storage_ref"),
                                             "style_seed": brief.get("style_seed"),
                                         }.items() if v is not None

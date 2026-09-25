@@ -73,6 +73,9 @@ class ImageEditorTool(Tool):
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         image_bytes, mime_type = loaded
 
+        if not mime_type.startswith("image/"):
+            return ToolResult(ok=False, data={}, error=f"Cannot use image_editor on a non-image asset (mime_type: {mime_type}). Use video or audio tools instead.")
+
         # An explicit `aspect_ratio` means the caller wants a DIFFERENT shape than the source
         # image, so `match_input_image` must be false for that request to actually take effect —
         # see the precedence note on `ReplicateImageProvider.edit`.

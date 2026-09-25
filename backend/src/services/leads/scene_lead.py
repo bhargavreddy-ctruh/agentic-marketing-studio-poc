@@ -23,7 +23,7 @@ SCENE_LEAD = LeadSpec(
 )
 
 
-async def run_scene_lead(*, shot_description: str) -> ScenePlan:
+async def run_scene_lead(*, shot_description: str, brief: dict | None = None) -> ScenePlan:
     # Real bug audit (2026-09-22): Environment Designer has the same "generate or nothing valid"
     # requirement as Illustrator (`visual_design_lead.py`), with none of Illustrator's retry safety
     # net, despite that gap being empirically confirmed at ~1-in-3 on weaker models for the exact
@@ -31,20 +31,40 @@ async def run_scene_lead(*, shot_description: str) -> ScenePlan:
     environment = await run_specialist_with_review(
         "environment_designer",
         context=f"Shot to produce:\n{shot_description}",
+        brief=brief,
         needs_retry=lambda r: not (
-            r.latest_call("base_image_generator") and r.latest_call("base_image_generator").data.get("storage_ref")
+            r.get("use_existing_image_as_scene") or
+            (r.latest_call("base_image_generator") and r.latest_call("base_image_generator").data.get("storage_ref"))
         ),
         reminder=(
-            "REMINDER: you never actually called base_image_generator. You MUST call it now, "
-            "with your setting/background prompt, before responding with final JSON."
+            "REMINDER: you neither set 'use_existing_image_as_scene: true' nor called base_image_generator. "
+            "You MUST do one or the other before responding with final JSON."
         ),
     )
-    image_result = environment.latest_result("base_image_generator")
-    if not image_result or not image_result.get("storage_ref"):
-        raise SpecialistFailed(
-            "environment_designer", "did not produce an image via base_image_generator"
-        )
-    storage_ref = image_result["storage_ref"]
+    
+    if environment.get("use_existing_image_as_scene"):
+        reference_storage_ref = None
+        if brief:
+            reference_storage_ref = next(
+                (
+                    el["storage_ref"] for el in brief.get("referenced_elements_context", [])
+                    if el.get("element_type") == "image" and el.get("storage_ref")
+                ),
+                None
+            )
+        if not reference_storage_ref:
+            raise SpecialistFailed(
+                "environment_designer", "chose to use existing image, but no image reference was found in brief"
+            )
+        storage_ref = reference_storage_ref
+    else:
+        image_result = environment.latest_result("base_image_generator")
+        if not image_result or not image_result.get("storage_ref"):
+            raise SpecialistFailed(
+                "environment_designer", "did not produce an image via base_image_generator"
+            )
+        storage_ref = image_result["storage_ref"]
+        
     environment_description = environment.get("environment_description", "")
 
     props = await run_specialist_agentic(
@@ -53,6 +73,7 @@ async def run_scene_lead(*, shot_description: str) -> ScenePlan:
             f"Shot to produce:\n{shot_description}\n\nEnvironment:\n{environment_description}\n\n"
             f"Current image storage_ref: {storage_ref}"
         ),
+        brief=brief,
     )
     prop_edit = props.latest_result("image_editor")
     if prop_edit and prop_edit.get("storage_ref"):
@@ -66,7 +87,11 @@ async def run_scene_lead(*, shot_description: str) -> ScenePlan:
     if prop_description:
         lighting_context_parts.append(f"Props:\n{prop_description}")
     lighting_context_parts.append(f"Current image storage_ref: {storage_ref}")
-    lighting = await run_specialist_agentic("lighting_designer", context="\n\n".join(lighting_context_parts))
+    lighting = await run_specialist_agentic(
+        "lighting_designer", 
+        context="\n\n".join(lighting_context_parts),
+        brief=brief,
+    )
     lighting_edit = lighting.latest_result("image_editor")
     if lighting_edit and lighting_edit.get("storage_ref"):
         storage_ref = lighting_edit["storage_ref"]

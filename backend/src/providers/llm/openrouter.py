@@ -79,6 +79,7 @@ class OpenRouterProvider(LLMProvider):
                     tools=tools,
                     max_tokens=max_tokens,
                     on_delta=on_delta,
+                    strip_images=True,
                 )
             except ProviderUnavailable as exc:
                 last_error = exc

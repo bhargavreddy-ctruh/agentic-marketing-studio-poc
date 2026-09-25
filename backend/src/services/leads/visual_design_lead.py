@@ -127,17 +127,34 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
             exc.partial_storage_ref = image_call.data["storage_ref"]
         raise
 
-    image_call = illustration.latest_call("base_image_generator", "image_editor")
-    if not image_call or not image_call.data.get("storage_ref"):
+    all_image_calls = [
+        c for c in illustration.tool_calls 
+        if c.tool_name in ("base_image_generator", "image_editor") and c.ok and c.data.get("storage_ref")
+    ]
+    
+    if not all_image_calls:
         raise SpecialistFailed(
             "illustrator", "did not produce an image via base_image_generator (after one review retry)"
         )
-    storage_ref = image_call.data["storage_ref"]
+        
+    primary_call = all_image_calls[-1]
+    storage_ref = primary_call.data["storage_ref"]
     image_prompt = illustration.get("image_prompt", "")
+    
+    # Add older generated options (if any) to extra elements so the user sees everything produced
+    extra_images = []
+    for call in all_image_calls[:-1]:
+        extra_images.append({
+            "storage_ref": call.data["storage_ref"],
+            "element_type": "image",
+            "produced_by_specialist": "illustrator",
+            "metadata": {"tool_used": call.tool_name, "is_alternate_option": True},
+        })
+
     # The real aspect_ratio actually sent to base_image_generator specifically (image_editor
     # doesn't change dimensions, so it never carries this arg) — what Format/Technical QA's
     # compliance check verifies the output against, not the LLM's own restated JSON field.
-    generate_call = illustration.latest_call("base_image_generator")
+    generate_call = next((c for c in reversed(all_image_calls) if c.tool_name == "base_image_generator"), None)
     aspect_ratio = generate_call.args.get("aspect_ratio", "1:1") if generate_call else "1:1"
 
     # Real, live-found bug (2026-09-24, per an explicit user report: "most of the generations are
@@ -208,7 +225,7 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
         storage_ref=storage_ref,
         produced_by_specialist="illustrator",
         element_type="image",
-        extra_elements=[creative_brief_extra],
+        extra_elements=[creative_brief_extra] + extra_images,
         metadata={
             "aesthetic_direction": aesthetic_direction,
             "palette_direction": palette.get("palette_direction", ""),
