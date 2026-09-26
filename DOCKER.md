@@ -17,21 +17,22 @@ REPLICATE_API_TOKEN=...
 Do NOT set `LOCAL_LLM_BASE_URL`, `FRONTEND_ORIGINS`, or `DATABASE_URL` — `docker-compose.yml` sets
 those for you (they need container-network values, not your host machine's).
 
-### 2. Build and start
+### 2. (Optional) Set compose-level URLs and the Ollama model
+```bash
+cp .env.example .env
+```
+Defaults are fine for a same-machine run (`localhost`). Only edit `OLLAMA_MODEL` if you're using
+something other than `llama3.1:8b` — it must match `backend/.env`'s own
+`LOCAL_LLM_MODEL_TIER_1`, or TIER_1 local-preferring specialists will silently fall through to
+Groq instead of using your local model.
+
+### 3. Build and start
 ```bash
 docker compose up --build -d
 ```
-First build: 5–10 min. After that: `docker compose up -d` (seconds).
-
-### 3. Pull the Ollama model (once only)
-```bash
-docker compose exec ollama ollama pull llama3.1:8b
-```
-Confirmed via your real `backend/.env`'s own `LOCAL_LLM_MODEL_TIER_1` value — that overrides
-`core/config.py`'s own `qwen2.5:7b` default, so this is the actual model to pull, not the code's
-default. If you ever change `LOCAL_LLM_MODEL_TIER_1` in `.env`, pull the matching model here too,
-or TIER_1 local-preferring specialists will silently fall through to Groq instead of using your
-local model.
+First build: 5–10 min — this also pre-downloads the embedding/whisper/Laya models into the image
+and, on first start only, the Ollama model (both fully automatic now, no manual pull step). After
+that: `docker compose up -d` (seconds).
 
 ### 4. Open
 http://localhost:3000

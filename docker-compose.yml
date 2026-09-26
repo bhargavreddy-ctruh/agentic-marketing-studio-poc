@@ -10,6 +10,22 @@ services:
     networks:
       - app-network
     restart: unless-stopped
+    # Real, live-found gap (2026-09-26, explicit user ask: hand this to devops, avoid manual
+    # steps) — this used to require a manual `docker compose exec ollama ollama pull <model>`
+    # after every fresh deploy; a devops team running this cold would have zero models loaded
+    # and no obvious indication why local-preferring specialists silently fall back to Groq.
+    # Auto-pulls `${OLLAMA_MODEL}` on every start instead: `ollama serve` runs in the background,
+    # the script waits for its API to answer, then pulls — a no-op (fast, no re-download) if the
+    # model is already present in the `ollama_data` volume from a prior run. MUST match
+    # `backend/.env`'s own `LOCAL_LLM_MODEL_TIER_1` — nothing keeps these two in sync
+    # automatically, a disclosed limitation, not silently assumed.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        /bin/ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "${OLLAMA_MODEL:-llama3.1:8b}"
+        wait
 
   backend:
     build:
@@ -21,29 +37,27 @@ services:
     volumes:
       - ./backend/poc.db:/app/poc.db
       - ./backend/var:/app/var
-      # Real, live-found fix (2026-09-26): the container has no cached HF model weights, and
-      # HuggingFace's newer XET download backend hung indefinitely inside the container (0% CPU,
-      # no progress) trying to fetch sentence-transformers/all-MiniLM-L6-v2 — reusing the host's
-      # already-downloaded cache avoids that network path entirely, matching the same
-      # bind-mount-real-data pattern the DB/assets mounts above already use.
-      - ~/.cache/huggingface:/root/.cache/huggingface
+      # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
+      # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
+      # any other machine, silently reintroducing the exact hang this was meant to fix. A named
+      # volume still gets the caching benefit (fast on every restart AFTER the first) on whatever
+      # machine this actually runs on, with zero dependency on host state.
+      - hf_cache:/root/.cache/huggingface
     env_file:
       - ./backend/.env
     environment:
       LOCAL_LLM_BASE_URL: "http://ollama:11434/v1"
-      # Real, live-found need (2026-09-26, explicit user ask: access from another device on the
-      # LAN) — the browser's real Origin header when loaded via the LAN IP is
-      # "http://192.168.1.18:3000", not "http://localhost:3000"; CORS rejects anything not in this
-      # list, so both need to be present (comma-split by `settings.frontend_origins`, confirmed in
-      # `core/config.py`). This LAN IP is this Mac's own address (`ipconfig getifaddr en0`) — update
-      # it here if the Mac's IP changes (e.g. a different Wi-Fi network).
-      # Cloudflare quick-tunnel public URL (2026-09-26, explicit user ask: global access) — added
-      # defensively; the Caddy reverse proxy in front of the tunnel makes the frontend and
-      # "/api/*" calls same-origin from the browser's perspective, so CORS mostly doesn't apply on
-      # THIS path, but this covers any request that isn't perfectly same-origin. A quick tunnel's
-      # URL is random per run — update this (and the frontend build arg below) if the tunnel is
-      # restarted and gets a new one.
-      FRONTEND_ORIGINS: "http://localhost:3000,http://192.168.1.18:3000,https://situations-looked-dependence-cosmetics.trycloudflare.com"
+      # Real, live-found root cause (2026-09-26) of the sentence-transformers download hang (0%
+      # CPU, no progress): HuggingFace's newer XET transfer backend never completed inside a
+      # container network, regardless of caching. This is the actual, portable fix — confirmed
+      # against `huggingface_hub`'s own `constants.py` (`HF_HUB_DISABLE_XET`) — forces the older,
+      # reliable plain-HTTP download path everywhere, not just here.
+      HF_HUB_DISABLE_XET: "1"
+      # Real, live-found need (2026-09-26) — devops sets this to wherever the FRONTEND is actually
+      # reachable from a real browser for THEIR deployment (their own domain/IP, not this Mac's
+      # LAN IP or a since-expired Cloudflare quick-tunnel URL). See `.env.example` at the repo
+      # root. Defaults to localhost:3000 if unset, for a same-machine dev run.
+      FRONTEND_ORIGINS: "${PUBLIC_FRONTEND_URL:-http://localhost:3000}"
       DATABASE_URL: "sqlite+aiosqlite:////app/poc.db"
     depends_on:
       - ollama
@@ -62,14 +76,13 @@ services:
       dockerfile: Dockerfile
       args:
         # Baked into the client JS bundle at build time (NEXT_PUBLIC_* vars run in the BROWSER,
-        # not in this container). Set to the public Cloudflare quick-tunnel URL (2026-09-26,
-        # explicit user ask: global access) rather than the LAN IP, since a remote device can't
-        # reach a private 192.168.x.x address at all. The tunnel's Caddy front-end
-        # (`/tmp/caddy_tunnel/Caddyfile`, host-level, not in this compose file) proxies
-        # "/api/*" on this SAME origin to the backend — no separate backend URL/CORS hop needed.
-        # A quick tunnel's URL is random per run — this must be rebuilt with the new URL baked in
-        # if the tunnel (`cloudflared`) is ever restarted.
-        NEXT_PUBLIC_API_BASE_URL: "https://situations-looked-dependence-cosmetics.trycloudflare.com"
+        # not in this container) — genuinely can't be an ordinary runtime env var for that reason.
+        # Devops sets `PUBLIC_BACKEND_URL` in `.env` to wherever THEIR backend is actually
+        # reachable from a browser (their own domain, or same-origin via their own reverse proxy).
+        # Defaults to localhost:8000 for a same-machine dev run. NOTE: because this is baked in at
+        # BUILD time, changing it later requires `docker compose build frontend` again — it is
+        # not picked up by just restarting the container.
+        NEXT_PUBLIC_API_BASE_URL: "${PUBLIC_BACKEND_URL:-http://localhost:8000}"
     container_name: ams-frontend
     ports:
       - "3000:3000"
@@ -85,3 +98,4 @@ networks:
 
 volumes:
   ollama_data:
+  hf_cache:

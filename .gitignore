@@ -5,6 +5,8 @@
 !/.gitignore
 !/docker-compose.yml
 !/DOCKER.md
+!/.env.example
+!/.github
 
 # --- Backend excludes ---
 backend/venv/
