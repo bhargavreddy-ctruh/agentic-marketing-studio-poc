@@ -78,11 +78,18 @@ services:
         # Baked into the client JS bundle at build time (NEXT_PUBLIC_* vars run in the BROWSER,
         # not in this container) — genuinely can't be an ordinary runtime env var for that reason.
         # Devops sets `PUBLIC_BACKEND_URL` in `.env` to wherever THEIR backend is actually
-        # reachable from a browser (their own domain, or same-origin via their own reverse proxy).
-        # Defaults to localhost:8000 for a same-machine dev run. NOTE: because this is baked in at
-        # BUILD time, changing it later requires `docker compose build frontend` again — it is
-        # not picked up by just restarting the container.
-        NEXT_PUBLIC_API_BASE_URL: "${PUBLIC_BACKEND_URL:-http://localhost:8000}"
+        # reachable from a browser. Defaults to localhost:8000 for a plain same-machine run with
+        # no reverse proxy in front. Real, live-found regression (2026-09-26): set this to an
+        # EMPTY string instead when frontend+backend sit behind a shared reverse proxy (e.g. this
+        # repo's Caddy tunnel setup, which proxies both on one origin) — an empty value makes the
+        # frontend call relative paths ("/api/v1/...") that resolve to whatever host actually
+        # served the page, so it keeps working no matter what the public URL is (a Cloudflare
+        # quick tunnel's URL changes on every restart; hardcoding it here breaks on the next
+        # restart). Uses `-` not `:-` so an explicitly-empty `.env` value is honored as empty,
+        # not silently replaced by the localhost default. NOTE: because this is baked in at BUILD
+        # time, changing it requires `docker compose build frontend` again — not picked up by
+        # just restarting the container.
+        NEXT_PUBLIC_API_BASE_URL: "${PUBLIC_BACKEND_URL-http://localhost:8000}"
     container_name: ams-frontend
     ports:
       - "3000:3000"
