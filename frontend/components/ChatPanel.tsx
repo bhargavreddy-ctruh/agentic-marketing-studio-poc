@@ -19,6 +19,7 @@ import { assetUrl } from "@/lib/http";
 import { ReferencedElement } from "@/components/CanvasView";
 import { LiveEvent, describeEvent, openEventStream } from "@/lib/events";
 import { CanvasElement, getCanvasState } from "@/lib/canvas";
+import { getProduct } from "@/lib/product";
 
 /** `video_stage` values a session's brief can carry while paused at a real pipeline gate
  * (`graph.py`'s `_motion_lead_node`) — used only to pick which proposal detail to render; the
@@ -169,6 +170,13 @@ function ChatPanel(
   const [input, setInput] = useState("");
   const [approvalMode, setApprovalMode] = useState<"auto" | "approve">("auto");
   const [changingMode, setChangingMode] = useState(false);
+  // Campaign Grouping (2026-09-25, CAMPAIGN_GROUPING_TASKS.md) — the session's real campaign
+  // registry (`session.brief.campaigns`, loaded alongside `approval_mode` in `loadHistory` below),
+  // and the user's pick for where THIS turn's referenced-based generation should land.
+  // `"__new__"` is a local sentinel for "+ Start New Campaign", never sent to the backend as-is.
+  const [campaigns, setCampaigns] = useState<{ id: string; name: string }[]>([]);
+  const [targetCampaignChoice, setTargetCampaignChoice] = useState<string>("");
+  const [newCampaignName, setNewCampaignName] = useState("");
   const [loading, setLoading] = useState(false);
   const [narration, setNarration] = useState<string[]>([]);
   // The real raw model text streaming live DURING the current turn (2026-09-22, per an explicit
@@ -273,7 +281,12 @@ function ChatPanel(
   function isContinuationOfPrompt(): boolean {
     if (messages.length === 0) return false;
     const last = messages[messages.length - 1];
-    return last.options !== undefined || last.allowFreeText !== undefined;
+    // Real, live-found gap (2026-09-25): a failed turn (`role: "error"`, `describeResponse`) has
+    // no `options`/`allowFreeText` attached, so "Try again" after an error was never treated as a
+    // continuation — the reference chip was already cleared on the failed send, so the retry sent
+    // an empty referencedElementIds and the agent generated against the wrong (or no) element. An
+    // error is still the same unresolved request, same as an open ideation prompt.
+    return last.role === "error" || last.options !== undefined || last.allowFreeText !== undefined;
   }
 
   function stripOptionsFromLastMessage() {
@@ -290,6 +303,23 @@ function ChatPanel(
   function appendError(err: unknown) {
     const text = err instanceof ApiError ? `${err.message} (HTTP ${err.status})` : "Network error — is the backend running?";
     setMessages((m) => [...m, { id: newId(), role: "error", text }]);
+  }
+
+  /** Campaign Grouping (2026-09-25) — resolves the current Target-campaign dropdown selection
+   * into what `postTurn` actually sends, then resets it (same "clear once sent" treatment as
+   * the reference chips it's shown alongside — a stale campaign pick must never silently apply
+   * to a later, unrelated turn). Only meaningful while referencing something; the backend already
+   * defaults to "inherit the parent's campaign" when neither field is sent. */
+  function resolveAndClearTargetCampaign(): { targetCampaignId?: string; targetCampaignName?: string } {
+    const choice = targetCampaignChoice;
+    setTargetCampaignChoice("");
+    setNewCampaignName("");
+    if (!choice) return {};
+    if (choice === "__new__") {
+      const name = newCampaignName.trim();
+      return name ? { targetCampaignName: name } : {};
+    }
+    return { targetCampaignId: choice };
   }
 
   async function handleSend(freeTextOverride?: string) {
@@ -326,7 +356,7 @@ function ChatPanel(
       onClearReference?.();
 
       const { result: res, thinking, seconds } = await withNarration(sid, () =>
-        postTurn(sid, { freeText: text, referencedElementIds: idsToSend }),
+        postTurn(sid, { freeText: text, referencedElementIds: idsToSend, ...resolveAndClearTargetCampaign() }),
       );
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();
@@ -362,7 +392,7 @@ function ChatPanel(
       onClearReference?.();
 
       const { result: res, thinking, seconds } = await withNarration(sessionId, () =>
-        postTurn(sessionId, { pickedOptionId: option.id, referencedElementIds: idsToSend }),
+        postTurn(sessionId, { pickedOptionId: option.id, referencedElementIds: idsToSend, ...resolveAndClearTargetCampaign() }),
       );
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();
@@ -388,6 +418,10 @@ function ChatPanel(
       
       if (session.approval_mode === "auto" || session.approval_mode === "approve") {
         setApprovalMode(session.approval_mode);
+      }
+      const rawCampaigns = session.brief?.campaigns;
+      if (Array.isArray(rawCampaigns)) {
+        setCampaigns(rawCampaigns.filter((c): c is { id: string; name: string } => Boolean(c?.id && c?.name)));
       }
       const restored: ChatMessage[] = turns.flatMap((turn: ChatTurn) => [
         { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
@@ -857,6 +891,32 @@ function ChatPanel(
                 </button>
               </div>
             ))}
+          </div>
+          {/* Campaign Grouping (2026-09-25, CAMPAIGN_GROUPING_TASKS.md) — defaults to inheriting
+           * the referenced element's own campaign (no explicit pick needed for the common case);
+           * only shown while referencing something, since it has no meaning otherwise. */}
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-surface-500">Target:</span>
+            <select
+              className="rounded border border-surface-700/50 bg-surface-900/60 px-1.5 py-0.5 text-[11px] text-surface-200"
+              value={targetCampaignChoice}
+              onChange={(e) => setTargetCampaignChoice(e.target.value)}
+            >
+              <option value="">Keep in current campaign</option>
+              {campaigns.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+              <option value="__new__">+ Start New Campaign</option>
+            </select>
+            {targetCampaignChoice === "__new__" && (
+              <input
+                type="text"
+                className="flex-1 rounded border border-surface-700/50 bg-surface-900/60 px-2 py-0.5 text-[11px] text-white placeholder-surface-500 focus:outline-none"
+                placeholder="New campaign name"
+                value={newCampaignName}
+                onChange={(e) => setNewCampaignName(e.target.value)}
+              />
+            )}
           </div>
         </div>
       )}

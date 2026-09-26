@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from llama_index.core import Document
 from ...core.guardrails import GuardrailRule, GuardrailSet, derive_guardrails, coerce_set, resolve
 from ...models.session import SessionModel
 from ...repositories.base import SessionRepository
@@ -22,53 +21,110 @@ class GuardrailService:
         self._sessions = sessions
 
     @staticmethod
-    async def _load_brand_and_product_json(session: SessionModel) -> tuple[dict, dict]:
-        """The one real place `session.brand_profile_id`/`product_profile_id` actually get
-        resolved into the JSON shapes `derive_guardrails` expects — shared by
-        `get_or_derive_for_session` and `link_profiles` so there's exactly one real fetch path."""
-        brand_json: dict = {}
-        product_json: dict = {}
-        async with async_session_factory() as db:
-            if session.brand_profile_id:
-                brand_repo = SqliteBrandRepository(db)
-                brand = await brand_repo.get(session.brand_profile_id)
-                if brand:
-                    brand_json = brand.raw_profile
+    async def _load_brand_and_products_json(session: SessionModel) -> tuple[dict, list[dict]]:
+        """The one real place brand/product profile data is resolved into the JSON shapes
+        `derive_guardrails` expects.
 
-            if session.product_profile_id:
-                product_repo = SqliteProductRepository(db)
-                product = await product_repo.get(session.product_profile_id)
+        Brand resolution (2026-09-25 fix): if `session.brand_profile_id` is explicitly set, use
+        that. Otherwise fall back to the FIRST brand the session's user has onboarded — the common
+        case for users who only have one brand (e.g. Bewakoof) and never explicitly linked it. Brand
+        DNA is the same across all of a user's sessions unless they explicitly change it — there is
+        deliberately no "many brands per session" concept, unlike products below.
+
+        Product resolution (2026-09-25, real requirement: "there might be many products in one
+        session" — a session's chat can describe several distinct products over its lifetime, each
+        getting its own real, evolving Product DNA row, not just the single most-recent one):
+        `session.brief["product_profile_ids"]` is the real list of every product this session has
+        ever been linked to (appended to by `SessionService`'s chat-driven upsert and by
+        `link_profiles` below). Falls back to the single `session.product_profile_id` column (older
+        sessions linked before this list existed), and finally to the user's most-recently-onboarded
+        product as a bootstrap for a session that has never mentioned or linked a product at all."""
+        brand_json: dict = {}
+        products_json: list[dict] = []
+        async with async_session_factory() as db:
+            brand_repo = SqliteBrandRepository(db)
+            product_repo = SqliteProductRepository(db)
+
+            # Brand: explicit link wins, else first user brand
+            brand = None
+            if session.brand_profile_id:
+                brand = await brand_repo.get(session.brand_profile_id)
+            elif session.user_id:
+                user_brands = await brand_repo.list_for_user(session.user_id)
+                if user_brands:
+                    brand = user_brands[0]
+            if brand:
+                brand_json = brand.raw_profile
+
+            # Products: every id this session has ever been linked to, else the legacy single
+            # column, else a one-product bootstrap from the user's own most-recently-onboarded one.
+            product_ids = list(session.brief.get("product_profile_ids") or [])
+            if not product_ids and session.product_profile_id:
+                product_ids = [session.product_profile_id]
+
+            products: list = []
+            for pid in product_ids:
+                product = await product_repo.get(pid)
                 if product:
-                    # Real, live-found bug (2026-09-24): `product.attributes` alone never has the
-                    # product's own `name` — that's a sibling field on `ProductProfileModel`, not
-                    # inside `attributes` — so `_product_rules`' "identity" rule (Name/Category/
-                    # Description) always fired with the name genuinely missing. This app's real
-                    # `ProductProfile` has no separate category/description fields to add
-                    # (`attributes.summary` already covers description-shaped content via the
-                    # existing dynamic attribute loop), so `name` is the one real gap to close.
-                    product_json = {**product.attributes, "name": product.name}
-        return brand_json, product_json
+                    products.append(product)
+
+            # Real, live-found bug (2026-09-25): this used to be `elif` on `product_ids` being
+            # empty — but a session can have a NON-empty `product_profile_ids` list where every id
+            # is now dangling (its product row was deleted/never existed), which left `products`
+            # silently empty with no fallback ever triggering. Falls through to the bootstrap
+            # whenever nothing actually resolved, regardless of why the list didn't resolve.
+            if not products and session.user_id:
+                user_products = await product_repo.list_for_user(session.user_id)
+                if user_products:
+                    products = [user_products[-1]]
+
+            for product in products:
+                # Real, live-found bug (2026-09-24): `product.attributes` alone never has the
+                # product's own `name`/`id` — `name` is a sibling field, `id` isn't in `attributes`
+                # at all — both needed here (`id` namespaces this product's rules, see
+                # `core/guardrails.py::_product_rules`'s `key` param).
+                products_json.append({**product.attributes, "name": product.name, "id": product.id})
+        return brand_json, products_json
 
     async def get_or_derive_for_session(self, session_id: str) -> GuardrailSet:
-        """
-        Gets the active guardrails for a session. If none exist, derives them from the session's
-        attached Brand and Product profiles.
-        """
+        """Gets guardrails for a session, always ensuring brand and product rules are up-to-date.
+
+        Real, live-found gap (2026-09-25): the old implementation returned early as soon as ANY
+        rules existed — this meant a session created without an explicit brand link would NEVER get
+        brand guardrails even if the user had a brand onboarded, because the first call only derived
+        from empty inputs and the early-return blocked every subsequent call from retrying.
+
+        New behavior:
+        - Human-added rules (source='human') AND freeform chat-stated constraints with nowhere else
+          to live (source='custom' — e.g. "must be red", "winter campaign"; see
+          `SessionService`'s `new_guardrails` handling) are ALWAYS preserved as-is. Real, live-found
+          bug fixed here (2026-09-25): the previous version only protected `source == "human"`, so
+          every 'custom' rule a user's chat message ever produced was silently wiped the very next
+          time this ran, since it isn't derivable from any brand/product profile and would never
+          come back once dropped.
+        - Brand and product rules are ALWAYS re-derived fresh from the user's real profiles and
+          REPLACED — so if a user updates their brand DNA or a product's DNA changes, the next page
+          load automatically reflects the new rules without any extra action."""
         session = await self._sessions.get(session_id)
         if not session:
             return GuardrailSet()
 
-        existing = coerce_set(session.brief.get("guardrails"))
-        if existing and existing.rules:
-            return existing
+        existing = coerce_set(session.brief.get("guardrails")) or GuardrailSet()
+        # Preserve human-added and freeform-custom rules — neither is derivable from a profile.
+        human_rules = [r for r in existing.rules if r.source in ("human", "custom")]
 
-        brand_json, product_json = await self._load_brand_and_product_json(session)
-        new_set = derive_guardrails(brand=brand_json, product=product_json)
+        brand_json, products_json = await self._load_brand_and_products_json(session)
+        derived = derive_guardrails(brand=brand_json, products=products_json)
 
-        # Persist and index immediately.
-        session.brief = {**session.brief, "guardrails": new_set.model_dump()}
-        await self._sessions.update(session)
-        self.index_guardrails(session_id, new_set)
+        # Human rules take precedence; derived rules fill in what's missing.
+        base = GuardrailSet(rules=human_rules)
+        new_set = base.merge(derived.rules)
+
+        # Only write to DB if the rule set actually changed.
+        if new_set.model_dump() != existing.model_dump():
+            session.brief = {**session.brief, "guardrails": new_set.model_dump()}
+            await self._sessions.update(session)
+            await self.index_guardrails(session_id, new_set)
 
         return new_set
 
@@ -89,7 +145,12 @@ class GuardrailService:
 
         Re-derives guardrails from the newly-linked profile(s) and MERGES them into whatever the
         session already has (`GuardrailSet.merge` — existing ids win), never overwriting real human
-        edits or previously-added custom rules just because a profile got linked."""
+        edits or previously-added custom rules just because a profile got linked.
+
+        An explicitly-linked product (2026-09-25) joins `session.brief["product_profile_ids"]` — the
+        same real multi-product list the chat-driven path appends to (`SessionService`'s
+        `new_guardrails` handling) — rather than replacing it, since a session can legitimately be
+        tracking several products (see `_load_brand_and_products_json`)."""
         session = await self._sessions.get(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
@@ -98,20 +159,24 @@ class GuardrailService:
             session.brand_profile_id = brand_profile_id or None
         if product_profile_id is not None:
             session.product_profile_id = product_profile_id or None
+            product_ids = list(session.brief.get("product_profile_ids") or [])
+            if product_profile_id and product_profile_id not in product_ids:
+                product_ids.append(product_profile_id)
+                session.brief = {**session.brief, "product_profile_ids": product_ids}
 
-        brand_json, product_json = await self._load_brand_and_product_json(session)
-        derived = derive_guardrails(brand=brand_json, product=product_json)
+        brand_json, products_json = await self._load_brand_and_products_json(session)
+        derived = derive_guardrails(brand=brand_json, products=products_json)
 
         existing = coerce_set(session.brief.get("guardrails")) or GuardrailSet()
         # Remove old derived rules (brand/product/project) so they are cleanly replaced
         human_rules = [r for r in existing.rules if r.source not in ("brand", "product", "project")]
         existing.rules = human_rules
-        
+
         merged = existing.merge(derived.rules)
 
         session.brief = {**session.brief, "guardrails": merged.model_dump()}
         await self._sessions.update(session)
-        self.index_guardrails(session_id, merged)
+        await self.index_guardrails(session_id, merged)
 
         return merged
 
@@ -129,7 +194,7 @@ class GuardrailService:
 
         session.brief = {**session.brief, "guardrails": updated_set.model_dump()}
         await self._sessions.update(session)
-        self.index_guardrails(session_id, updated_set)
+        await self.index_guardrails(session_id, updated_set)
         
         return updated_set
     async def add_rule_from_user_context(self, session_id: str, raw_text: str, scope: str, source: str) -> GuardrailSet:
@@ -186,26 +251,30 @@ Return ONLY a JSON object with one key "rules" containing a list of strings, eac
         
         session.brief = {**session.brief, "guardrails": guardrail_set.model_dump()}
         await self._sessions.update(session)
-        self.index_guardrails(session_id, guardrail_set)
+        await self.index_guardrails(session_id, guardrail_set)
         
         return guardrail_set
-    def index_guardrails(self, session_id: str, guardrail_set: GuardrailSet) -> None:
+    async def index_guardrails(self, session_id: str, guardrail_set: GuardrailSet) -> None:
         """
-        Ingests the session's strict guardrails into a dedicated LlamaIndex collection 
+        Ingests the session's strict guardrails into a dedicated LlamaIndex collection
         so agents can semantically search rules if needed.
+
+        Real, live-found bug (2026-09-25, caught while restarting the backend for unrelated work):
+        this called `provider.index_documents(...)` (plural, batch) — a method that has never
+        existed on `LlamaIndexKnowledgeProvider` (only singular `index_document` does). Every call
+        here has been silently failing since it was written, caught only by this method's own
+        try/except — guardrails were never actually reaching this collection. Fixed by calling the
+        real, existing per-document method once per rule, and made properly `async` so it's a real
+        awaited call, not a fire-and-forget that was actually just discarding a coroutine object
+        (`provider.index_documents(...)` used to be a plain sync call anyway, which never returned
+        a coroutine to discard — it just raised `AttributeError` immediately, caught right there).
         """
         try:
             provider = get_knowledge_provider()
             collection_name = f"guardrails_{session_id}"
-            
-            docs = []
             for r in guardrail_set.rules:
-                meta = {"id": r.id, "source": r.source, "scope": r.scope}
-                docs.append(Document(text=r.rule, metadata=meta, doc_id=r.id))
-                
-            # Fire and forget into LlamaIndex
-            if docs:
-                provider.index_documents(collection_name, docs)
-                log.info(f"Indexed {len(docs)} guardrails for session {session_id}")
+                await provider.index_document(collection=collection_name, doc_id=r.id, text=r.rule)
+            if guardrail_set.rules:
+                log.info(f"Indexed {len(guardrail_set.rules)} guardrails for session {session_id}")
         except Exception as e:
             log.warning(f"Failed to index guardrails for session {session_id}", extra={"_extra_error": str(e)})

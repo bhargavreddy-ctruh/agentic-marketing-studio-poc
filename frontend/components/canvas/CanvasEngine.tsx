@@ -13,7 +13,9 @@
  * "one file owns the mechanism, everything else depends on an interface" isolation this project's
  * backend already applies to every vendor provider (Rules.md section 1).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ForwardedRef, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState,
+} from "react";
 import { Camera, Viewport, fitViewport } from "./camera";
 
 export interface CanvasTile {
@@ -67,6 +69,14 @@ export interface CanvasTile {
   description?: string | null;
   /** Warning message injected by Laya decision model if the output diverges from user intent */
   alignmentWarning?: string;
+  /** Canvas Grouping (2026-09-25, revised same day: a workflow IS one campaign — grouping is by
+   * real Product DNA instead) — which real product this tile belongs to (null = unassigned,
+   * grouped into one flat, still-framed-but-muted bucket), and which tile (if any) it was
+   * generated from — rendered as a small lineage badge. Real backend fields
+   * (`CanvasElement.product_id`/`product_name`/`parent_element_id`), never client-invented. */
+  productId?: string | null;
+  productName?: string | null;
+  parentElementId?: string | null;
 }
 
 export interface CanvasEngineProps {
@@ -94,6 +104,15 @@ export interface CanvasEngineProps {
   sessionId?: string | null;
 }
 
+/** Canvas Grouping (2026-09-25) — an imperative handle so a sibling (the Elements Drawer,
+ * `CanvasView.tsx`) can pan the camera to a specific tile without this engine needing to know
+ * anything about drawers/products itself (same "one file owns the mechanism" isolation this
+ * file's own module doc comment already states). No such pan-to-tile capability existed before
+ * this — confirmed via audit, not assumed. */
+export interface CanvasEngineHandle {
+  focusTile: (tileId: string) => void;
+}
+
 const CLICK_MOVE_THRESHOLD = 4; // px of real movement before a press counts as a drag, not a click
 
 const GRID_SIZE = 28;
@@ -106,15 +125,15 @@ const COLUMNS = 4;
 const DRAW_CANVAS_SIZE = 6000;
 const DRAW_ORIGIN = -DRAW_CANVAS_SIZE / 2;
 
-// Timeline-based grouping (2026-09-22, researched from how photo-library "Moments"
-// (Google Photos/Apple Photos) and creative-canvas tools like Luma AI's Boards actually cluster
-// items: a real gap-based split on timestamps — start a new group whenever the time since the
-// previous item exceeds a threshold — not a fixed calendar bucket (which would arbitrarily split
-// a late-night session at midnight) and not a fixed item count (which ignores real pacing). A full
-// hour was picked as the threshold: real back-and-forth iteration on one part of a campaign
-// (regenerate, comment, a few chat turns) realistically stays under an hour; a gap longer than
-// that really does mean the user came back to a different part of the work, not mid-flow.
-const GROUP_GAP_MINUTES = 60;
+// Product-based grouping (2026-09-25, CAMPAIGN_GROUPING_TASKS.md — replaces the earlier
+// 2026-09-22 time-gap heuristic outright, per explicit user decision: no time-based fallback;
+// revised again same day per a second explicit correction: a workflow IS one campaign, so
+// grouping is by real Product DNA instead of an ad-hoc campaign name).
+// Tiles group by their real, backend-assigned `productId` — a real `ProductProfileModel.id`, not
+// a coincidence of when two unrelated things happened to be generated close together. Tiles with
+// no `productId` (pre-migration elements, uploads, anything genuinely product-less) land in ONE
+// flat "Unassigned" bucket — still framed (per explicit user report that no boundary at all read
+// as broken), just visually muted so it's never mistaken for a real, named product.
 const FRAME_PADDING = 32;
 const FRAME_LABEL_HEIGHT = 28;
 const RUN_ROW_GAP = 1; // extra empty row-band left between two runs, for visual separation + label room
@@ -129,56 +148,40 @@ interface TimelineGroup {
   tileIds: string[];
 }
 
-/** A contiguous "run" of tiles that belong together — either genuinely GENERATED content close
- * enough in time to be one real creative batch, or a run of UPLOADED content. A real, live-found
- * bug fixed here (2026-09-22): uploads and generated content used to be silently lumped into the
- * same time-based group/frame just because they happened to land close together — a real,
- * misleading claim ("this upload is part of that generation batch") the canvas never actually
- * meant to make. `isUpload` tiles are never framed (see `computeTimelineFrames` below) — this is
- * the ONE function that decides run membership, reused for BOTH position assignment
- * (`useTileLayout`) and frame drawing, so a frame's boundary can never drift out of sync with
- * where its own tiles actually got laid out (the root cause of the earlier overlapping-frames
- * bug: positions were assigned in one continuous grid with no notion of "runs" at all, while
- * frames were drawn around whatever a SEPARATE, inconsistent grouping pass computed). */
+/** A "run" is now a real product group, not a time-proximity cluster — this is the ONE function
+ * that decides run membership, reused for BOTH position assignment (`useTileLayout`) and frame
+ * drawing, so a frame's boundary can never drift out of sync with where its own tiles actually
+ * got laid out (the root cause of an earlier overlapping-frames bug this shape already fixed
+ * once, preserved here). `productId: null` is the single flat "Unassigned" bucket — still framed,
+ * just visually muted (see `computeTimelineFrames` below). */
 interface Run {
   tileIds: string[];
-  isUpload: boolean;
+  productId: string | null;
+  productName: string | null;
 }
 
 function computeRuns(tiles: CanvasTile[]): Run[] {
-  const runs: Run[] = [];
-  let current: CanvasTile[] = [];
-  let prevTime: number | null = null;
-  let prevIsUpload: boolean | null = null;
-
-  function flush() {
-    if (current.length === 0) return;
-    runs.push({ tileIds: current.map((t) => t.id), isUpload: current[0].producedBy === "user_upload" });
-    current = [];
-  }
-
+  const order: string[] = [];
+  const byKey = new Map<string, Run>();
   for (const tile of tiles) {
-    const isUpload = tile.producedBy === "user_upload";
-    const t = tile.createdAt ? new Date(tile.createdAt).getTime() : null;
-    const gapExceeded = prevTime !== null && t !== null && t - prevTime > GROUP_GAP_MINUTES * 60_000;
-    // A run boundary whenever the time gap is real, OR generated/uploaded status changes — never
-    // merge an upload into a generated run or vice versa, regardless of how close in time they are.
-    if (current.length > 0 && (gapExceeded || isUpload !== prevIsUpload)) flush();
-    current.push(tile);
-    prevTime = t;
-    prevIsUpload = isUpload;
+    const productId = tile.productId || null;
+    const key = productId ?? "__unassigned__";
+    let run = byKey.get(key);
+    if (!run) {
+      run = { tileIds: [], productId, productName: tile.productName || null };
+      byKey.set(key, run);
+      order.push(key);
+    }
+    run.tileIds.push(tile.id);
   }
-  flush();
-  return runs;
+  return order.map((key) => byKey.get(key)!);
 }
 
-/** Draws a real frame around EVERY generated run (even a single real item — a real, deliberate
- * change from an earlier pass that skipped framing when there was "only one group": now that
- * uploads are excluded from grouping entirely, a lone generated run sitting next to un-framed
- * uploads is genuinely worth distinguishing, not a redundant whole-canvas border anymore).
- * Uploaded runs are never framed at all — an honest, visible "this wasn't generated" distinction,
- * per an explicit user ask. Reads real element timestamps/specialists for the label; never
- * fabricated. */
+/** Draws a real frame around every run, including the flat "Unassigned" bucket (per explicit user
+ * report: two freshly-generated, product-less tiles got no boundary at all, which read as broken
+ * rather than "not grouped yet"). A real product gets a 📦 label with its actual name; the
+ * unassigned bucket gets an honest, visually distinct label instead of pretending to be a real
+ * product group. Label is otherwise real item count/specialists — never fabricated. */
 function computeTimelineFrames(
   tiles: CanvasTile[],
   laidOut: { tile: CanvasTile; pos: { x: number; y: number } }[],
@@ -187,8 +190,7 @@ function computeTimelineFrames(
   const tileById = new Map(tiles.map((t) => [t.id, t]));
   const frames: TimelineGroup[] = [];
 
-  computeRuns(tiles).forEach((run, i) => {
-    if (run.isUpload) return;
+  computeRuns(tiles).forEach((run) => {
     const runTiles = run.tileIds
       .map((id) => ({ tile: tileById.get(id), pos: posById.get(id) }))
       .filter((x): x is { tile: CanvasTile; pos: { x: number; y: number } } => Boolean(x.tile && x.pos));
@@ -202,28 +204,17 @@ function computeTimelineFrames(
       maxY = Math.max(maxY, pos.y + TILE_SIZE);
     }
 
-    const withTime = runTiles.filter((r) => r.tile.createdAt);
-    let label: string;
-    if (withTime.length > 0) {
-      const first = new Date(withTime[0].tile.createdAt!);
-      const last = new Date(withTime[withTime.length - 1].tile.createdAt!);
-      const sameDay = first.toDateString() === last.toDateString();
-      const fmtTime = (d: Date) => d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-      const fmtDate = (d: Date) => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-      const dateLabel = sameDay
-        ? `${fmtDate(first)} · ${fmtTime(first)}–${fmtTime(last)}`
-        : `${fmtDate(first)} – ${fmtDate(last)}`;
-      const specialists = Array.from(new Set(runTiles.map((r) => r.tile.producedBy).filter(Boolean)));
-      const specialistLabel = specialists.length
-        ? ` · ${specialists.slice(0, 2).join(", ")}${specialists.length > 2 ? "…" : ""}`
-        : "";
-      label = `${dateLabel} · ${runTiles.length} item${runTiles.length === 1 ? "" : "s"}${specialistLabel}`;
-    } else {
-      label = `${runTiles.length} item${runTiles.length === 1 ? "" : "s"}`;
-    }
+    const specialists = Array.from(new Set(runTiles.map((r) => r.tile.producedBy).filter(Boolean)));
+    const specialistLabel = specialists.length
+      ? ` · ${specialists.slice(0, 2).join(", ")}${specialists.length > 2 ? "…" : ""}`
+      : "";
+    const itemsLabel = `${runTiles.length} item${runTiles.length === 1 ? "" : "s"}`;
+    const label = run.productId
+      ? `📦 ${run.productName || "Untitled product"} (${itemsLabel})${specialistLabel}`
+      : `Unassigned (${itemsLabel})${specialistLabel}`;
 
     frames.push({
-      id: `run-${i}`,
+      id: run.productId ? `product-${run.productId}` : "unassigned",
       label,
       x: minX - FRAME_PADDING,
       y: minY - FRAME_PADDING - FRAME_LABEL_HEIGHT,
@@ -341,18 +332,53 @@ function useTileLayout(tiles: CanvasTile[], sessionId?: string | null) {
             )
           : nextRowRef.current;
 
-      run.tileIds.forEach((id, i) => {
+      // Real, live-found bug (2026-09-25, explicit user report: two freshly generated images
+      // overlapped each other) — this used to compute a new tile's slot from its raw INDEX within
+      // `run.tileIds`. That was safe when runs were small and time-scoped (each real batch got its
+      // own run), but under Canvas Grouping every element with no `productId` — every element
+      // from before this feature existed — now collapses into ONE shared "Unassigned" run. A new
+      // tile's index there (e.g. the 29th tile in a 32-tile session) no longer means "the 29th tile
+      // in THIS batch" — it's polluted by dozens of unrelated historical tiles whose REAL stored
+      // positions (from the old, different grouping scheme) don't line up with that index at all,
+      // so the computed slot could — and did — land exactly on an existing tile. Fixed by tracking
+      // which (row, col) slots this run's ALREADY-positioned tiles really occupy, and handing each
+      // new tile the next genuinely free slot instead of trusting its array index.
+      const occupiedSlots = new Set(
+        alreadyPositionedIds.map((id) => {
+          const p = positions.current.get(id)!;
+          const row = Math.round(p.y / TILE_ROW_HEIGHT) - runStartRow;
+          const col = Math.round(p.x / TILE_COL_WIDTH);
+          return `${row}:${col}`;
+        }),
+      );
+      let searchRow = 0;
+      let searchCol = 0;
+      const claimNextFreeSlot = () => {
+        while (occupiedSlots.has(`${searchRow}:${searchCol}`)) {
+          searchCol = (searchCol + 1) % COLUMNS;
+          if (searchCol === 0) searchRow++;
+        }
+        const slot = { row: searchRow, col: searchCol };
+        occupiedSlots.add(`${searchRow}:${searchCol}`);
+        searchCol = (searchCol + 1) % COLUMNS;
+        if (searchCol === 0) searchRow++;
+        return slot;
+      };
+
+      run.tileIds.forEach((id) => {
         if (positions.current.has(id)) return;
-        const col = i % COLUMNS;
-        const rowWithinRun = Math.floor(i / COLUMNS);
+        const { row, col } = claimNextFreeSlot();
         positions.current.set(id, {
           x: col * TILE_COL_WIDTH,
-          y: (runStartRow + rowWithinRun) * TILE_ROW_HEIGHT,
+          y: (runStartRow + row) * TILE_ROW_HEIGHT,
         });
       });
 
-      const rowsUsed = Math.ceil(run.tileIds.length / COLUMNS);
-      nextRowRef.current = Math.max(nextRowRef.current, runStartRow + rowsUsed + RUN_ROW_GAP);
+      const maxRowUsed = Math.max(
+        runStartRow,
+        ...run.tileIds.map((id) => Math.round(positions.current.get(id)!.y / TILE_ROW_HEIGHT)),
+      );
+      nextRowRef.current = Math.max(nextRowRef.current, maxRowUsed + 1 + RUN_ROW_GAP);
     }
 
     setLayout({
@@ -394,7 +420,7 @@ const PENDING_ICON_BY_KIND: Record<string, string> = {
   text: "📝",
 };
 
-export default function CanvasEngine({
+function CanvasEngine({
   tiles,
   onUndo,
   onRedo,
@@ -403,7 +429,7 @@ export default function CanvasEngine({
   onContextMenu,
   pendingGeneration,
   sessionId,
-}: CanvasEngineProps) {
+}: CanvasEngineProps, ref: ForwardedRef<CanvasEngineHandle>) {
   const rootRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
@@ -420,6 +446,10 @@ export default function CanvasEngine({
 
   const { laidOut, movePosition, movePositions, nextRunPos } = useTileLayout(tiles, sessionId);
   const timelineGroups = useMemo(() => computeTimelineFrames(tiles, laidOut), [tiles, laidOut]);
+  // Campaign Grouping lineage badge (2026-09-25) — resolves a tile's real parent by id for the
+  // "🔗 Based on..." badge label, falling back to a generic label if the parent isn't (or is no
+  // longer) in the currently-loaded tile set rather than showing nothing.
+  const tileById = useMemo(() => new Map(tiles.map((t) => [t.id, t])), [tiles]);
   // Exactly where a genuinely NEW run would start — so the loading silhouette appears in its own
   // fresh row-band below everything else, never overlapping an existing tile OR an existing frame.
   const pendingPos = nextRunPos;
@@ -459,6 +489,22 @@ export default function CanvasEngine({
     const rect = rootRef.current.getBoundingClientRect();
     moveCam(fitViewport({ x: minX, y: minY, w: maxX - minX, h: maxY - minY }, rect.width, rect.height));
   }, [laidOut, moveCam]);
+
+  // Campaign Grouping (2026-09-25) — pans/zooms the camera to center on ONE specific tile
+  // (generous padding so its campaign frame's own label stays visible around it), same
+  // `fitViewport` math `fitToContent` already uses for the whole canvas, just scoped to one tile's
+  // real laid-out position instead of every tile's combined bounding box.
+  const focusTile = useCallback((tileId: string) => {
+    if (!rootRef.current) return;
+    const found = laidOut.find((l) => l.tile.id === tileId);
+    if (!found) return;
+    const rect = rootRef.current.getBoundingClientRect();
+    moveCam(fitViewport(
+      { x: found.pos.x, y: found.pos.y, w: TILE_SIZE, h: TILE_SIZE }, rect.width, rect.height, 240,
+    ));
+  }, [laidOut, moveCam]);
+
+  useImperativeHandle(ref, () => ({ focusTile }), [focusTile]);
 
   // Fit once when tiles first arrive (new session, or the first real generation).
   const fittedFor = useRef<number>(-1);
@@ -683,7 +729,14 @@ export default function CanvasEngine({
           timelineGroups.map((g) => (
             <div
               key={g.id}
-              className="absolute rounded-2xl border-2 border-dashed border-neutral-300/80 bg-neutral-100/30"
+              // "Unassigned" (2026-09-25) gets a visibly lighter/more muted frame than a real
+              // named campaign — a real boundary (so it's never mistaken for "broken, no grouping
+              // at all"), but honestly distinct from an intentional, user-named campaign.
+              className={`absolute rounded-2xl border-2 border-dashed ${
+                g.id === "unassigned"
+                  ? "border-neutral-300/40 bg-neutral-100/10"
+                  : "border-neutral-300/80 bg-neutral-100/30"
+              }`}
               style={{ left: g.x, top: g.y, width: g.w, height: g.h, cursor: mode === "pan" ? "grab" : undefined }}
               onPointerDown={(e) => handleGroupDown(e, g.tileIds)}
             >
@@ -754,6 +807,23 @@ export default function CanvasEngine({
                 title={tile.description}
               >
                 {tile.description}
+              </p>
+            )}
+
+            {/* Campaign Grouping lineage badge (2026-09-25) — a real `parent_element_id` set
+             * server-side from the turn's referenced element, never a guess. */}
+            {tile.parentElementId && (
+              <p
+                className="border-t border-neutral-100 bg-blue-500/10 px-2 py-1 text-[10px] leading-snug text-blue-200"
+                title={
+                  tileById.get(tile.parentElementId)?.description
+                    ? `Based on: ${tileById.get(tile.parentElementId)!.description}`
+                    : "Based on a referenced element"
+                }
+              >
+                🔗 Based on {tileById.get(tile.parentElementId)?.description
+                  ? tileById.get(tile.parentElementId)!.description!.slice(0, 40)
+                  : "referenced element"}
               </p>
             )}
 
@@ -880,10 +950,12 @@ export default function CanvasEngine({
             onClick={() => setShowGroups((s) => !s)}
             className={`rounded-full px-3 py-1.5 text-sm ${showGroups ? "bg-neutral-900 text-white" : "text-neutral-600"}`}
           >
-            Group by time
+            Group by product
           </button>
         )}
       </div>
     </div>
   );
 }
+
+export default forwardRef(CanvasEngine);

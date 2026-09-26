@@ -174,3 +174,45 @@ def stale_campaign_context_block(brief: dict) -> str:
         f"completely different, already-finished request — use this ONLY if the message above "
         f"itself clearly builds on it; otherwise ignore it completely: {idea})"
     )
+
+
+# Real, deterministic keyword->aspect_ratio backstop (2026-09-25) — `illustrator.md`'s rule 3b
+# already tells the model to set a real `aspect_ratio` for a poster/story/etc request, but that's
+# 100% dependent on the LLM actually following it; under provider stress this codebase falls back
+# to weaker models (Memory.md) that don't reliably apply prompt rules. Same "deterministic beats
+# trusting an LLM" pattern already used elsewhere (`_is_bare_greeting`, `_check_price_stated`) —
+# this backs up rule 3b, doesn't replace it. Checked in order; first match wins, so more specific
+# phrases (an explicit "9:16") are listed before broader ones.
+_ASPECT_RATIO_KEYWORDS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("9:16",), "9:16"),
+    (("story", "reel", "vertical"), "9:16"),
+    (("16:9",), "16:9"),
+    (("banner", "landscape"), "16:9"),
+    (("poster",), "2:3"),
+    (("1:1",), "1:1"),
+    (("square", "instagram post"), "1:1"),
+)
+
+
+def infer_aspect_ratio_from_text(text: str) -> str | None:
+    """Pure, deterministic — no LLM/network call. Returns the first matching aspect ratio for a
+    real format keyword found in `text`, or None if nothing matched (caller injects nothing in
+    that case, leaving the model's own judgment / the tool's own default in place)."""
+    lowered = (text or "").lower()
+    for keywords, ratio in _ASPECT_RATIO_KEYWORDS:
+        if any(kw in lowered for kw in keywords):
+            return ratio
+    return None
+
+
+def aspect_ratio_hint_block(text: str) -> str:
+    """Safe-to-concatenate wrapper around `infer_aspect_ratio_from_text` — "" when nothing
+    matched, otherwise an explicit, imperative instruction naming the real detected format."""
+    ratio = infer_aspect_ratio_from_text(text)
+    if not ratio:
+        return ""
+    return (
+        f"\n\nDETECTED FORMAT: the request's wording matches a real, known format keyword — set "
+        f"aspect_ratio to \"{ratio}\" on base_image_generator/image_editor unless the user's "
+        f"wording explicitly asks for a different ratio."
+    )

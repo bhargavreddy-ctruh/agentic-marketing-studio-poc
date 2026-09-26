@@ -15,7 +15,13 @@ from fastapi import APIRouter
 from starlette.responses import StreamingResponse
 
 from ....core.events import stream_events
-from ....schemas.sessions.requests import CreateSessionRequest, PostTurnRequest, UpdateApprovalModeRequest, UpdateDnaRequest
+from ....schemas.sessions.requests import (
+    CreateSessionRequest,
+    PostTurnRequest,
+    UpdateApprovalModeRequest,
+    UpdateDnaRequest,
+    UpdateGuardrailsEnabledRequest,
+)
 from ....schemas.sessions.responses import ChatTurnResponse, SessionResponse
 from ...dependencies import CurrentUserDep, SessionServiceDep
 
@@ -56,42 +62,121 @@ async def update_approval_mode(
     return await svc.update_approval_mode(session_id, user_id=current_user.id, approval_mode=body.approval_mode)
 
 
+@router.put("/{session_id}/guardrails-enabled", response_model=SessionResponse)
+async def update_guardrails_enabled(
+    session_id: str, body: UpdateGuardrailsEnabledRequest, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> SessionResponse:
+    """Per-session guardrails on/off (2026-09-25, explicit user ask: "add a toggle to turn off
+    guardrails if user wants to") — same shape as `update_approval_mode` above."""
+    return await svc.update_guardrails_enabled(
+        session_id, user_id=current_user.id, guardrails_enabled=body.guardrails_enabled
+    )
+
+
 @router.put("/{session_id}/dna", response_model=SessionResponse)
 async def update_dna(
     session_id: str, body: UpdateDnaRequest, svc: SessionServiceDep, current_user: CurrentUserDep
 ) -> SessionResponse:
-    """Accepts raw text for Brand and Product DNA, saves it to the session, and triggers
-    rule extraction so downstream agents can follow them immediately."""
+    """Real, live-found gap (2026-09-25, explicit user ask: "connect this also to the place
+    you're saving these deets") — this route used to only write loose, un-namespaced guardrail
+    rule TEXT via `add_rule_from_user_context`, completely disconnected from the real
+    `BrandProfileModel`/`ProductProfileModel` rows the chat- and canvas-driven paths save to (and,
+    since the `get_or_derive_for_session` rewrite, those loose rules got silently wiped on the very
+    next re-derivation anyway — wasted work). Now saves into the SAME real tables, with the SAME
+    scoping rule as everywhere else in this app: Brand DNA is per-USER (updates the user's one
+    existing brand, shared across every one of their sessions, never a new row per session);
+    Product DNA is per-SESSION (updates only this session's linked product, or creates one linked
+    only here)."""
     session = await svc.get_session(session_id, user_id=current_user.id)
     session_model = await svc._sessions.get(session_id)
-    
-    new_brief = dict(session_model.brief)
-    new_brief["brand_dna"] = body.brand_dna or ""
-    new_brief["product_dna"] = body.product_dna or ""
-    
-    if body.campaignDetails is not None:
-        new_brief["campaignDetails"] = body.campaignDetails.model_dump()
-    if body.brandDetails is not None:
-        new_brief["brandDetails"] = body.brandDetails.model_dump()
-    if body.productDetails is not None:
-        new_brief["productDetails"] = body.productDetails.model_dump()
 
+    new_brief = dict(session_model.brief)
+    # Real, live-found bug (2026-09-25, caught by reading a real user's session): the frontend form
+    # always sends all three *Details objects on every save (whichever tab was actually edited), so
+    # `is not None` was always true — a save from the Product tab alone silently overwrote a
+    # genuinely-saved Campaign/Brand tab with blank strings, confirmed live in this exact DB. Only
+    # persist a *Details object when it actually has real content in at least one field.
+    if body.campaignDetails is not None and any(
+        v.strip() for v in (body.campaignDetails.campaignIdea, body.campaignDetails.audience, body.campaignDetails.goal) if v
+    ):
+        new_brief["campaignDetails"] = body.campaignDetails.model_dump()
+    if body.brandDetails is not None and any(
+        v.strip() for v in (body.brandDetails.voiceAndTone, body.brandDetails.visualIdentity, body.brandDetails.logoRules) if v
+    ):
+        new_brief["brandDetails"] = body.brandDetails.model_dump()
+    if body.productDetails is not None and any(
+        v.strip() for v in (body.productDetails.name, body.productDetails.category, body.productDetails.productDescription) if v
+    ):
+        new_brief["productDetails"] = body.productDetails.model_dump()
     session_model.brief = new_brief
+
+    from ....models.base import async_session_factory
+    from ....repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
+    from ....repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+    from ....services.knowledge.brand_dna_service import BrandDnaService
+    from ....services.knowledge.product_dna_service import ProductDnaService
+
+    async with async_session_factory() as db:
+        brand_repo = SqliteBrandRepository(db)
+        product_repo = SqliteProductRepository(db)
+        brand_svc = BrandDnaService(brand_repo)
+        product_svc = ProductDnaService(product_repo)
+
+        bd = body.brandDetails
+        if bd is not None and (bd.voiceAndTone or bd.visualIdentity or bd.logoRules):
+            existing_brand = None
+            existing_brand_id = session_model.brand_profile_id
+            if existing_brand_id:
+                existing_brand = await brand_repo.get(existing_brand_id)
+            if existing_brand is None:
+                user_brands = await brand_repo.list_for_user(current_user.id)
+                existing_brand = user_brands[0] if user_brands else None
+            raw_facts = {
+                k: v for k, v in {
+                    "Voice and Tone": bd.voiceAndTone,
+                    "Visual Identity & Colors": bd.visualIdentity,
+                    "Logo Rules & Constraints": bd.logoRules,
+                }.items() if v
+            }
+            brand = await brand_svc.onboard_brand(
+                user_id=current_user.id,
+                # This simplified form has no "Brand Name" field at all — preserve the existing
+                # brand's real name rather than guessing one; only a brand-new brand (the rare
+                # path — normally onboarded with a real name via the home page's panel) falls
+                # back to a placeholder.
+                name=existing_brand.name if existing_brand else "Untitled Brand",
+                raw_facts=raw_facts,
+                brand_id=existing_brand.id if existing_brand else None,
+            )
+            session_model.brand_profile_id = brand.id
+
+        pd = body.productDetails
+        if pd is not None and (pd.name or pd.productDescription):
+            linked_ids = list(session_model.brief.get("product_profile_ids") or [])
+            existing_product_id = linked_ids[0] if linked_ids else session_model.product_profile_id
+            existing_product = await product_repo.get(existing_product_id) if existing_product_id else None
+            description = "\n".join(
+                part for part in (f"Category: {pd.category}" if pd.category else None, pd.productDescription) if part
+            )
+            product = await product_svc.onboard_product(
+                user_id=current_user.id,
+                name=pd.name or (existing_product.name if existing_product else "Unnamed product"),
+                description=description,
+                price=None,
+                discount_percent=None,
+                product_id=existing_product.id if existing_product else None,
+            )
+            if product.id not in linked_ids:
+                linked_ids.append(product.id)
+            session_model.brief = {**session_model.brief, "product_profile_ids": linked_ids}
+            session_model.product_profile_id = product.id
+
     await svc._sessions.update(session_model)
-    
+
     from ....services.knowledge.guardrail_service import GuardrailService
     guardrail_svc = GuardrailService(svc._sessions)
-    
-    existing = await guardrail_svc.get_or_derive_for_session(session_id)
-    human_rules = [r for r in existing.rules if r.source not in ("brand", "product")]
-    existing.rules = human_rules
-    await guardrail_svc.update_guardrails(session_id, existing.model_dump())
-    
-    if body.brand_dna:
-        await guardrail_svc.add_rule_from_user_context(session_id, body.brand_dna, scope="all", source="brand")
-    if body.product_dna:
-        await guardrail_svc.add_rule_from_user_context(session_id, body.product_dna, scope="all", source="product")
-        
+    await guardrail_svc.get_or_derive_for_session(session_id)
+
     return await svc.get_session(session_id, user_id=current_user.id)
 
 
@@ -131,6 +216,7 @@ async def post_turn(
         picked_option_id=body.picked_option_id,
         free_text=body.free_text,
         referenced_element_ids=body.referenced_element_ids,
+        target_product_id=body.target_product_id,
     )
 
 

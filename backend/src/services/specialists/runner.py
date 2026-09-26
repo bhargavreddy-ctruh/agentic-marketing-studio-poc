@@ -16,8 +16,10 @@ itself surfaces as a typed SpecialistFailed, never a silent hang.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine
 
@@ -25,12 +27,110 @@ from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable, SpecialistFailed, ToolNotFound
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
+from ...core.redaction import redact_args
 from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import trace
 from ..tools.registry import get_tool, to_openai_tool_schema
 from .registry import get_specialist
 
 log = get_logger(__name__)
+
+
+def _extract_balanced_call_args(text: str, open_paren_idx: int) -> str | None:
+    """Scans forward from an opening '(' to find its matching ')', respecting quoted strings (so
+    a ')' inside a string literal doesn't end the scan early) and backslash-escaped characters
+    within them. Returns the full '(...)' substring (inclusive), or None if the parens never
+    balance (e.g. the model's output was truncated mid-call) — never guessed at."""
+    depth = 0
+    in_quote: str | None = None
+    i = open_paren_idx
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if in_quote:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_quote:
+                in_quote = None
+        else:
+            if c in ("'", '"'):
+                in_quote = c
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return text[open_paren_idx : i + 1]
+        i += 1
+    return None
+
+
+def _recover_pseudo_tool_call(text: str, allowed_tools: tuple[str, ...]) -> tuple[str, dict[str, Any]] | None:
+    """
+    Real, live-found recovery (2026-09-26, live-reproduced against `illustrator`): a provider with
+    no native tool-calling (Replicate's Gemini fallback, confirmed via its own schema — no
+    `tools`/`functions` input field exists on it) — or a weaker Groq fallback model under provider
+    stress — sometimes expresses a tool call as a Python-style function-call expression instead of
+    a real `tool_calls` structure, most commonly Gemini's own `{"tool_code":
+    "print(base_image_generator(prompt='...', ...))"}` habit. Discarding that text and failing
+    outright throws away a clearly-expressed, recoverable intent. This recognizes and safely
+    parses ONLY the call expression itself via `ast.parse(..., mode="eval")` — never `eval()`/
+    `exec()`, no code execution ever happens — and only accepts plain constant keyword arguments
+    (strings, numbers, booleans, None); anything else (nested calls, comprehensions, arbitrary
+    expressions, positional args) is rejected as unrecoverable rather than guessed at. Deliberately
+    provider-agnostic (operates on the final response text, not tied to any one provider) so the
+    same recovery covers Groq falling into this same pattern too, not just Replicate.
+
+    Tries two shapes, in order:
+    1. Real JSON `{"tool_call": {"name": "...", "arguments": {...}}}` — in case the model DID
+       follow the prompt instruction asking for this exact shape (see `replicate_llm.py`'s own
+       `if tools:` block).
+    2. A bare/embedded function-call expression `tool_name(kwarg=value, ...)` found anywhere in
+       the text (e.g. inside a "tool_code" string) — the fallback for when it didn't.
+
+    Returns (tool_name, arguments) on a safe, confident recovery, else None (the caller falls
+    through to the existing bounded-retry-then-SpecialistFailed path, unchanged)."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            call = parsed.get("tool_call")
+            if isinstance(call, dict):
+                name = call.get("name")
+                args = call.get("arguments")
+                if isinstance(name, str) and name in allowed_tools and isinstance(args, dict):
+                    return name, args
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    for name in allowed_tools:
+        match = re.search(rf"\b{re.escape(name)}\s*\(", text)
+        if not match:
+            continue
+        call_str = _extract_balanced_call_args(text, match.end() - 1)
+        if call_str is None:
+            continue  # unbalanced parens (truncated output) — not safely recoverable
+        try:
+            tree = ast.parse(f"{name}{call_str}", mode="eval")
+        except SyntaxError:
+            continue
+        call_node = tree.body
+        if not isinstance(call_node, ast.Call):
+            continue
+        if not (isinstance(call_node.func, ast.Name) and call_node.func.id == name):
+            continue
+        if call_node.args:
+            continue  # positional args aren't safely attributable to a schema field — reject
+        args = {}
+        safe = True
+        for kw in call_node.keywords:
+            if kw.arg is None or not isinstance(kw.value, ast.Constant):
+                safe = False
+                break
+            args[kw.arg] = kw.value.value
+        if safe:
+            return name, args
+    return None
 
 
 @dataclass
@@ -183,11 +283,25 @@ async def run_specialist_agentic(
                 emit("specialist_failed", specialist=specialist_name, reason=exc.message)
                 raise SpecialistFailed(specialist_name, exc.message) from exc
 
-            if result.tool_calls:
+            effective_tool_calls = result.tool_calls
+            if not effective_tool_calls and result.text:
+                recovered = _recover_pseudo_tool_call(result.text, spec.allowed_tools)
+                if recovered is not None:
+                    rec_name, rec_args = recovered
+                    log.warning(
+                        "recovered_pseudo_tool_call",
+                        extra={"_extra_specialist": specialist_name, "_extra_tool": rec_name},
+                    )
+                    emit("tool_call_recovered", specialist=specialist_name, tool=rec_name)
+                    effective_tool_calls = [
+                        {"id": f"recovered-{iteration}", "function": {"name": rec_name, "arguments": json.dumps(rec_args)}}
+                    ]
+
+            if effective_tool_calls:
                 messages.append(
-                    {"role": "assistant", "content": result.text or None, "tool_calls": result.tool_calls}
+                    {"role": "assistant", "content": result.text or None, "tool_calls": effective_tool_calls}
                 )
-                for call in result.tool_calls:
+                for call in effective_tool_calls:
                     fn = call.get("function", {})
                     tool_name = fn.get("name", "")
                     try:
@@ -266,16 +380,31 @@ async def run_specialist_agentic(
                         "tool_call_id": call.get("id", ""),
                         "content": json.dumps(tool_content),
                     })
-                    log.info(
-                        "specialist_tool_call",
-                        extra={
-                            "_extra_specialist": specialist_name,
-                            "_extra_tool": tool_name,
-                            "_extra_ok": record.ok,
-                            "_extra_iteration": iteration + 1,
-                        },
+                    # Real, live-found observability gap (2026-09-25, root-caused from a live
+                    # failure this session where a specialist's tool call failed with "storage_ref
+                    # not found" and NOTHING anywhere — this log line, this event, or the
+                    # `tool_call_logs` table — had ever recorded what args the model actually
+                    # passed, making it impossible to confirm whether the model sent a bad value or
+                    # something else broke). Redacted via `redact_args` (never raw base64/binary),
+                    # and only attached ON FAILURE — the successful, common case doesn't need it
+                    # and args can be large.
+                    log_extra = {
+                        "_extra_specialist": specialist_name,
+                        "_extra_tool": tool_name,
+                        "_extra_ok": record.ok,
+                        "_extra_iteration": iteration + 1,
+                    }
+                    if not record.ok:
+                        log_extra["_extra_args"] = redact_args(args)
+                        log_extra["_extra_error"] = record.error
+                    log.info("specialist_tool_call", extra=log_extra)
+                    emit(
+                        "tool_call",
+                        specialist=specialist_name,
+                        tool=tool_name,
+                        ok=record.ok,
+                        **({"args": redact_args(args), "error": record.error} if not record.ok else {}),
                     )
-                    emit("tool_call", specialist=specialist_name, tool=tool_name, ok=record.ok)
                 continue  # let the model see the real tool results before deciding what's next
 
             # No tool calls this turn -> the model considers itself done; parse its final decision.

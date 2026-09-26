@@ -1171,6 +1171,12 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     # Include the full brief so the specialist has access to `_recent_chat_history`, guardrails metadata, etc.
     current_context[0]["text"] += f"\n\nFull session brief context:\n{json.dumps(brief)}"
 
+    # Deterministic aspect-ratio backstop (2026-09-25) — same shared helper `visual_design_lead.py`
+    # uses for the `full_image` route; this is the OTHER call site (Task plan item 4), since a
+    # dynamic-routed edit/follow-up request never goes through visual_design_lead.py at all.
+    from ..leads.base import aspect_ratio_hint_block
+    current_context[0]["text"] += aspect_ratio_hint_block(user_message or brief.get("idea") or "")
+
     latest_storage_ref = None
     latest_tool = None
     last_completed_specialist = None
@@ -1191,7 +1197,27 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             instruction_text = f"\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
             if latest_storage_ref:
                 instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
-            
+            elif not referenced_elements:
+                # Real, live-found bug (2026-09-25, live-reproduced: a fresh request with nothing
+                # to reference yet — e.g. "make a mclaren campaign post" — reached `palette_strategist`
+                # right after `reference_curator` produced no real asset). Nothing in this step's
+                # context ever told the specialist a real image genuinely doesn't exist yet, so a
+                # model asked to use `color_palette_extractor` (which requires a real `storage_ref`)
+                # guessed/hallucinated one, got a real "asset not found" tool failure, then — with
+                # no clear instruction for how to recover — answered in plain English instead of
+                # its required JSON shape, failing the whole plan. This is a deterministic, structural
+                # fact about the plan's current state (not something worth another LLM guess), stated
+                # explicitly so any tool needing a real image is correctly skipped instead of guessed.
+                instruction_text += (
+                    "\n\nNO REAL IMAGE OR ASSET EXISTS YET for this request — no reference was "
+                    "given and no earlier step in this plan has produced one. Do NOT call any tool "
+                    "that requires an existing storage_ref (e.g. color_palette_extractor, "
+                    "image_editor) — you have no real storage_ref to give it, and guessing one will "
+                    "fail. Work from the written campaign/brand/product context only, or if your "
+                    "role genuinely cannot proceed without a real image, respond with your required "
+                    "JSON shape and an \"error\" field explaining why — never plain prose."
+                )
+
             # Find the text dict and append the instruction to it
             for part in step_context:
                 if part.get("type") == "text":

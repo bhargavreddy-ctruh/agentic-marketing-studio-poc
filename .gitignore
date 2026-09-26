@@ -1,8 +1,10 @@
-# Only backend/ and frontend/ source are tracked in this repo.
+# Only backend/ and frontend/ source (plus the Docker Compose setup) are tracked in this repo.
 /*
 !/backend
 !/frontend
 !/.gitignore
+!/docker-compose.yml
+!/DOCKER.md
 
 # --- Backend excludes ---
 backend/venv/

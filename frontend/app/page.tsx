@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, User, logout, me } from "@/lib/auth";
-import { SessionResponse, createSession, listSessions } from "@/lib/api";
+import { SessionResponse, createSession, listSessions, linkProfiles } from "@/lib/api";
 import { BrandProfile, listBrands, onboardBrand } from "@/lib/brand";
 import { ProductProfile, listOnboardedProducts, onboardProduct } from "@/lib/product";
 import { MoodBoardAsset, listMoodBoardAssets, moodBoardAssetUrl, uploadMoodBoardAsset } from "@/lib/moodboard";
@@ -29,6 +29,8 @@ export default function HomePage() {
   const [showNewWorkflow, setShowNewWorkflow] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newApprovalMode, setNewApprovalMode] = useState<"auto" | "approve">("auto");
+  const [newBrandProfileId, setNewBrandProfileId] = useState("");
+  const [newProductProfileId, setNewProductProfileId] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
@@ -104,6 +106,9 @@ export default function HomePage() {
     setCreating(true);
     try {
       const created = await createSession(newApprovalMode, newTitle.trim() || undefined);
+      if (newBrandProfileId || newProductProfileId) {
+        await linkProfiles(created.id, newBrandProfileId || undefined, newProductProfileId || undefined);
+      }
       router.push(`/studio/${created.id}`);
     } catch (err) {
       setWorkflowsError(err instanceof ApiError ? err.message : "Could not create a new workflow.");
@@ -461,6 +466,28 @@ export default function HomePage() {
               >
                 <option value="auto">Auto (no pauses)</option>
                 <option value="approve">Approve (real HITL gates)</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-sm text-neutral-600">
+              Brand Profile
+              <select
+                className="rounded border border-neutral-300 px-2 py-1"
+                value={newBrandProfileId}
+                onChange={(e) => setNewBrandProfileId(e.target.value)}
+              >
+                <option value="">None</option>
+                {brands.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            </label>
+            <label className="flex items-center gap-2 text-sm text-neutral-600">
+              Product Profile
+              <select
+                className="rounded border border-neutral-300 px-2 py-1"
+                value={newProductProfileId}
+                onChange={(e) => setNewProductProfileId(e.target.value)}
+              >
+                <option value="">None</option>
+                {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </label>
             <button

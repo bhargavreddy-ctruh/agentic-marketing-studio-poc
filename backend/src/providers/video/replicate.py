@@ -10,14 +10,14 @@ Uses the official `replicate` Python SDK directly (matches Replicate's own docum
 this exact model, and the SDK handles uploading local image bytes automatically — no manual
 base64 data-URI construction needed, unlike fal.ai's raw-REST provider).
 
-Default model: `prunaai/p-video` — a genuinely light, fast model ("generates a video in under 10
-seconds" per its own description), chosen specifically for cheap/quick testing, per the user's own
-example of how to call it. Its real, confirmed input schema is exactly
-`{image, prompt, prompt_upsampling}` — no aspect_ratio/resolution/duration fields exist on this
-model. Orientation and resolution for THIS model are therefore controlled by the aspect ratio and
-size of the INPUT IMAGE itself (it's an image-to-video model that animates the given frame), not by
-a request parameter — "what the user asked for" is honored upstream, in how the source image is
-generated, not here.
+Default model: `bytedance/seedance-2.0-fast` (2026-09-25, replacing `prunaai/p-video` — real,
+current schema confirmed live against api.replicate.com/v1/models/bytedance/seedance-2.0-fast, per
+`seedance_2.0_fast_replicate_reference.md`). Unlike p-video, this model has REAL `duration`,
+`resolution`, and `aspect_ratio` input fields (confirmed enums: resolution in {480p, 720p},
+aspect_ratio in {16:9, 4:3, 1:1, 3:4, 9:16, 21:9, 9:21, adaptive}) — what the user asked for is now
+honored directly as a request parameter, not indirectly via the input image's own dimensions.
+Native synchronized audio generation (`generate_audio`) is left at the model's own default (on) —
+a genuine capability upgrade, not something this provider should silently suppress.
 """
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ from ...core.middleware.logging import get_logger
 from .base import VideoGenProvider, VideoResult
 
 log = get_logger(__name__)
+
+_VALID_RESOLUTIONS = {"480p", "720p"}
+_VALID_ASPECT_RATIOS = {"16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "9:21", "adaptive"}
 
 
 class ReplicateVideoProvider(VideoGenProvider):
@@ -54,20 +57,10 @@ class ReplicateVideoProvider(VideoGenProvider):
     ) -> VideoResult:
         if not self._api_key:
             raise ProviderUnavailable("replicate", "REPLICATE_API_KEY is not set")
-        
+
         effective_image_bytes = image_bytes or first_frame_bytes
         if effective_image_bytes is None:
             raise ProviderUnavailable("replicate", "Video provider requires a source image or first frame")
-
-        log.info(
-            "replicate_orientation_note",
-            extra={
-                "_extra_requested_aspect_ratio": aspect_ratio,
-                "_extra_requested_resolution": resolution,
-                "_extra_camera_motion": camera_motion,
-                "_extra_note": "controlled via the input image's own dimensions on this model, not a request field",
-            },
-        )
 
         effective_prompt = prompt
         if camera_motion and camera_motion.lower() not in prompt.lower():
@@ -77,15 +70,33 @@ class ReplicateVideoProvider(VideoGenProvider):
             api_token=self._api_key,
             timeout=httpx.Timeout(600.0)
         )
+
+        # Real vendor constraint (confirmed via the model's own schema): duration is -1 (model
+        # picks) or an integer 1-15; anything outside that range would be rejected by the API, so
+        # clamp defensively rather than let an upstream caller's arbitrary value 400.
+        effective_duration = duration_seconds if duration_seconds == -1 else max(1, min(15, duration_seconds))
+        effective_resolution = resolution if resolution in _VALID_RESOLUTIONS else "720p"
+        effective_aspect_ratio = aspect_ratio if aspect_ratio in _VALID_ASPECT_RATIOS else "16:9"
+        if resolution not in _VALID_RESOLUTIONS or aspect_ratio not in _VALID_ASPECT_RATIOS:
+            log.warning(
+                "replicate_invalid_video_param_fallback",
+                extra={
+                    "_extra_requested_resolution": resolution,
+                    "_extra_requested_aspect_ratio": aspect_ratio,
+                    "_extra_used_resolution": effective_resolution,
+                    "_extra_used_aspect_ratio": effective_aspect_ratio,
+                },
+            )
+
         input_payload = {
             "image": io.BytesIO(effective_image_bytes),
             "prompt": effective_prompt,
-            "prompt_upsampling": False,  # keep the exact prompt as given — don't let the model rewrite it
+            "duration": effective_duration,
+            "resolution": effective_resolution,
+            "aspect_ratio": effective_aspect_ratio,
         }
-        if camera_motion:
-            input_payload["camera_motion"] = camera_motion
         if last_frame_bytes:
-            input_payload["last_frame"] = io.BytesIO(last_frame_bytes)
+            input_payload["last_frame_image"] = io.BytesIO(last_frame_bytes)
 
         start = time.monotonic()
         try:

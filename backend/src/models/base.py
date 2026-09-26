@@ -52,12 +52,25 @@ async def init_models() -> None:
             ("sessions", "style_seed", "INTEGER"),
             ("sessions", "approval_mode", "VARCHAR(16)"),
             ("sessions", "next_prompt_json", "JSON"),
+            # Explicit DEFAULT 1 (not just the model's own Python-side default), so an existing
+            # session's already-stored NULL from before this migration reads back as guardrails ON,
+            # never as falsy/off — a real gap the other nullable-with-a-default columns above don't
+            # have to worry about since Python None there just means "not set yet."
+            ("sessions", "guardrails_enabled", "BOOLEAN DEFAULT 1"),
             ("canvas_elements", "pending_storage_ref", "VARCHAR(255)"),
             ("canvas_elements", "pending_metadata", "JSON"),
             ("canvas_elements", "pending_action", "VARCHAR(32)"),
             ("canvas_elements", "compliance_status", "VARCHAR(16)"),
             ("canvas_elements", "ad_spec_name", "VARCHAR(64)"),
             ("canvas_elements", "safe_zone_pct", "FLOAT"),
+            # campaign_id/campaign_name (2026-09-25) discarded same-day per explicit user
+            # correction — a workflow IS one campaign; grouping is by real product instead (see
+            # `models/canvas_element.py`). Those two columns are left as harmless dead columns in
+            # any DB that already ran the earlier migration (SQLite can't cheaply drop a column);
+            # nothing reads them any more.
+            ("canvas_elements", "product_id", "VARCHAR(36)"),
+            ("canvas_elements", "product_name", "VARCHAR(255)"),
+            ("canvas_elements", "parent_element_id", "VARCHAR(36)"),
             ("canvas_element_versions", "element_type", "VARCHAR(32)"),
         ]
         from sqlalchemy import text

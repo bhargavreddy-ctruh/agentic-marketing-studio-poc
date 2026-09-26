@@ -12,6 +12,8 @@ interface GuardrailsSectionProps {
 }
 
 import { request } from "@/lib/http";
+import { getSession, updateGuardrailsEnabled } from "@/lib/api";
+import { ProductProfile, getProduct } from "@/lib/product";
 
 export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps) {
   const [rules, setRules] = useState<GuardrailRule[]>([]);
@@ -22,6 +24,53 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
     rulesRef.current = rules;
   }, [rules]);
   const pendingRef = useRef<Promise<void>>(Promise.resolve());
+
+  // Real, live-found gap (2026-09-25, explicit user report: "why can't i see product dna in my
+  // frontend/sessions") — the backend has been creating/updating real Product DNA rows from chat
+  // and canvas uploads for a while (session.brief["product_profile_ids"]), but nothing here ever
+  // read that field or showed a product's actual NAME — only the generic "product"-tagged rule
+  // sentences below, with no identity attached to them. This fetches the session's real linked
+  // products by id (`GET /api/v1/products/{id}`, the one per-id route that already exists) and
+  // shows them as their own real cards, separate from the flat rule list.
+  const [linkedProducts, setLinkedProducts] = useState<ProductProfile[]>([]);
+  const [productsLoading, setProductsLoading] = useState(false);
+
+  // Per-session on/off toggle (2026-09-25, explicit user ask: "add a toggle to turn off
+  // guardrails if user wants to") — loaded off the same `getSession` call `fetchLinkedProducts`
+  // already makes, rather than a separate request.
+  const [guardrailsEnabled, setGuardrailsEnabled] = useState(true);
+  const [guardrailsToggleBusy, setGuardrailsToggleBusy] = useState(false);
+
+  const fetchLinkedProducts = async () => {
+    setProductsLoading(true);
+    try {
+      const session = await getSession(sessionId);
+      setGuardrailsEnabled(session.guardrails_enabled);
+      const ids = (session.brief?.product_profile_ids as string[] | undefined) || [];
+      const results = await Promise.all(ids.map((id) => getProduct(id).catch(() => null)));
+      setLinkedProducts(results.filter((p): p is ProductProfile => p !== null));
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setProductsLoading(false);
+    }
+  };
+
+  const handleToggleGuardrails = async () => {
+    const next = !guardrailsEnabled;
+    setGuardrailsEnabled(next); // optimistic — reverted below on failure
+    setGuardrailsToggleBusy(true);
+    try {
+      await updateGuardrailsEnabled(sessionId, next);
+      setError(null);
+    } catch (e) {
+      console.error(e);
+      setGuardrailsEnabled(!next);
+      setError("Failed to update guardrails toggle.");
+    } finally {
+      setGuardrailsToggleBusy(false);
+    }
+  };
 
   const [newRuleSource, setNewRuleSource] = useState<"brand" | "product" | "custom">("custom");
   const [newRuleText, setNewRuleText] = useState("");
@@ -68,6 +117,7 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
   useEffect(() => {
     if (sessionId) {
       fetchGuardrails();
+      fetchLinkedProducts();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -127,16 +177,90 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
           <h2 className="text-base font-semibold text-white">DNA & Guardrails</h2>
           <p className="mt-0.5 text-xs text-surface-400">Strict rules the AI must follow when generating content.</p>
         </div>
-        <button onClick={fetchGuardrails} className="text-surface-400 hover:text-white transition-colors" title="Refresh">
+        <button
+          onClick={() => {
+            fetchGuardrails();
+            fetchLinkedProducts();
+          }}
+          className="text-surface-400 hover:text-white transition-colors"
+          title="Refresh"
+        >
           <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
           </svg>
         </button>
       </div>
 
+      {/* Per-session on/off toggle — when off, no guardrail rules are injected into any
+          specialist's prompt and the post-generation compliance gate is skipped entirely for this
+          session (session_service.py: `set_current_guardrails_xml`/`_run_compliance_background`).
+          The rules below stay visible/editable either way; this only controls enforcement. */}
+      <div className="mx-4 mt-3 shrink-0 flex items-center justify-between rounded-lg border border-surface-700/50 bg-surface-800/30 px-3 py-2">
+        <div>
+          <p className="text-xs font-medium text-white">Guardrails enforcement</p>
+          <p className="text-[11px] text-surface-400">
+            {guardrailsEnabled ? "Rules are enforced on every generation." : "Rules are OFF — nothing below is enforced right now."}
+          </p>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={guardrailsEnabled}
+          disabled={guardrailsToggleBusy}
+          onClick={handleToggleGuardrails}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+            guardrailsEnabled ? "bg-emerald-500" : "bg-surface-600"
+          }`}
+        >
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+              guardrailsEnabled ? "translate-x-5" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+
       {error && (
         <div className="mx-4 mt-3 shrink-0 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
           {error}
+        </div>
+      )}
+
+      {/* Products in this session — the real ProductProfileModel rows linked via
+          session.brief["product_profile_ids"] (created/refined from chat and canvas uploads),
+          shown by actual name/attributes instead of only as anonymous "product"-tagged rule
+          sentences further down. */}
+      {(productsLoading || linkedProducts.length > 0) && (
+        <div className="mx-4 mt-3 shrink-0 space-y-2">
+          <p className="text-[10px] uppercase font-bold tracking-wider text-surface-400">
+            Products in this session
+          </p>
+          {productsLoading && linkedProducts.length === 0 ? (
+            <div className="text-xs text-surface-500">Loading products…</div>
+          ) : (
+            linkedProducts.map((p) => (
+              <div key={p.id} className="rounded-xl border border-blue-500/30 bg-blue-500/5 p-3">
+                <p className="text-sm font-medium text-white">{p.name}</p>
+                {p.attributes?.summary && (
+                  <p className="mt-1 text-xs text-surface-300">{p.attributes.summary}</p>
+                )}
+                {(p.attributes?.must_show?.length || p.attributes?.never_show?.length) ? (
+                  <div className="mt-2 space-y-1 text-[11px]">
+                    {p.attributes.must_show?.length > 0 && (
+                      <p className="text-surface-400">
+                        <span className="text-emerald-400">Must show:</span> {p.attributes.must_show.join(", ")}
+                      </p>
+                    )}
+                    {p.attributes.never_show?.length > 0 && (
+                      <p className="text-surface-400">
+                        <span className="text-red-400">Never show:</span> {p.attributes.never_show.join(", ")}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ))
+          )}
         </div>
       )}
 

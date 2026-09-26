@@ -44,3 +44,20 @@ class CanvasElementModel(Base, TimestampMixin):
     compliance_status: Mapped[str] = mapped_column(String(16), default="running")
     ad_spec_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     safe_zone_pct: Mapped[float | None] = mapped_column(nullable=True)
+
+    # Canvas Grouping (2026-09-25, revised same day per explicit user correction: "in each workflow
+    # there can be only one campaign... the grouping would be according to the product id, not the
+    # campaign id"). A workflow/session IS one campaign — there's no separate campaign entity to
+    # track here. Grouping is by real Product DNA instead: `product_id` is a real
+    # `ProductProfileModel.id` (never a free-text/ad-hoc value), resolved in
+    # `services/orchestration/session_service.py` from, in order, an explicit pick, the referenced
+    # parent element's own product, or whatever product this turn's own chat-detection pipeline
+    # (`ProductDnaService.upsert_product_from_chat`, already running every turn for Product DNA)
+    # resolved. `product_name` is denormalized here purely so the canvas can label a frame without
+    # an extra fetch per element. All nullable — an element with no real product signal lands in the
+    # frontend's flat, honestly-labeled "Unassigned" bucket, never a fabricated grouping.
+    # `parent_element_id` unchanged from the earlier pass: set server-side from the turn's own
+    # `referenced_element_ids[0]`, never a separate client-sent field.
+    product_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    product_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    parent_element_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)

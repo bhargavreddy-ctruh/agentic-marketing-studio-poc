@@ -46,7 +46,10 @@ export interface SessionResponse {
   title: string;
   status: string;
   approval_mode: "auto" | "approve";
+  guardrails_enabled: boolean;
   brief: Record<string, unknown>;
+  brand_profile_id?: string | null;
+  product_profile_id?: string | null;
   style_ref_storage_ref?: string | null;
   style_seed?: number | null;
   created_at: string;
@@ -70,6 +73,21 @@ export async function createSession(
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ approval_mode: approvalMode, title }),
+  });
+}
+
+export async function linkProfiles(
+  sessionId: string,
+  brandProfileId?: string,
+  productProfileId?: string
+): Promise<any> {
+  return request(`/api/v1/sessions/${sessionId}/guardrails/link-profiles`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      brand_profile_id: brandProfileId || null,
+      product_profile_id: productProfileId || null,
+    }),
   });
 }
 
@@ -109,9 +127,33 @@ export async function updateApprovalMode(
   });
 }
 
+/** Per-session guardrails on/off (2026-09-25, explicit user ask: "add a toggle to turn off
+ * guardrails if user wants to") — same shape as `updateApprovalMode` above. */
+export async function updateGuardrailsEnabled(
+  sessionId: string,
+  guardrailsEnabled: boolean,
+): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/guardrails-enabled`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ guardrails_enabled: guardrailsEnabled }),
+  });
+}
+
 export async function postTurn(
   sessionId: string,
-  args: { pickedOptionId?: string; freeText?: string; referencedElementIds?: string[] },
+  args: {
+    pickedOptionId?: string;
+    freeText?: string;
+    referencedElementIds?: string[];
+    // Canvas Grouping (2026-09-25, revised same day: a workflow IS one campaign — grouping is by
+    // real Product DNA instead) — which of the session's already-known products this turn's
+    // generated element(s) belong to. Always an existing real product id, never free text; a
+    // genuinely new product is created through the existing chat-detection/manual-onboarding
+    // paths. Omitted, the backend inherits the referenced element's own product, or leaves the
+    // new element unassigned.
+    targetProductId?: string;
+  },
 ): Promise<SessionResponse> {
   return request<SessionResponse>(`/api/v1/sessions/${sessionId}/turns`, {
     method: "POST",
@@ -120,6 +162,7 @@ export async function postTurn(
       picked_option_id: args.pickedOptionId,
       free_text: args.freeText,
       referenced_element_ids: args.referencedElementIds,
+      target_product_id: args.targetProductId,
     }),
   });
 }

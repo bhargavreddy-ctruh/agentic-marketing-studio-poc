@@ -16,8 +16,15 @@ SOURCE_PROJECT = "project"
 SOURCE_PRODUCT = "product"
 SOURCE_INFERRED = "inferred"
 SOURCE_HUMAN = "human"
+# A freeform constraint the user stated in chat that doesn't fit any DNA profile (e.g. "must be
+# red", "winter campaign") — `session_service.py`'s `new_guardrails` handling has produced rules
+# with this source since 2026-09-24. Real, live-found bug (2026-09-25): this was never added here,
+# so `coerce_rule` below silently downgraded every one of them to `SOURCE_INFERRED` on the very next
+# read — round-tripping through `session.brief` was enough to strip a rule of the "don't touch this,
+# a human said it" protection it was supposed to have from the moment it was created.
+SOURCE_CUSTOM = "custom"
 
-ALL_SOURCES = (SOURCE_BRAND, SOURCE_PROJECT, SOURCE_PRODUCT, SOURCE_INFERRED, SOURCE_HUMAN)
+ALL_SOURCES = (SOURCE_BRAND, SOURCE_PROJECT, SOURCE_PRODUCT, SOURCE_INFERRED, SOURCE_HUMAN, SOURCE_CUSTOM)
 
 # How widely a rule applies.
 SCOPE_CAMPAIGN = "campaign"
@@ -122,16 +129,24 @@ def _slug(text: str) -> str:
     return "_".join(p for p in out.split("_") if p)[:40] or "field"
 
 
-def _product_rules(product: dict) -> list[GuardrailRule]:
-    """Rules from the product JSON attributes."""
+def _product_rules(product: dict, key: str = "") -> list[GuardrailRule]:
+    """Rules from one product's JSON attributes.
+
+    `key` (2026-09-25, real requirement: "there might be many products in one session") namespaces
+    every rule id to this specific product — e.g. `product.<id>.identity` instead of the old bare
+    `product.identity` — so deriving rules for several products in the same session doesn't have a
+    second product's `product.identity` silently collide with (and get dropped by) the first's under
+    `GuardrailSet.merge`'s existing-id-wins semantics. Empty `key` keeps the original unprefixed
+    scheme, for the one remaining single-product caller (`resolve()`, currently unused)."""
     if not product:
         return []
 
     rules: list[GuardrailRule] = []
+    prefix = f"product.{key}." if key else "product."
 
     def add(suffix: str, text: str) -> None:
         rules.append(
-            GuardrailRule(id=f"product.{suffix}", rule=text,
+            GuardrailRule(id=f"{prefix}{suffix}", rule=text,
                           source=SOURCE_PRODUCT, scope=SCOPE_CAMPAIGN)
         )
 
@@ -161,7 +176,11 @@ def _product_rules(product: dict) -> list[GuardrailRule]:
         add("label_visibility", f"Label visibility requirement: {product['label_visibility']}.")
 
     # All other arbitrary attributes in the JSON mapping
-    handled_keys = {"name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility"}
+    # "id" (2026-09-25): the product's own row id, added by `_load_brand_and_products_json` purely
+    # to namespace this product's rule ids (see `key` above) — a real, live-found bug caught by
+    # testing: without exclusion here it fell into the generic-attribute loop below and produced a
+    # nonsense rule ("The id is 94a79fab...").
+    handled_keys = {"id", "name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility"}
     for key, value in product.items():
         if key in handled_keys:
             continue
@@ -216,10 +235,18 @@ def _rules_from_synthesized_brand(brand: dict) -> list[GuardrailRule]:
     return rules
 
 
-def derive_guardrails(brand: dict = None, product: dict = None, project: dict = None) -> GuardrailSet:
+def derive_guardrails(
+    brand: dict = None, products: list[dict] | None = None, project: dict = None
+) -> GuardrailSet:
     """
     The rules that follow directly from the JSON fields supplied.
     Deterministic on purpose: the same inputs yield the same rules.
+
+    `products` (2026-09-25, was a single `product: dict` — real requirement: "there might be many
+    products in one session") — a session can now be chatting about several distinct products at
+    once, each with its own real Product DNA row; every one of them contributes its own
+    id-namespaced rule set (see `_product_rules`'s `key` param) rather than only the last-linked
+    product ever having a say.
     """
     rules: list[GuardrailRule] = []
 
@@ -238,7 +265,9 @@ def derive_guardrails(brand: dict = None, product: dict = None, project: dict = 
                 )
             )
 
-    rules.extend(_product_rules(product or {}))
+    for product in products or []:
+        key = _clean(product.get("id")) or _slug(product.get("name", ""))
+        rules.extend(_product_rules(product, key=key))
     return GuardrailSet(version=GUARDRAIL_VERSION, rules=rules)
 
 
@@ -295,7 +324,7 @@ def resolve(
     supplied: Any = None,
     *,
     brand: dict = None,
-    product: dict = None,
+    products: list[dict] | None = None,
     project: dict = None,
 ) -> GuardrailSet:
     """
@@ -305,4 +334,4 @@ def resolve(
     existing = coerce_set(supplied)
     if existing is not None and existing.rules:
         return existing
-    return derive_guardrails(brand, product, project)
+    return derive_guardrails(brand, products, project)

@@ -155,10 +155,11 @@ class Settings(BaseSettings):
     # Replicate — added as a second video provider option (Memory.md, Phase 2): fal.ai's account
     # balance was found exhausted during real testing, so this exists as an alternative to try
     # once a real key is added, not because fal.ai's provider code was wrong.
-    # prunaai/p-video specifically chosen per the user's own example: a genuinely light, fast
-    # model ("generates a video in under 10 seconds") — ideal for testing, not a guess.
+    # bytedance/seedance-2.0-fast (2026-09-25, replacing prunaai/p-video — see
+    # providers/video/replicate.py's own docstring): real duration/resolution/aspect_ratio input
+    # fields, confirmed live against the model's own schema, not a text-to-video guess.
     replicate_api_token: str | None = None
-    replicate_model: str = "prunaai/p-video"
+    replicate_model: str = "bytedance/seedance-2.0-fast"
 
     # --- Legacy providers (registered, inactive by default — see Rules.md section 6) ---
     gemini_api_key: str | None = None

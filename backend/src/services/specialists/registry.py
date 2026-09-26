@@ -98,7 +98,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="palette_strategist",
         prompt_file="palette_strategist.md",
-        allowed_tools=("color_palette_extractor", "brand_kit_lookup"),
+        allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup"),
         tier=ModelTier.TIER_1,
         description="Decides a color direction BEFORE generation — never produces or edits an asset itself.",
         # Verified live against the local model (2026-09-21, 3 real runs: no brand kit, a real

@@ -21,7 +21,13 @@ import json
 from ...core.exceptions import SpecialistFailed
 from ...core.middleware.logging import get_logger
 from ..specialists.runner import AgenticStepResult, run_specialist_agentic, run_specialist_with_review
-from .base import LeadResult, LeadSpec, referenced_element_block, stale_campaign_context_block
+from .base import (
+    LeadResult,
+    LeadSpec,
+    aspect_ratio_hint_block,
+    referenced_element_block,
+    stale_campaign_context_block,
+)
 
 log = get_logger(__name__)
 
@@ -66,18 +72,30 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     reference = await run_specialist_agentic(
         "reference_curator",
         context=f"Campaign idea:\n{idea}{referenced_element_block(brief)}\n\nBrief so far:\n{json.dumps(brief)}",
+        brief=brief,
     )
     aesthetic_direction = reference.get("aesthetic_direction", "")
 
+    # `referenced_element_block` here too (2026-09-25) — Palette Strategist previously had no
+    # storage_ref anywhere in its context, so it could never actually analyze the real referenced
+    # image (`runner.py`'s reference_storage_ref auto-injection into tool context also only
+    # activates `if brief:`, so `brief=brief` below is a real prerequisite, not just for chat
+    # history). See visual_palette_analyzer.py for what it can now do with that storage_ref.
     palette = await run_specialist_agentic(
         "palette_strategist",
-        context=f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}",
+        context=(
+            f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}"
+            f"{referenced_element_block(brief)}"
+        ),
+        brief=brief,
     )
 
     illustrator_context = (
         f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}\n\n"
         f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
         f"Brief so far:\n{json.dumps(brief)}"
+        f"{referenced_element_block(brief)}"
+        f"{aspect_ratio_hint_block(idea)}"
     )
     # One-pass product compositing: if a product photo exists, tell the illustrator to pass it as
     # reference_storage_ref to base_image_generator. Qwen image-to-image generates the background

@@ -27,3 +27,9 @@ class SqliteProductRepository:
     async def list_all(self) -> list[ProductProfileModel]:
         result = await self._db.execute(select(ProductProfileModel))
         return list(result.scalars().all())
+
+    async def list_for_user(self, user_id: str) -> list[ProductProfileModel]:
+        result = await self._db.execute(
+            select(ProductProfileModel).where(ProductProfileModel.user_id == user_id)
+        )
+        return list(result.scalars().all())

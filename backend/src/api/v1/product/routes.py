@@ -6,16 +6,21 @@ from fastapi import APIRouter
 from ....mappers.product_mapper import ProductMapper
 from ....schemas.product.requests import OnboardProductRequest
 from ....schemas.product.responses import ProductProfileResponse
-from ...dependencies import ProductDnaServiceDep
+from ...dependencies import CurrentUserDep, ProductDnaServiceDep
 
 router = APIRouter(prefix="/api/v1/products", tags=["products"])
 
 
 @router.post("", response_model=ProductProfileResponse)
 async def onboard_product(
-    body: OnboardProductRequest, svc: ProductDnaServiceDep
+    body: OnboardProductRequest, svc: ProductDnaServiceDep, current_user: CurrentUserDep
 ) -> ProductProfileResponse:
+    # Real, live-found bug (2026-09-25): this call used to omit `user_id` entirely even though
+    # `ProductDnaService.onboard_product` requires it — a real TypeError on every real call,
+    # confirmed live (the only product row ever created in this app's DB has `user_id = NULL`,
+    # meaning it predates this route requiring the field). Mirrors `brand/routes.py`'s own pattern.
     product = await svc.onboard_product(
+        user_id=current_user.id,
         name=body.name,
         description=body.description,
         price=body.price,

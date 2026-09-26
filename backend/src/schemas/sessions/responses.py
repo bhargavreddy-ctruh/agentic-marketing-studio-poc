@@ -27,7 +27,16 @@ class SessionResponse(BaseModel):
     title: str
     status: str
     approval_mode: str
+    guardrails_enabled: bool
     brief: dict
+    # Real, live-found gap (2026-09-25): these two real DB columns were never exposed here at all,
+    # so a frontend reading a session back had no way to tell WHICH brand/product was explicitly
+    # linked — `GuardrailService._load_brand_and_products_json`'s explicit-link-else-fallback logic
+    # is entirely server-side and invisible otherwise. `product_profile_id` is the single "most
+    # recently touched" convenience column (also used for `product_photo_storage_ref` injection);
+    # the real multi-product list lives in `brief["product_profile_ids"]`, already exposed via `brief`.
+    brand_profile_id: str | None = None
+    product_profile_id: str | None = None
     created_at: datetime
     updated_at: datetime
     next_prompt: IdeationPrompt | None = None

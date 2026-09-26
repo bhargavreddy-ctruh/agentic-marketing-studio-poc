@@ -1,7 +1,7 @@
 """A conversation/ideation session — one per user's creative-partner interaction."""
 from __future__ import annotations
 
-from sqlalchemy import JSON, String
+from sqlalchemy import JSON, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -30,6 +30,13 @@ class SessionModel(Base, TimestampMixin):
     # or "approve" (Memory.md, Phase 4: real per-stage pipeline gates and per-edit staging — a
     # user's explicit ask for genuine approval checkpoints, not just after-the-fact fixes).
     approval_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    # User-facing per-session toggle (2026-09-25, explicit user ask): when False, this session's
+    # turns skip both real enforcement points — no guardrails XML is injected into any specialist's
+    # system prompt (session_service.py sets an empty ContextVar instead), and the post-hoc
+    # compliance gate is skipped entirely (status goes straight to "disabled", same as the existing
+    # global `Settings.compliance_qa_enabled` kill switch, just scoped to one session instead of
+    # every session). Default True — guardrails stay on unless a user explicitly turns them off.
+    guardrails_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     # The last turn's real IdeationPrompt (message/options/allow_free_text), persisted so a plain
     # GET can honestly reproduce what the client last saw — previously this was computed only
     # per-turn and handed back in that same response, so a page refresh or the "refresh" button

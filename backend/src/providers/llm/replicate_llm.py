@@ -6,6 +6,22 @@ prompt string. This provider will serialize the chat history into the prompt.
 
 Retry policy: retries up to _MAX_RETRIES times with exponential backoff on transient
 errors (unlike Groq which tries each key once and moves on).
+
+Real vision support (2026-09-25): gemini-2.5-flash IS genuinely multimodal on Replicate —
+confirmed live against the model's own schema (api.replicate.com/v1/models/google/gemini-2.5-flash),
+which has an `images` input field (array of URIs, up to 10 images/7MB each), not a text-only
+limitation. `image_url` content parts (the same shape `vision.py` builds for Groq) are now
+forwarded there as data URIs instead of being silently dropped, so this provider can serve as a
+genuine vision fallback, not just a text-only one.
+
+Tool-calling (2026-09-26): this model has no native `tools` input field, so a tool-using
+specialist's request is nudged via a system-prompt instruction instead (see the `if tools:` block
+below) — the model often replies with a Python-call-style expression rather than perfect JSON
+(e.g. Gemini's own `{"tool_code": "print(func(...))"}` habit). That's expected, not a bug to
+prompt-engineer away: `runner.py`'s `_recover_pseudo_tool_call` safely recognizes and parses this
+pattern (via `ast`, never `eval`) into a REAL, executed tool call — provider-agnostic, so the same
+recovery also covers Groq producing this same pattern under a weaker fallback model, not just this
+provider.
 """
 from __future__ import annotations
 
@@ -47,37 +63,55 @@ class ReplicateLLMProvider(LLMProvider):
             raise ProviderUnavailable("replicate_llm", "REPLICATE_API_TOKEN is not set")
 
         # Map messages to a single prompt string since Replicate's google/gemini-2.5-flash
-        # only accepts a `prompt` field (no messages array).
+        # only accepts a `prompt` field (no messages array). `image_url` parts (the shape
+        # vision.py builds) are collected separately and passed via the model's real `images`
+        # field below, rather than dropped — see this file's module docstring.
         prompt = ""
+        images: list[str] = []
         for m in messages:
             role = m.get("role", "user").upper()
             content = m.get("content", "")
-            
+
             if isinstance(content, list):
-                # Extract only text parts, ignore base64 images to prevent token limit errors
                 text_parts = []
                 for part in content:
                     if part.get("type") == "text":
                         text_parts.append(part.get("text", ""))
+                    elif part.get("type") == "image_url":
+                        url = part.get("image_url", {}).get("url")
+                        if url:
+                            images.append(url)
                 content_str = "\n".join(text_parts)
             else:
                 content_str = str(content)
-                
+
             prompt += f"{role}:\n{content_str}\n\n"
 
         if tools:
-            # Replicate's google/gemini-2.5-flash doesn't support native tool calling yet.
-            # We append the tool schemas to the system instruction in hopes it outputs JSON,
-            # though it's not a native guarantee.
+            # Replicate's google/gemini-2.5-flash doesn't support native tool calling (confirmed
+            # via the model's own schema — no `tools`/`functions` input field exists). Appending
+            # the schemas to the system instruction is a best-effort nudge, not a guarantee: the
+            # model often replies with a Python-call-style expression instead of real JSON (e.g.
+            # `{"tool_code": "print(base_image_generator(prompt='...'))"}`). That's expected and
+            # handled: `runner.py`'s `_recover_pseudo_tool_call` recognizes and safely parses this
+            # exact pattern (via `ast`, never `eval`) into a real, executable tool call — this
+            # provider doesn't need to produce perfect JSON for a tool call to actually happen.
             tool_descriptions = "\\n".join(str(t) for t in tools)
-            system += f"\n\nYou have access to the following tools. If you want to use them, you must respond with a JSON object describing the tool call:\n{tool_descriptions}"
+            system += (
+                f"\n\nYou have access to the following tools. If you want to use one, respond with "
+                f"a JSON object describing the call: {{\"tool_call\": {{\"name\": \"<tool_name>\", "
+                f"\"arguments\": {{...}}}}}}. If that's not possible, a direct function-call "
+                f"expression like tool_name(arg='value', ...) is also understood.\n{tool_descriptions}"
+            )
 
-        input_data = {
+        input_data: dict[str, Any] = {
             "prompt": prompt.strip(),
             "system_instruction": system,
             "max_output_tokens": max_tokens,
             "temperature": 0.7,
         }
+        if images:
+            input_data["images"] = images[:10]  # real vendor cap, confirmed via the model's own schema
 
         loop = asyncio.get_running_loop()
         last_error: Exception | None = None

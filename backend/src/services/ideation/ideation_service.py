@@ -59,6 +59,7 @@ Given a running brief (what the user has told you so far) and their latest messa
 
 5. **NO ASSUMPTIONS ON VAGUE INPUTS:** Never assume anything that is not explicitly stated. If the user attaches an image but doesn't explain how to use it, or if their request is too vague (e.g., "create a sale post" without specifying the product or brand), DO NOT guess. You MUST set `ready: false` and ask for clarification.
 6. **DYNAMIC GUARDRAILS FIRST:** It is very important to create guardrails first based on the user's inputs. If the user specifies any strict requirement, constraint, style preference, or describes their product/brand (e.g. "winter campaign", "must be red"), extract these immediately into `new_guardrails`.
+7. **CAMPAIGN SUMMARY:** Separately from `idea`, also fill `audience` (who this is for, e.g. "young adults into streetwear") and `goal` (what this campaign is trying to achieve, e.g. "drive holiday sales", "build brand awareness") whenever the message makes either genuinely clear — even a implicit signal counts (a "winter sale" message implies the goal is driving sales). Leave either as an empty string when truly not inferable; never invent a generic-sounding one just to fill the field.
 
 Never ask more than one thing at a time — if content is unclear, resolve that before ever touching style. Prefer proposing options over asking an open question. Keep your tone warm and encouraging.
 
@@ -67,7 +68,11 @@ Stay strictly on task: you only help plan and generate product marketing visuals
 Return ONLY JSON:
 {
   "ready": true or false,
-  "merged_brief": {"idea": "a clear, one-paragraph synthesis of the brief so far, including any visual mood/style direction you chose"},
+  "merged_brief": {
+    "idea": "a clear, one-paragraph synthesis of the brief so far, including any visual mood/style direction you chose",
+    "audience": "who this campaign is for, or empty string if not inferable",
+    "goal": "what this campaign is trying to achieve, or empty string if not inferable"
+  },
   "style_note": "one short sentence announcing the mood/style you picked, only when ready is true and this was a visual request — omit/empty otherwise",
   "message": "a short line stating what's still needed, only used when ready is false",
   "options": [{"id": "short_id", "label": "Bold label", "description": "one-line rationale"}],
@@ -408,7 +413,12 @@ async def run_ideation(state: GraphState) -> GraphState:
         merged_brief = {"idea": raw_merged.strip()}
     else:
         merged_brief = {}
-    
+
+    # `audience`/`goal` (2026-09-25, Campaign tab auto-fill): a blank string here means "not
+    # inferable from THIS message", not "clear it" — dropped before the merge below so it never
+    # overwrites a real value a previous turn already captured.
+    merged_brief = {k: v for k, v in merged_brief.items() if k not in ("audience", "goal") or (isinstance(v, str) and v.strip())}
+
     # Extract new guardrails if provided (2026-09-24)
     new_guardrails = parsed.get("new_guardrails")
     if isinstance(new_guardrails, list):

@@ -40,6 +40,12 @@ class CanvasElementResponse(BaseModel):
     # not metadata_json's full internal shape (Rules.md: layers talk through typed DTOs).
     text_content: str | None = None
     alignment_warning: str | None = None
+    # Canvas Grouping (2026-09-25, revised: grouped by real Product DNA, not a free-text campaign
+    # — a workflow IS one campaign) — which real product this element belongs to, and which
+    # element (if any) it was generated from.
+    product_id: str | None = None
+    product_name: str | None = None
+    parent_element_id: str | None = None
 
 
 class CanvasStateResponse(BaseModel):

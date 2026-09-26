@@ -35,27 +35,51 @@ class BrandDnaService:
     def __init__(self, brands: BrandRepository):
         self._brands = brands
 
-    async def onboard_brand(self, *, user_id: str, name: str, raw_facts: dict) -> BrandProfileModel:
-        guardrails = await synthesize_guardrails(raw_facts=raw_facts)
+    async def onboard_brand(
+        self, *, user_id: str, name: str, raw_facts: dict, brand_id: str | None = None, merge: bool = True,
+    ) -> BrandProfileModel:
+        """`brand_id` (2026-09-25, real requirement: "brand dna is same across all sessions of a
+        user" — the "DNA" tab's manual Brand DNA form must update the user's ONE existing brand
+        row, not spawn a new one per session) — when given, updates that row in place; existing
+        `raw_facts` keys not present in this call's `raw_facts` are kept, not dropped, so editing
+        from one session doesn't silently erase facts entered from another.
 
-        brand = BrandProfileModel(
-            id=uuid.uuid4().hex,
-            user_id=user_id,
-            name=name,
-            raw_profile={"raw_facts": raw_facts, "guardrails": guardrails},
-            indexed=False,
-        )
-        brand = await self._brands.add(brand)
+        `merge` (2026-09-25, real requirement: "give the user option to edit" the brand's actual
+        fact list) — the merge-only behavior above is correct for the DNA tab's simplified 3-field
+        form (which only ever shows/edits a SUBSET of the real facts, so it must never silently wipe
+        the rest), but is WRONG for a caller presenting the user the COMPLETE fact list to edit
+        directly: a key the user deliberately removed there would otherwise survive the merge and
+        silently reappear. `merge=False` replaces `raw_facts` outright with exactly what's given."""
+        existing = await self._brands.get(brand_id) if brand_id else None
+        existing_facts = existing.raw_profile.get("raw_facts", {}) if existing else {}
+        merged_facts = {**existing_facts, **raw_facts} if merge else dict(raw_facts)
+        guardrails = await synthesize_guardrails(raw_facts=merged_facts)
+
+        if existing:
+            existing.name = name
+            existing.raw_profile = {"raw_facts": merged_facts, "guardrails": guardrails}
+            brand = await self._brands.add(existing)
+        else:
+            brand = BrandProfileModel(
+                id=uuid.uuid4().hex,
+                user_id=user_id,
+                name=name,
+                raw_profile={"raw_facts": merged_facts, "guardrails": guardrails},
+                indexed=False,
+            )
+            brand = await self._brands.add(brand)
 
         # Real LlamaIndex ingestion — not a static config file, per the user's explicit decision
         # to keep the real retrieval system from day one (Architecture.md section 3).
-        # Disclosed, deliberate scope cut (Tasks_Workflows.md #3): the index itself is one flat
-        # collection with no per-owner filter at retrieval time (brand_kit_lookup.py queries
-        # `collection="brand"` with no owner scoping) — real ownership now exists at the SQL/HTTP
-        # layer (who can onboard/list/read a BrandProfileModel row), but cross-user RAG retrieval
-        # isolation is a separate, larger piece of work not done in this pass.
+        # Per-user isolation (verified live, 2026-09-25 — an earlier comment here claiming
+        # `brand_kit_lookup.py` queries a flat, unscoped `"brand"` collection was stale/wrong):
+        # both indexing here and retrieval in `tools/brand_kit_lookup.py` use the exact same
+        # `f"brand_{user_id}"` collection name — confirmed no cross-user leak in that path. The
+        # real, separate gap that DID exist (compliance checkers calling the lookup tool with no
+        # `user_id` at all, always hitting its "not configured" early-exit) is fixed in
+        # `compliance/compliance_gate.py`/`brand_consistency_checker.py`.
         await get_knowledge_provider().index_document(
-            collection=f"brand_{user_id}", doc_id=brand.id, text=_build_index_text(name, raw_facts, guardrails)
+            collection=f"brand_{user_id}", doc_id=brand.id, text=_build_index_text(name, merged_facts, guardrails)
         )
         brand.indexed = True
         return await self._brands.add(brand)

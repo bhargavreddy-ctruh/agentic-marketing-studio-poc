@@ -32,3 +32,18 @@ export async function onboardBrand(
     body: JSON.stringify({ name, raw_facts: rawFacts }),
   });
 }
+
+/** 2026-09-25, real requirement: "give the user option to edit" their brand's real facts —
+ * REPLACES an existing brand's `raw_facts` outright (backend does `merge=False` when `brand_id`
+ * is given, see `api/v1/brand/routes.py`), so a key the user removed here actually stays removed. */
+export async function updateBrandFacts(
+  brandId: string,
+  name: string,
+  rawFacts: Record<string, unknown>,
+): Promise<BrandProfile> {
+  return request<BrandProfile>("/api/v1/brands", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, raw_facts: rawFacts, brand_id: brandId }),
+  });
+}

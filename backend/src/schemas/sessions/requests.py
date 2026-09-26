@@ -26,6 +26,12 @@ class UpdateApprovalModeRequest(BaseModel):
     approval_mode: str = Field(pattern="^(auto|approve)$")
 
 
+class UpdateGuardrailsEnabledRequest(BaseModel):
+    # Per-session on/off toggle (2026-09-25, explicit user ask: "add a toggle to turn off
+    # guardrails if user wants to") — same shape/pattern as `UpdateApprovalModeRequest` above.
+    guardrails_enabled: bool
+
+
 class PostTurnRequest(BaseModel):
     # Exactly one of these should be set — a card pick, or free text (Architecture.md section 1d).
     picked_option_id: str | None = None
@@ -34,6 +40,15 @@ class PostTurnRequest(BaseModel):
     # element in chat") — grounds direct_fix against THESE elements instead of whichever was most
     # recently created. Falls back to today's auto-inferred behavior when absent or stale.
     referenced_element_ids: list[str] | None = None
+    # Canvas Grouping (2026-09-25, revised same day: a workflow IS one campaign — grouping is by
+    # real Product DNA instead) — which of the session's already-known products
+    # (`session.brief["product_profile_ids"]`) this turn's generated element(s) belong to. Always
+    # an EXISTING real product id, never a free-text name — a genuinely new product is created
+    # through the existing chat-detection/manual-onboarding paths, not through this field. Omitted,
+    # the new element inherits the referenced parent's own product (via `referenced_element_ids[0]`)
+    # or whatever product this turn's own chat message gets auto-detected as being about; with
+    # neither, it lands in the unassigned bucket.
+    target_product_id: str | None = None
 
 class CampaignDetails(BaseModel):
     campaignIdea: str | None = None

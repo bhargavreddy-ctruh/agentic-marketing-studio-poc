@@ -86,15 +86,20 @@ def _resolve_yes_no_reply(reply: str, option_labels: dict[str, str]) -> str | No
 _BARE_RETRY_LABEL = "try again"
 
 
-def _find_real_user_message(past_turns: list) -> str | None:
+def _find_real_user_message_and_refs(past_turns: list) -> tuple[str | None, list[str] | None]:
     """Walks the session's own real chat history backward for the most recent turn that wasn't
     ITSELF just a bare "Try again" — so retrying a retry still recovers the real original request,
-    not the previous retry's own placeholder text."""
+    not the previous retry's own placeholder text. Also recovers that SAME turn's
+    `referenced_element_ids` (2026-09-25, a real, live-found gap: the field is a real persisted
+    JSON column on `ChatTurnModel`, but nothing previously read it back — the frontend's own
+    reference chip is cleared right after a turn is sent, so a "Try again" after a failed turn
+    always resent an empty list, silently losing the reference the original request was about, and
+    this function only ever recovered the TEXT half of that same turn)."""
     for turn in reversed(past_turns):
         text = (turn.user_text or "").strip()
         if text and text.lower() != _BARE_RETRY_LABEL:
-            return text
-    return None
+            return text, (getattr(turn, "referenced_element_ids", None) or None)
+    return None, None
 
 
 class SessionService:
@@ -158,6 +163,18 @@ class SessionService:
         session = await self._sessions.update(session)
         return SessionMapper.to_response(session)
 
+    async def update_guardrails_enabled(
+        self, session_id: str, *, user_id: str, guardrails_enabled: bool
+    ) -> SessionResponse:
+        """Per-session on/off toggle (2026-09-25, explicit user ask). Safe to change at any point,
+        same reasoning as `update_approval_mode` above — both real enforcement points
+        (`_run_turn_inner`'s guardrails-XML injection, `_run_compliance_background`'s compliance
+        gate) read the session's CURRENT value fresh on each turn, never a value captured once."""
+        session = await self._get_owned_session(session_id, user_id=user_id)
+        session.guardrails_enabled = guardrails_enabled
+        session = await self._sessions.update(session)
+        return SessionMapper.to_response(session)
+
     async def list_sessions(self, *, user_id: str) -> list[SessionResponse]:
         sessions = await self._sessions.list_for_user(user_id)
         return [SessionMapper.to_response(s) for s in sessions]
@@ -209,6 +226,7 @@ class SessionService:
         picked_option_id: str | None,
         free_text: str | None,
         referenced_element_ids: list[str] | None = None,
+        target_product_id: str | None = None,
     ) -> SessionResponse:
         session = await self._get_owned_session(session_id, user_id=user_id)
         if not picked_option_id and not free_text:
@@ -287,7 +305,8 @@ class SessionService:
                 brief_with_target["_laya_approved_specialist"] = laya_specialist
                 session.brief = brief_with_target
                 return await self._run_turn(
-                    session, user_message=original_message, referenced_element_ids=referenced_element_ids
+                    session, user_message=original_message, referenced_element_ids=referenced_element_ids,
+                    target_product_id=target_product_id,
                 )
             # Neither a clear approve nor a clear cancel (e.g. the user typed something else
             # entirely instead of picking either option) — treat it as a genuinely new message,
@@ -323,17 +342,22 @@ class SessionService:
         user_message = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
             picked_option_id, picked_option_id
         )
-        # See `_find_real_user_message`'s own comment above: a bare "retry" is a continuation of
-        # the real prior request, not a new one — recovered from real chat history so it's what
-        # actually reaches classification/ideation/persisted history/semantic memory this turn,
-        # instead of the content-free label "Try again" itself.
+        # See `_find_real_user_message_and_refs`'s own comment above: a bare "retry" is a
+        # continuation of the real prior request, not a new one — recovered from real chat history
+        # so it's what actually reaches classification/ideation/persisted history/semantic memory
+        # this turn, instead of the content-free label "Try again" itself. The reference is
+        # recovered the same way, and only used to FILL IN a gap — an explicit reference the caller
+        # already sent (e.g. the user picked a different element for this retry) always wins.
         if not free_text and (user_message or "").strip().lower() == _BARE_RETRY_LABEL:
             past_turns = await self._chat_turns.list_for_session(session.id)
-            real_message = _find_real_user_message(past_turns)
+            real_message, real_refs = _find_real_user_message_and_refs(past_turns)
             if real_message:
                 user_message = real_message
+            if real_refs and not referenced_element_ids:
+                referenced_element_ids = real_refs
         return await self._run_turn(
-            session, user_message=user_message, referenced_element_ids=referenced_element_ids
+            session, user_message=user_message, referenced_element_ids=referenced_element_ids,
+            target_product_id=target_product_id,
         )
 
     async def get_session(self, session_id: str, *, user_id: str) -> SessionResponse:
@@ -351,7 +375,8 @@ class SessionService:
         return session
 
     async def _run_turn(
-        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None
+        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None,
+        target_product_id: str | None = None,
     ) -> SessionResponse:
         # Sets the ContextVar every nested call (Leads, specialists, tools) reads to emit live
         # events for THIS turn, without session_id being threaded through every function
@@ -377,7 +402,8 @@ class SessionService:
             
         try:
             return await self._run_turn_inner(
-                session, user_message=user_message, referenced_element_ids=referenced_element_ids
+                session, user_message=user_message, referenced_element_ids=referenced_element_ids,
+                target_product_id=target_product_id,
             )
         except Exception as exc:
             # A real, live-found regression in the "generating" marker just added above
@@ -417,7 +443,8 @@ class SessionService:
             await mark_turn_done(session.id)
 
     async def _run_turn_inner(
-        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None
+        self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None,
+        target_product_id: str | None = None,
     ) -> SessionResponse:
         # The direct_fix route needs something to act on — the most recently produced element by
         # default (Memory.md, Phase 3 conformance audit), or the one the user explicitly picked in
@@ -433,6 +460,41 @@ class SessionService:
                     referenced_elements.append(ref)
             if referenced_elements:
                 latest_element = referenced_elements[-1]
+
+        # Canvas Grouping (2026-09-25, revised same day per explicit user correction: a workflow IS
+        # one campaign — grouping is by real Product DNA instead). Resolved here in two passes:
+        # this first pass covers an explicit pick or inheriting the referenced parent's own
+        # product; if NEITHER applies, `resolved_product_id` stays None for now and gets one more
+        # real chance later in this same turn — after the graph runs, from whatever product this
+        # turn's own chat message gets auto-detected as being about (the `product_facts` block
+        # below, already running every turn for Product DNA — this just also lets its result drive
+        # grouping when nothing more specific was already known). Handed to every
+        # `_add_new_element` call this turn makes (main result + all byproducts).
+        # `parent_element_id` is deliberately NOT a separate request field — derived from
+        # `referenced_element_ids[0]` (the first explicitly-referenced element), one source of
+        # truth instead of two that could disagree.
+        parent_element = referenced_elements[0] if referenced_elements else None
+        resolved_parent_element_id = parent_element.id if parent_element else None
+        resolved_product_id: str | None = None
+        resolved_product_name: str | None = None
+        if target_product_id:
+            # An explicit pick from the session's own known products — the real name is looked up
+            # server-side, never trusted from the client.
+            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            async with async_session_factory() as db:
+                picked_product = await SqliteProductRepository(db).get(target_product_id)
+            if picked_product:
+                resolved_product_id = picked_product.id
+                resolved_product_name = picked_product.name
+        elif parent_element and parent_element.product_id:
+            # No explicit target — inherit the referenced element's own product, so a follow-up
+            # generation from an existing product's asset stays grouped with it by default.
+            resolved_product_id = parent_element.product_id
+            resolved_product_name = parent_element.product_name
+        # Genuinely nothing resolved yet — may still be filled in after the graph runs (see
+        # `product_facts` below); if that doesn't resolve it either, lands in the frontend's flat
+        # "Unassigned" bucket (`CanvasEngine.tsx`), never a fabricated grouping.
+
         brief_for_graph = dict(session.brief)
         brief_for_graph["user_id"] = session.user_id
         # Real conversation history (2026-09-22, per an explicit user ask: "make sure the llm has
@@ -526,7 +588,11 @@ class SessionService:
                     brief_for_graph["product_photo_storage_ref"] = product.photo_storage_ref
 
         from ...core.events import set_current_guardrails_xml
-        set_current_guardrails_xml(guardrail_set.render())
+        # Per-session toggle (2026-09-25) — when off, every specialist's system prompt this turn
+        # gets an empty guardrails block instead of the real rules (runner.py reads this same
+        # ContextVar). `brief_for_graph["guardrails"]` above is left untouched either way so the
+        # Guardrails UI can still show/edit the underlying rules while they're switched off.
+        set_current_guardrails_xml(guardrail_set.render() if session.guardrails_enabled else "")
 
         graph = get_graph()
         result_state = await graph.ainvoke(
@@ -556,21 +622,86 @@ class SessionService:
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}
         
-        # Append any new guardrails extracted during the turn (e.g. from Ideation, 2026-09-24)
-        new_guardrails = result_state.get("new_guardrails")
-        if new_guardrails:
+        # Append any new guardrails extracted during the turn (e.g. from Ideation, 2026-09-24) —
+        # brand/custom rules only now; product facts are handled separately below, unconditionally,
+        # not gated behind this (see that block's own docstring for the real, live-found reason).
+        new_guardrails = result_state.get("new_guardrails") or []
+        other_new_rules = [g for g in new_guardrails if isinstance(g, dict) and g.get("source") != "product"]
+
+        # Real, live-found reliability bug (2026-09-25, explicit user report: "product dna... are
+        # not auto filled" — confirmed live: a real message listing full product specs never
+        # produced any Product DNA). This used to only run when ideation's `new_guardrails`
+        # happened to contain a `source: "product"` entry — a side-instruction bolted onto an LLM
+        # call whose real job is judging message CLARITY, and it silently skipped real, product-
+        # rich messages more often than not. Now called unconditionally for every substantive
+        # message — `upsert_product_from_chat`'s OWN `is_product_related` field (not a guess made
+        # here beforehand) correctly no-ops on "approve"/"make it more vibrant"/etc, so this closes
+        # the reliability gap without either missing real product messages or fabricating products
+        # from unrelated ones. A cheap, deterministic pre-filter (bare approve/cancel commands, or
+        # a message too short to contain real facts) skips the LLM call entirely for the obviously
+        # irrelevant case, same "deterministic beats a maybe" reasoning this codebase already uses
+        # for greetings (`ideation_service.py`'s `_is_bare_greeting`).
+        product_updated = False
+        stripped_message = user_message.strip()
+        if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
+            from ..knowledge.product_dna_service import ProductDnaService
+            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            from ...core.exceptions import SpecialistFailed
+
+            try:
+                async with async_session_factory() as db:
+                    product_repo = SqliteProductRepository(db)
+                    product_dna_svc = ProductDnaService(product_repo)
+                    linked_ids = list(session.brief.get("product_profile_ids") or [])
+                    existing_products = [
+                        p for pid in linked_ids if (p := await product_repo.get(pid)) is not None
+                    ]
+                    product = await product_dna_svc.upsert_product_from_chat(
+                        user_id=session.user_id,
+                        existing_products=existing_products,
+                        raw_text=stripped_message,
+                    )
+                if product is not None:
+                    if product.id not in linked_ids:
+                        linked_ids.append(product.id)
+                    session.brief = {**session.brief, "product_profile_ids": linked_ids}
+                    session.product_profile_id = product.id
+                    product_updated = True
+                    # Canvas Grouping's second resolution pass (2026-09-25) — only fills in what
+                    # the EARLY pass (explicit pick / inherited parent) left unresolved. An
+                    # explicit pick or a real parent's own product always takes precedence over
+                    # a fresh chat-detected one, so refining an existing product's DNA mid-turn
+                    # never silently re-groups an element the user already anchored elsewhere.
+                    if resolved_product_id is None:
+                        resolved_product_id = product.id
+                        resolved_product_name = product.name
+            except SpecialistFailed as exc:
+                log.warning(
+                    "product_dna_chat_upsert_failed",
+                    extra={"_extra_session_id": session.id, "_extra_error": exc.message},
+                )
+
+        if other_new_rules:
             from ...core.guardrails import GuardrailRule
-            for g in new_guardrails:
+            for g in other_new_rules:
                 if "id" not in g:
                     g["id"] = f"rule_{uuid.uuid4().hex[:8]}"
                 # default to 'custom' if source not recognized
                 if g.get("source") not in ("brand", "product", "project", "custom"):
                     g["source"] = "custom"
                 guardrail_set.rules.append(GuardrailRule(**g))
+            # `update_guardrails` already indexes internally (`guardrail_service.py`) — a second
+            # call here was pure redundant re-indexing of the same data, removed alongside making
+            # `index_guardrails` properly async/awaited (2026-09-25).
             await guardrail_svc.update_guardrails(session.id, guardrail_set.model_dump())
             session.brief["guardrails"] = guardrail_set.model_dump()
-            # update indexing in the background
-            guardrail_svc.index_guardrails(session.id, guardrail_set)
+
+        if product_updated:
+            # Re-derive now that the product DNA above may have changed — folds the new/updated
+            # product's rules in immediately rather than waiting for the next turn's own
+            # `get_or_derive_for_session` call at the top of `_run_turn_inner`.
+            guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
+            session.brief["guardrails"] = guardrail_set.model_dump()
 
         result = result_state.get("result")
 
@@ -621,9 +752,15 @@ class SessionService:
                     element_id = target.id
                     edit_staged_not_applied = target.pending_storage_ref is not None
                 else:
-                    element_id = (await self._add_new_element(session.id, result)).id
+                    element_id = (await self._add_new_element(
+                        session.id, result, product_id=resolved_product_id,
+                        product_name=resolved_product_name, parent_element_id=resolved_parent_element_id,
+                    )).id
             else:
-                element_id = (await self._add_new_element(session.id, result)).id
+                element_id = (await self._add_new_element(
+                    session.id, result, product_id=resolved_product_id,
+                    product_name=resolved_product_name, parent_element_id=resolved_parent_element_id,
+                )).id
                 # Real intermediate artifacts this turn genuinely produced beyond the main result
                 # (2026-09-22) — a scene's starting still, a raw pre-stitch clip, a standalone
                 # voiceover track, an overlaid still. Only for a brand-new element, never the
@@ -638,7 +775,14 @@ class SessionService:
                     # compliance gate only ever runs against the turn's MAIN result, never these
                     # byproducts, so leaving the model's own "running" default here would show a
                     # QA check that will never actually complete.
-                    await self._add_new_element(session.id, extra, compliance_status="disabled")
+                    # Canvas Grouping: byproducts share the SAME product/parent as the main result
+                    # above — a Motion Lead voiceover track belongs with the same product as the
+                    # video it's part of, never falls out of it silently.
+                    await self._add_new_element(
+                        session.id, extra, compliance_status="disabled",
+                        product_id=resolved_product_id, product_name=resolved_product_name,
+                        parent_element_id=resolved_parent_element_id,
+                    )
 
             if edit_staged_not_applied:
                 # Honest status — the edit is real and staged, but not yet the current version;
@@ -750,7 +894,9 @@ class SessionService:
         return SessionMapper.to_response(session)
 
     async def _add_new_element(
-        self, session_id: str, result: dict, *, compliance_status: str | None = None
+        self, session_id: str, result: dict, *, compliance_status: str | None = None,
+        product_id: str | None = None, product_name: str | None = None,
+        parent_element_id: str | None = None,
     ) -> CanvasElementModel:
         element = CanvasElementModel(
             id=uuid.uuid4().hex,
@@ -763,6 +909,15 @@ class SessionService:
             # has a real storage_ref (checked by the caller before this is ever invoked for it).
             storage_ref=result.get("storage_ref"),
             metadata_json=result.get("metadata", {}),
+            # Canvas Grouping (2026-09-25, revised: a workflow IS one campaign, so grouping is by
+            # real Product DNA instead) — every caller of this method (the turn's main result AND
+            # every `extra_elements` byproduct: Motion Lead's voiceover/overlay tracks, Visual
+            # Design Lead's alternates, the dynamic plan's own extras) passes the SAME resolved
+            # product for this turn, computed once in `_run_turn_inner` — so a video pipeline's
+            # byproducts never silently fall out of the product their main result belongs to.
+            product_id=product_id,
+            product_name=product_name,
+            parent_element_id=parent_element_id,
         )
         if compliance_status is not None:
             element.compliance_status = compliance_status
@@ -861,6 +1016,18 @@ async def _run_compliance_background(element_id: str) -> None:
         if not settings.compliance_qa_enabled:
             await canvas.update_compliance_status(element_id, "disabled")
             return
+
+        # Per-session toggle (2026-09-25) — mirrors the global `compliance_qa_enabled` kill switch
+        # just above, scoped to one session instead of every session. Looked up fresh here (not
+        # threaded in from the caller) since this runs as a detached background task, potentially
+        # well after the request that created the element has already returned.
+        element = await canvas.get_element(element_id)
+        if element is not None:
+            from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
+            owning_session = await SqliteSessionRepository(db).get(element.session_id)
+            if owning_session is not None and not owning_session.guardrails_enabled:
+                await canvas.update_compliance_status(element_id, "disabled")
+                return
 
         try:
             gate_result = await run_compliance_gate(canvas=canvas, element_id=element_id)

@@ -54,28 +54,38 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
         if loaded is not None:
             image_bytes, mime_type = loaded
 
-    brand = await check_brand_consistency(
-        generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type
-    )
-    visual = await check_visual_fidelity(
-        generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type
-    )
-    format_qa = await check_format_technical(
-        storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")
-    )
-    
-    # We retrieve the original user_message from the turn history in the DB, but since the compliance 
+    # We retrieve the original user_message from the turn history in the DB, but since the compliance
     # gate doesn't easily have it passed in, we can fetch it via the element's session ID if needed.
     # Actually, we can fetch the most recent user turn for this session here.
+    # Real, live-found bug fixed alongside this (2026-09-25): the element's owning session also
+    # gives us the real `user_id` — without it, `check_brand_consistency`/`check_visual_fidelity`
+    # below always reported "no brand/product configured" regardless of what was really onboarded.
     user_message = ""
+    user_id: str | None = None
     async with async_session_factory() as db:
         from ...repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
         from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+        from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
         element = await SqliteCanvasRepository(db).get_element_by_storage_ref(storage_ref)
         if element:
             turns = await SqliteChatTurnRepository(db).list_for_session(element.session_id)
             if turns:
                 user_message = turns[-1].user_text
+            session = await SqliteSessionRepository(db).get(element.session_id)
+            if session:
+                user_id = session.user_id
+
+    brand = await check_brand_consistency(
+        generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
+        user_id=user_id,
+    )
+    visual = await check_visual_fidelity(
+        generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
+        user_id=user_id,
+    )
+    format_qa = await check_format_technical(
+        storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")
+    )
     
     alignment = await check_alignment(
         user_message=user_message, generation_prompt_text=generation_prompt_text

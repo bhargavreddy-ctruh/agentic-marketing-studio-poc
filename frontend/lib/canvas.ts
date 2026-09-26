@@ -46,6 +46,14 @@ export interface CanvasElement {
   alignment_warning: string | null;
   ad_spec_name?: string | null;
   safe_zone_pct?: number | null;
+  // Canvas Grouping (2026-09-25, revised same day: a workflow IS one campaign — grouping is by
+  // real Product DNA instead) — which real product this element belongs to on the canvas, and
+  // which element (if any) it was generated from. All nullable — a pre-existing element, or one
+  // with no real product signal, lands in the canvas's flat "Unassigned" group rather than a
+  // fabricated grouping.
+  product_id: string | null;
+  product_name: string | null;
+  parent_element_id: string | null;
 }
 
 export interface CanvasElementVersion {

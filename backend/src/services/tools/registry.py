@@ -70,6 +70,7 @@ def load_all_tools() -> None:
         text_overlay,
         text_to_speech,
         video_stitcher,
+        visual_palette_analyzer,
         web_trend_search,
     )
 

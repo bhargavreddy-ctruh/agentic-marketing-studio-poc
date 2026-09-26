@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import CanvasEngine, { CanvasTile } from "@/components/canvas/CanvasEngine";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import CanvasEngine, { CanvasEngineHandle, CanvasTile } from "@/components/canvas/CanvasEngine";
 import {
   CanvasElement,
   approveEdit,
@@ -44,6 +44,51 @@ function elementKind(elementType: string): "image" | "video" | "audio" | "text" 
   return "image";
 }
 
+/** Canvas Grouping (2026-09-25, revised same day: a workflow IS one campaign — grouping is by
+ * real Product DNA instead) — groups the Elements Drawer's real elements by their real
+ * `product_id`, same "Unassigned" bucket concept `CanvasEngine.tsx`'s own canvas-frame grouping
+ * uses (elements with no real product never fabricate one). Order follows first appearance in
+ * `elements` (already creation-ordered), so groups don't jump around on refetch. */
+function groupElementsByProduct(
+  elements: CanvasElement[],
+): { key: string; label: string; items: CanvasElement[] }[] {
+  const order: string[] = [];
+  const byKey = new Map<string, { key: string; label: string; items: CanvasElement[] }>();
+  for (const el of elements) {
+    const key = el.product_id || "__unassigned__";
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        key,
+        label: el.product_id ? (el.product_name || "Untitled product") : "Unassigned",
+        items: [],
+      });
+      order.push(key);
+    }
+    byKey.get(key)!.items.push(el);
+  }
+  return order.map((k) => byKey.get(k)!);
+}
+
+/** A real, small, local add/edit-free collapsible section (2026-09-25) — no reusable accordion
+ * component existed anywhere in this frontend before this (confirmed live audit), so this stays
+ * local to the one place that needs it rather than becoming a premature shared component. */
+function Accordion({
+  title, count, defaultOpen = true, children,
+}: { title: string; count: number; defaultOpen?: boolean; children: ReactNode }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-xl border border-surface-700/50 bg-surface-800/20">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-surface-300 hover:text-white transition-colors"
+      >
+        <span>{open ? "▾" : "▸"} {title} ({count})</span>
+      </button>
+      {open && <div className="flex flex-col gap-3 p-3 pt-0">{children}</div>}
+    </div>
+  );
+}
+
 function toTiles(elements: CanvasElement[], versionInfo: Map<string, VersionInfo>): CanvasTile[] {
   return elements
     .map((el) => ({
@@ -60,6 +105,9 @@ function toTiles(elements: CanvasElement[], versionInfo: Map<string, VersionInfo
       producedBy: el.produced_by_specialist,
       description: el.description,
       alignmentWarning: el.alignment_warning ?? undefined,
+      productId: el.product_id,
+      productName: el.product_name,
+      parentElementId: el.parent_element_id,
     }));
 }
 
@@ -107,6 +155,9 @@ export default function CanvasView({
 }: CanvasViewProps) {
   const [elements, setElements] = useState<CanvasElement[]>([]);
   const [versionInfo, setVersionInfo] = useState<Map<string, VersionInfo>>(new Map());
+  // Campaign Grouping (2026-09-25, CAMPAIGN_GROUPING_TASKS.md) — lets the Elements Drawer pan the
+  // canvas to a specific tile without CanvasEngine needing any drawer-related awareness itself.
+  const canvasEngineRef = useRef<CanvasEngineHandle>(null);
   // Elements confirmed (by a real listVersions fetch) to have more than one version — a ref, not
   // state, so `refresh` can read the latest value without needing it in its own dependency array
   // (adding `versionInfo` there would recreate `refresh` on every fetch, since `setVersionInfo`
@@ -380,6 +431,7 @@ export default function CanvasView({
         </div>
       )}
       <CanvasEngine
+        ref={canvasEngineRef}
         tiles={toTiles(elements, versionInfo)}
         onUndo={handleUndo}
         onRedo={handleRedo}
@@ -448,10 +500,17 @@ export default function CanvasView({
       {showElements && (
         <div className="pointer-events-auto absolute right-6 top-20 z-20 max-h-[50vh] w-80 overflow-y-auto rounded-2xl border border-surface-700/50 bg-surface-900/60 p-4 shadow-2xl backdrop-blur-xl animate-fade-in-up">
         {elements.length === 0 && <p className="text-sm text-surface-400">No elements yet for this session.</p>}
-        <div className="flex flex-col gap-3">
-          {elements.map((el) => (
+        {/* Canvas Grouping (2026-09-25) — collapsible accordions by real product, replacing
+         * the old flat list; a session's elements are no longer indistinguishable from each other
+         * once there's more than one product running through the same workflow. */}
+        <div className="flex flex-col gap-2">
+          {groupElementsByProduct(elements).map((group) => (
+            <Accordion key={group.key} title={group.label} count={group.items.length}>
+              {group.items.map((el) => (
             <div key={el.id} className="flex items-center justify-between gap-2 rounded-xl border border-surface-700/50 bg-surface-800/30 p-3 text-sm transition-colors hover:bg-surface-800/50">
-              <div>
+              {/* Campaign Grouping (2026-09-25) — click the info side to pan the canvas to this
+               * tile; kept off the button side so it never fights with Regenerate/Comment/etc. */}
+              <div className="cursor-pointer" onClick={() => canvasEngineRef.current?.focusTile(el.id)} title="Click to locate on canvas">
                 <span className="font-medium capitalize text-surface-200">{el.element_type}</span>{" "}
                 <span className="text-surface-500">
                   by {el.produced_by_specialist} · v{el.version}
@@ -522,6 +581,8 @@ export default function CanvasView({
                 )}
               </div>
             </div>
+              ))}
+            </Accordion>
           ))}
         </div>
         </div>

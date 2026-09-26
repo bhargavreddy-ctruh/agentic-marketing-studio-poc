@@ -1,0 +1,87 @@
+services:
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ams-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ams-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/poc.db:/app/poc.db
+      - ./backend/var:/app/var
+      # Real, live-found fix (2026-09-26): the container has no cached HF model weights, and
+      # HuggingFace's newer XET download backend hung indefinitely inside the container (0% CPU,
+      # no progress) trying to fetch sentence-transformers/all-MiniLM-L6-v2 — reusing the host's
+      # already-downloaded cache avoids that network path entirely, matching the same
+      # bind-mount-real-data pattern the DB/assets mounts above already use.
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    env_file:
+      - ./backend/.env
+    environment:
+      LOCAL_LLM_BASE_URL: "http://ollama:11434/v1"
+      # Real, live-found need (2026-09-26, explicit user ask: access from another device on the
+      # LAN) — the browser's real Origin header when loaded via the LAN IP is
+      # "http://192.168.1.18:3000", not "http://localhost:3000"; CORS rejects anything not in this
+      # list, so both need to be present (comma-split by `settings.frontend_origins`, confirmed in
+      # `core/config.py`). This LAN IP is this Mac's own address (`ipconfig getifaddr en0`) — update
+      # it here if the Mac's IP changes (e.g. a different Wi-Fi network).
+      # Cloudflare quick-tunnel public URL (2026-09-26, explicit user ask: global access) — added
+      # defensively; the Caddy reverse proxy in front of the tunnel makes the frontend and
+      # "/api/*" calls same-origin from the browser's perspective, so CORS mostly doesn't apply on
+      # THIS path, but this covers any request that isn't perfectly same-origin. A quick tunnel's
+      # URL is random per run — update this (and the frontend build arg below) if the tunnel is
+      # restarted and gets a new one.
+      FRONTEND_ORIGINS: "http://localhost:3000,http://192.168.1.18:3000,https://situations-looked-dependence-cosmetics.trycloudflare.com"
+      DATABASE_URL: "sqlite+aiosqlite:////app/poc.db"
+    depends_on:
+      - ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      # Switched (2026-09-26, explicit user correction) from ./frontend (poc/frontend, the OLDER
+      # snapshot missing this session's DNA-tab fix/guardrails-toggle/product-grouping work) to
+      # the sibling directory one level up — the one actually used and fixed throughout this
+      # session. Its own Dockerfile/.dockerignore/next.config.js "output: standalone" were added
+      # to match, mirroring poc/frontend's exactly.
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        # Baked into the client JS bundle at build time (NEXT_PUBLIC_* vars run in the BROWSER,
+        # not in this container). Set to the public Cloudflare quick-tunnel URL (2026-09-26,
+        # explicit user ask: global access) rather than the LAN IP, since a remote device can't
+        # reach a private 192.168.x.x address at all. The tunnel's Caddy front-end
+        # (`/tmp/caddy_tunnel/Caddyfile`, host-level, not in this compose file) proxies
+        # "/api/*" on this SAME origin to the backend — no separate backend URL/CORS hop needed.
+        # A quick tunnel's URL is random per run — this must be rebuilt with the new URL baked in
+        # if the tunnel (`cloudflared`) is ever restarted.
+        NEXT_PUBLIC_API_BASE_URL: "https://situations-looked-dependence-cosmetics.trycloudflare.com"
+    container_name: ams-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - app-network
+    restart: unless-stopped
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  ollama_data:

@@ -15,7 +15,16 @@ router = APIRouter(prefix="/api/v1/brands", tags=["brands"])
 async def onboard_brand(
     body: OnboardBrandRequest, svc: BrandDnaServiceDep, current_user: CurrentUserDep
 ) -> BrandProfileResponse:
-    brand = await svc.onboard_brand(user_id=current_user.id, name=body.name, raw_facts=body.raw_facts)
+    """Serves both "create a new brand" (no `brand_id`) and, since 2026-09-25 ("give the user
+    option to edit" their brand's real facts), "replace this existing brand's facts" (`brand_id`
+    given) — ownership-checked via `get_brand` (raises `Forbidden` on a mismatch) before any write,
+    same as every other brand route here already does."""
+    if body.brand_id:
+        await svc.get_brand(body.brand_id, user_id=current_user.id)
+    brand = await svc.onboard_brand(
+        user_id=current_user.id, name=body.name, raw_facts=body.raw_facts,
+        brand_id=body.brand_id, merge=False,
+    )
     return BrandMapper.to_response(brand)
 
 

@@ -76,6 +76,9 @@ class CanvasMapper:
             text_content=_text_content(entity),
             description=_description(entity),
             alignment_warning=(entity.metadata_json or {}).get("alignment_warning"),
+            product_id=entity.product_id,
+            product_name=entity.product_name,
+            parent_element_id=entity.parent_element_id,
         )
 
     @staticmethod

@@ -73,22 +73,33 @@ class BaseImageGeneratorTool(Tool):
 
         ctx = context or {}
 
-        # 1. Image-to-image reference (explicit arg takes precedence over context product photo)
+        # 1. Image-to-image reference (explicit arg takes precedence over context product photo).
+        # Real, live-found gap (2026-09-25, same root cause as the palette tools' fix this
+        # session): trying only the FIRST non-empty candidate meant a bad/hallucinated explicit
+        # `reference_storage_ref` from the model silently degraded generation to text-only, even
+        # when a correct context value was right there. Now tries each real candidate in
+        # precedence order until one actually resolves to a real image, instead of stopping at the
+        # first non-empty string regardless of whether it's real.
         reference_image_bytes: bytes | None = None
         reference_mime_type: str | None = None
-        reference_storage_ref = (
-            str(args.get("reference_storage_ref") or "").strip()
-            or str(ctx.get("product_photo_storage_ref") or "").strip()
-            or str(ctx.get("reference_storage_ref") or "").strip()
-        )
-        if reference_storage_ref:
-            loaded_ref = load_asset(reference_storage_ref)
-            if loaded_ref is not None:
-                if loaded_ref[1] and loaded_ref[1].startswith("image/"):
-                    reference_image_bytes, reference_mime_type = loaded_ref
-                else:
-                    # Ignore non-image references (e.g. video) to prevent provider crashes
-                    pass
+        reference_storage_ref = ""
+        for candidate in (
+            str(args.get("reference_storage_ref") or "").strip(),
+            str(ctx.get("product_photo_storage_ref") or "").strip(),
+            str(ctx.get("reference_storage_ref") or "").strip(),
+        ):
+            if not candidate:
+                continue
+            loaded_ref = load_asset(candidate)
+            if loaded_ref is not None and loaded_ref[1] and loaded_ref[1].startswith("image/"):
+                reference_storage_ref = candidate
+                reference_image_bytes, reference_mime_type = loaded_ref
+                break
+            # A non-empty candidate that didn't resolve (or resolved to a non-image, e.g. video)
+            # is remembered only so the prompt-injection step below (which needs SOME ref string
+            # to match against referenced_elements_context) still has a value if every candidate
+            # fails — but the loop keeps trying real image candidates first.
+            reference_storage_ref = reference_storage_ref or candidate
 
         # 2. Campaign style reference (explicit arg takes precedence over context session style lock)
         style_reference_bytes: bytes | None = None

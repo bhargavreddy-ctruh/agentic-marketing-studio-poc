@@ -51,9 +51,15 @@ Return ONLY JSON:
 
 @traceable(name="visual_fidelity_checker")
 async def check_visual_fidelity(
-    *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None
+    *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
-    product_result = await ProductLookupTool().run({"question": generation_prompt_text[:500]})
+    # Real, live-found bug (2026-09-25) — same as `brand_consistency_checker.py`'s: no `context`
+    # meant `ProductLookupTool` always hit its own `if not user_id: return configured: False`
+    # early exit, reporting "no product configured" even for a fully onboarded product.
+    product_result = await ProductLookupTool().run(
+        {"question": generation_prompt_text[:500]}, context={"user_id": user_id} if user_id else None
+    )
     product_facts = product_result.data
     facts_context = f"Product facts (configured={product_facts.get('configured')}):\n{product_facts.get('facts', '')}"
 

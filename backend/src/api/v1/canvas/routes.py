@@ -36,6 +36,7 @@ from ....services.compliance.compliance_gate import run_compliance_gate
 from ...dependencies import (
     CanvasRepositoryDep,
     CanvasVersionRepositoryDep,
+    ProductRepositoryDep,
     SessionRepositoryDep,
     VersioningServiceDep,
 )
@@ -62,6 +63,7 @@ async def create_element(
     body: CreateElementRequest,
     canvas: CanvasRepositoryDep,
     sessions: SessionRepositoryDep,
+    products: ProductRepositoryDep,
 ) -> CanvasElementResponse:
     """The real backend half of "Upload Media" / "New Image" / "New Video" / "New Audio" / "Paste"
     (right-click canvas menu, 2026-09-22) — places an already-uploaded asset (`POST /assets`)
@@ -75,7 +77,7 @@ async def create_element(
     loaded = load_asset(body.storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", body.storage_ref)
-    _, mime_type = loaded
+    image_bytes, mime_type = loaded
     element = CanvasElementModel(
         id=uuid.uuid4().hex,
         session_id=session_id,
@@ -90,6 +92,45 @@ async def create_element(
         compliance_status="disabled",
     )
     created = await canvas.add_element(element)
+
+    # Real requirement (2026-09-25, explicit user ask: "evolve product dna not only from the chat
+    # but also from what's on the canvas") — a user's own direct image upload is the clearest
+    # "what's on the canvas" signal there is (unlike a specialist's generated creative, which is
+    # campaign OUTPUT, not a product declaration). Best-effort: a vision-extraction failure must
+    # never break the upload itself, so this is caught and logged, not propagated.
+    if element.element_type == "image":
+        try:
+            from ....services.knowledge.guardrail_service import GuardrailService
+            from ....services.knowledge.product_dna_service import ProductDnaService
+
+            product_dna_svc = ProductDnaService(products)
+            linked_ids = list(session.brief.get("product_profile_ids") or [])
+            existing_products = []
+            for pid in linked_ids:
+                p = await products.get(pid)
+                if p:
+                    existing_products.append(p)
+            product = await product_dna_svc.upsert_product_from_image(
+                user_id=session.user_id,
+                existing_products=existing_products,
+                image_bytes=image_bytes,
+                mime_type=mime_type,
+                storage_ref=body.storage_ref,
+            )
+            if product is not None:
+                if product.id not in linked_ids:
+                    linked_ids.append(product.id)
+                session.brief = {**session.brief, "product_profile_ids": linked_ids}
+                session.product_profile_id = product.id
+                await sessions.update(session)
+                await GuardrailService(sessions).get_or_derive_for_session(session_id)
+        except Exception as exc:  # provider outage, parse failure — never blocks the real upload
+            from ....core.middleware.logging import get_logger
+            get_logger(__name__).warning(
+                "product_dna_image_upsert_failed",
+                extra={"_extra_session_id": session_id, "_extra_error": str(exc)},
+            )
+
     return CanvasMapper.to_response(created)
 
 
