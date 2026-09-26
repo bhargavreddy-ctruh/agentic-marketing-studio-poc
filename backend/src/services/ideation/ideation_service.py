@@ -231,8 +231,10 @@ async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None
     llm = get_llm_provider()
     existing_idea = brief.get("idea") or "(nothing generated yet this session)"
     context_parts = [
-        f"EXISTING campaign idea so far (context only — judge the NEW message below on its own "
-        f"terms, not by how well it fits this):\n{existing_idea}"
+        (
+            f"EXISTING campaign idea so far (context only — judge the NEW message below on its own "
+            f"terms, not by how well it fits this):\n{existing_idea}"
+        )
     ]
     latest_ref = brief.get("latest_element_storage_ref")
     if latest_ref:

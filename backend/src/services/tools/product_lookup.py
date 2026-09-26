@@ -7,6 +7,8 @@ section 1).
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
 from .base import Tool, ToolResult
@@ -17,7 +19,7 @@ from .registry import register_tool
 class ProductLookupTool(Tool):
     name = "product_lookup"
     description = "Looks up product facts (must-show, never-show, allowed claims, price) relevant to a question."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {"question": {"type": "string"}},
         "required": ["question"],

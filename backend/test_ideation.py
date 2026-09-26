@@ -1,5 +1,7 @@
 import asyncio
+
 from src.services.ideation.ideation_service import run_ideation
+
 
 async def main():
     state = {

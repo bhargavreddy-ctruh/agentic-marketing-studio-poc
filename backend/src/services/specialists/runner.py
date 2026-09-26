@@ -20,8 +20,9 @@ import ast
 import asyncio
 import json
 import re
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable, SpecialistFailed, ToolNotFound
@@ -350,7 +351,7 @@ async def run_specialist_agentic(
                                 record = ToolCallRecord(
                                     tool_name=tool_name, args=args, ok=False, data={}, error=str(exc)
                                 )
-                            except Exception as exc:  # noqa: BLE001 — real, live-found gap
+                            except Exception as exc:
                                 # (2026-09-22): only `ToolNotFound` was ever caught here — any OTHER
                                 # real runtime failure inside a tool (a provider error, a malformed
                                 # storage_ref pointing at bytes that aren't actually an image, a

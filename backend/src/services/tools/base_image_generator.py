@@ -5,6 +5,8 @@ section 6). The specialist calling this never knows which provider actually ran.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.replicate_provider import get_image_gen_provider
@@ -16,7 +18,7 @@ from .registry import register_tool
 class BaseImageGeneratorTool(Tool):
     name = "base_image_generator"
     description = "Generates a still image from a text prompt. Pass reference_storage_ref when a referenced element exists and the new image should be visually grounded in it (image-to-image), instead of only describing it in the prompt."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "prompt": {"type": "string"},

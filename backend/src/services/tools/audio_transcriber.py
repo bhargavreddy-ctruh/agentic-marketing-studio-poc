@@ -7,6 +7,8 @@ recorded script anywhere — back into real, structured understanding a speciali
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.local_storage import load_asset
 from ...providers.audio.local_whisper import get_transcription_provider
 from .base import Tool, ToolResult
@@ -22,7 +24,7 @@ class AudioTranscriberTool(Tool):
         "its actual content/vibe isn't already known from context — most importantly a "
         "user-uploaded audio file, which has no script recorded anywhere else."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "storage_ref": {"type": "string", "description": "storage_ref of the existing audio element to transcribe"},

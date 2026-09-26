@@ -23,8 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from langgraph.graph import END, StateGraph
 
@@ -38,7 +39,13 @@ from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import traceable
 from ..ideation.ideation_service import run_ideation
-from ..leads.base import LeadResult, NarrativePlan, ScenePlan, referenced_element_block, stale_campaign_context_block
+from ..leads.base import (
+    LeadResult,
+    NarrativePlan,
+    ScenePlan,
+    referenced_element_block,
+    stale_campaign_context_block,
+)
 from ..leads.motion_lead import run_motion_lead
 from ..leads.narrative_lead import run_narrative_lead
 from ..leads.scene_lead import run_scene_lead
@@ -186,7 +193,7 @@ async def _plan_multi_generation(
             prefer_local=False,
         )
         parsed = extract_json(result.text)
-    except Exception as exc:  # noqa: BLE001 — a broken planner degrades to single-generation, never blocks the turn
+    except Exception as exc:
         log.warning("multi_generation_plan_failed", extra={"_extra_medium": medium, "_extra_error": str(exc)})
         return single
 
@@ -1153,8 +1160,9 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
         text_part = "\n\nThe following existing generated elements are available to reference or fix:"
-        from ...core.local_storage import load_asset
         import base64
+
+        from ...core.local_storage import load_asset
         for i, el in enumerate(referenced_elements, 1):
             ref = el.get("storage_ref")
             kind = el.get("element_type", "unknown")
@@ -1234,7 +1242,9 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             step_result = await run_specialist_with_review(
                 specialist,
                 context=step_context,
-                needs_retry=lambda r: specialist in generating_specialists and _produced_ref(r)[0] is None,
+                needs_retry=lambda r, specialist=specialist, generating_specialists=generating_specialists: (
+                    specialist in generating_specialists and _produced_ref(r)[0] is None
+                ),
                 reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
                 brief=brief,
             )
@@ -1322,7 +1332,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         # graceful-fail response) over a generic message so the user sees WHY nothing was generated
         # (e.g. "which phone model?" rather than the opaque "did not produce any visible assets").
         specialist_error = None
-        for key, meta in all_metadata.items():
+        for meta in all_metadata.values():
             if isinstance(meta, dict) and meta.get("error"):
                 specialist_error = meta["error"]
                 break

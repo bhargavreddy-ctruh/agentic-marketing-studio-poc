@@ -7,7 +7,7 @@ DSN later is a config change, not a rewrite — see Architecture.md section 4 (p
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -22,12 +22,12 @@ class Base(DeclarativeBase):
 
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        onupdate=lambda: datetime.now(timezone.utc),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
     )
 
 
@@ -74,11 +74,18 @@ async def init_models() -> None:
             ("canvas_element_versions", "element_type", "VARCHAR(32)"),
         ]
         from sqlalchemy import text
+
+        from ..core.middleware.logging import get_logger
+
+        log = get_logger(__name__)
         for table, col, col_type in migrations:
             try:
                 await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
-            except Exception:
-                pass
+            except Exception as exc:  # expected/normal once the column already exists
+                log.debug(
+                    "add_column_skipped",
+                    extra={"_extra_table": table, "_extra_column": col, "_extra_error": str(exc)},
+                )
 
 
 def get_engine():

@@ -20,7 +20,11 @@ import json
 
 from ...core.exceptions import SpecialistFailed
 from ...core.middleware.logging import get_logger
-from ..specialists.runner import AgenticStepResult, run_specialist_agentic, run_specialist_with_review
+from ..specialists.runner import (
+    AgenticStepResult,
+    run_specialist_agentic,
+    run_specialist_with_review,
+)
 from .base import (
     LeadResult,
     LeadSpec,

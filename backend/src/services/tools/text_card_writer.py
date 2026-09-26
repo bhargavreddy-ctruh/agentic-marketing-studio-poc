@@ -13,6 +13,8 @@ serves it exactly like an image or audio asset would.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.local_storage import save_asset
 from .base import Tool, ToolResult
 from .registry import register_tool
@@ -28,7 +30,7 @@ class TextCardWriterTool(Tool):
         "summarized, or narrated in writing, or when documenting the real creative reasoning "
         "behind a generation as its own visible card."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "label": {

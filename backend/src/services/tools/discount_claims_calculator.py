@@ -12,6 +12,8 @@ only ever through `SqliteProductRepository`, keeping "only repositories touch th
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...models.base import async_session_factory
 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from .base import Tool, ToolResult
@@ -25,7 +27,7 @@ class DiscountClaimsCalculatorTool(Tool):
         "Checks a claimed price/discount for a product against its real stored Product DNA "
         "record and returns the exact figures that must be used instead of a guess."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "product_id": {"type": "string"},

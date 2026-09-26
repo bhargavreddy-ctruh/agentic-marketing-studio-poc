@@ -11,9 +11,9 @@ draws it directly rather than asking a model to imagine it.
 from __future__ import annotations
 
 import io
-import os
 import urllib.request
 from pathlib import Path
+from typing import ClassVar
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -95,7 +95,7 @@ except Exception:
 class TextOverlayTool(Tool):
     name = "text_overlay"
     description = "Draws real, guaranteed-legible text directly onto an existing image at a given placement."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "storage_ref": {"type": "string"},
@@ -141,8 +141,6 @@ class TextOverlayTool(Tool):
         with Image.open(io.BytesIO(image_bytes)) as opened:
             base = opened.convert("RGBA")
         width, height = base.size
-        font_size = max(18, width // 18)
-        font = _get_font(font_family, font_size)
 
         place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
 
@@ -216,11 +214,10 @@ class TextOverlayTool(Tool):
                     metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "svg", "edited_from": storage_ref},
                 )
                 return ToolResult(ok=True, data={"storage_ref": new_ref, "mime_type": "image/jpeg", "backend": "svg"})
-            except Exception as e:
+            except Exception:
                 import traceback
                 traceback.print_exc()
                 # Fall back cleanly to Pillow rendering below
-                pass
 
         # Fallback / Pillow backend
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))

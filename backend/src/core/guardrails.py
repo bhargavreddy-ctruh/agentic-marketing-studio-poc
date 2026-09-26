@@ -6,7 +6,8 @@ profiles into concrete, traceable, round-trippable rules with discrete IDs.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from collections.abc import Iterable
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -61,7 +62,7 @@ class GuardrailRule(BaseModel):
     rule: str
     source: str = SOURCE_INFERRED
     scope: str = SCOPE_CAMPAIGN
-    applies_to: Optional[str] = None
+    applies_to: str | None = None
 
     class Config:
         extra = "allow"
@@ -102,7 +103,7 @@ class GuardrailSet(BaseModel):
         lines = "\n".join(f"- {r.as_line()}" for r in self.rules)
         return f"<guardrails>\n{lines}\n</guardrails>"
 
-    def merge(self, extra: Iterable[GuardrailRule]) -> "GuardrailSet":
+    def merge(self, extra: Iterable[GuardrailRule]) -> GuardrailSet:
         """
         Add rules that are not already present. Existing rules win on id collision so human 
         amendments are never overwritten by freshly inferred rules.
@@ -181,18 +182,18 @@ def _product_rules(product: dict, key: str = "") -> list[GuardrailRule]:
     # testing: without exclusion here it fell into the generic-attribute loop below and produced a
     # nonsense rule ("The id is 94a79fab...").
     handled_keys = {"id", "name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility"}
-    for key, value in product.items():
-        if key in handled_keys:
+    for attr_key, value in product.items():
+        if attr_key in handled_keys:
             continue
         # Only parse scalar fields as rigid rules, lists as options
-        if isinstance(value, str) or isinstance(value, int) or isinstance(value, float):
-            add(f"attr.{_slug(key)}",
-                f"The {key} is {value}. Copy must not contradict that, and imagery must not "
+        if isinstance(value, (str, int, float)):
+            add(f"attr.{_slug(attr_key)}",
+                f"The {attr_key} is {value}. Copy must not contradict that, and imagery must not "
                 f"depict something inconsistent with it.")
         elif isinstance(value, list) and all(isinstance(x, str) for x in value):
-            add(f"option.{_slug(key)}",
-                f"The only approved {key} options are: {', '.join(value)}. Never state, "
-                f"imply or depict a {key} outside that list.")
+            add(f"option.{_slug(attr_key)}",
+                f"The only approved {attr_key} options are: {', '.join(value)}. Never state, "
+                f"imply or depict a {attr_key} outside that list.")
 
     add("claims",
         "Never state a price, discount, specification, availability, guarantee or "
@@ -236,7 +237,7 @@ def _rules_from_synthesized_brand(brand: dict) -> list[GuardrailRule]:
 
 
 def derive_guardrails(
-    brand: dict = None, products: list[dict] | None = None, project: dict = None
+    brand: dict | None = None, products: list[dict] | None = None, project: dict | None = None
 ) -> GuardrailSet:
     """
     The rules that follow directly from the JSON fields supplied.
@@ -323,9 +324,9 @@ def coerce_set(raw: Any) -> GuardrailSet | None:
 def resolve(
     supplied: Any = None,
     *,
-    brand: dict = None,
+    brand: dict | None = None,
     products: list[dict] | None = None,
-    project: dict = None,
+    project: dict | None = None,
 ) -> GuardrailSet:
     """
     The set this call should use. A supplied set is authoritative and is returned as given

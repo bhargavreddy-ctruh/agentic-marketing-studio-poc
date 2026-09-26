@@ -27,7 +27,12 @@ from ...models.chat_turn import ChatTurnModel
 from ...models.session import SessionModel
 from ...repositories.base import CanvasRepository, ChatTurnRepository, SessionRepository
 from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
-from ...schemas.sessions.responses import ChatTurnResponse, IdeationOption, IdeationPrompt, SessionResponse
+from ...schemas.sessions.responses import (
+    ChatTurnResponse,
+    IdeationOption,
+    IdeationPrompt,
+    SessionResponse,
+)
 from ..canvas.versioning_service import CanvasVersioningService
 from ..compliance.compliance_gate import run_compliance_gate
 from .graph import get_graph
@@ -644,9 +649,9 @@ class SessionService:
         product_updated = False
         stripped_message = user_message.strip()
         if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
-            from ..knowledge.product_dna_service import ProductDnaService
-            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
             from ...core.exceptions import SpecialistFailed
+            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            from ..knowledge.product_dna_service import ProductDnaService
 
             try:
                 async with async_session_factory() as db:
@@ -1032,7 +1037,7 @@ async def _run_compliance_background(element_id: str) -> None:
         try:
             gate_result = await run_compliance_gate(canvas=canvas, element_id=element_id)
             status = "passed" if gate_result.get("overall_passed") else "failed"
-        except Exception:  # noqa: BLE001 — deliberately broad: this must never crash a bg task silently stuck
+        except Exception:
             status = "error"
 
         await canvas.update_compliance_status(element_id, status)

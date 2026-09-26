@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import Any
+from typing import Annotated, Any
 
-from ....core.exceptions import NotFoundError, ValidationFailed
+from fastapi import APIRouter, Depends, HTTPException
+
+from ....core.exceptions import NotFoundError
 from ....services.knowledge.guardrail_service import GuardrailService
 from ...dependencies import CurrentUserDep, SessionRepositoryDep
 
@@ -11,11 +12,17 @@ def get_guardrail_service(repo: SessionRepositoryDep) -> GuardrailService:
     return GuardrailService(repo)
 
 
+# Matches this codebase's established DI pattern (see api/dependencies.py's *Dep aliases) —
+# `Depends(...)` as a plain function-argument default (ruff B008) works fine at runtime (FastAPI
+# special-cases it), but this Annotated form is what every other route module already uses.
+GuardrailServiceDep = Annotated[GuardrailService, Depends(get_guardrail_service)]
+
+
 @router.get("", response_model=dict[str, Any])
 async def get_guardrails(
     session_id: str,
     user_id: CurrentUserDep,
-    svc: GuardrailService = Depends(get_guardrail_service),
+    svc: GuardrailServiceDep,
 ) -> dict[str, Any]:
     """Retrieve all guardrails for a session."""
     try:
@@ -30,7 +37,7 @@ async def update_guardrails(
     session_id: str,
     user_id: CurrentUserDep,
     payload: dict[str, Any],
-    svc: GuardrailService = Depends(get_guardrail_service),
+    svc: GuardrailServiceDep,
 ) -> dict[str, Any]:
     """Update guardrails for a session."""
     try:
@@ -46,7 +53,7 @@ async def link_profiles(
     session_id: str,
     user_id: CurrentUserDep,
     payload: dict[str, Any],
-    svc: GuardrailService = Depends(get_guardrail_service),
+    svc: GuardrailServiceDep,
 ) -> dict[str, Any]:
     """Real, live-found gap (2026-09-24, per an explicit user report): attaches a Brand DNA and/or
     Product DNA profile to this session so guardrails can actually be derived from real onboarded
@@ -71,7 +78,7 @@ async def add_guardrail(
     session_id: str,
     user_id: CurrentUserDep,
     payload: dict[str, Any],
-    svc: GuardrailService = Depends(get_guardrail_service),
+    svc: GuardrailServiceDep,
 ) -> dict[str, Any]:
     """Adds a new custom guardrail via LLM enhancement."""
     try:

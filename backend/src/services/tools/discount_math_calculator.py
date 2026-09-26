@@ -10,6 +10,8 @@ recall a stored price correctly.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from .base import Tool, ToolResult
 from .registry import register_tool
 
@@ -21,7 +23,7 @@ class DiscountMathCalculatorTool(Tool):
         "Computes the exact final price from a base price and a discount percentage the user "
         "stated directly in chat — real arithmetic, never a guess or an LLM's own mental math."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "base_price": {"type": "number"},

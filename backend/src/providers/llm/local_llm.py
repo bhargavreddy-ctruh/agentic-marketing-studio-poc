@@ -19,7 +19,8 @@ This file itself no longer refuses a non-TIER_1 call — router.py is where that
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from ...core.config import settings
 from ._openai_compatible import call_openai_compatible_chat

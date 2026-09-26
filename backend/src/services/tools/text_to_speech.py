@@ -7,6 +7,8 @@ Pollinations (none of those turned out to be genuinely free for this task, live-
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.local_storage import save_asset
 from ...providers.audio.local_kokoro import get_audio_provider
 from .base import Tool, ToolResult
@@ -17,7 +19,7 @@ from .registry import register_tool
 class TextToSpeechTool(Tool):
     name = "text_to_speech"
     description = "Synthesizes a line of text into real, audible speech audio."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "text": {"type": "string"},

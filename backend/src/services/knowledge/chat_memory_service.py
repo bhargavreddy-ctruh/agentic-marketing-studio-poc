@@ -5,9 +5,9 @@ conversations to preserve long-term context across massive sessions.
 """
 from __future__ import annotations
 
+from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
-from ...core.exceptions import ProviderUnavailable
 
 log = get_logger(__name__)
 

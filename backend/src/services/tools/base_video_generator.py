@@ -10,6 +10,8 @@ this file, per Rules.md section 1/2 — no specialist or Lead file changes.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
 from ...providers.video.replicate import get_video_provider
@@ -21,7 +23,7 @@ from .registry import register_tool
 class BaseVideoGeneratorTool(Tool):
     name = "base_video_generator"
     description = "Generates a short video clip by animating a source image with a motion prompt."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "prompt": {"type": "string"},

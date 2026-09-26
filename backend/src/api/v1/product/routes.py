@@ -36,10 +36,11 @@ async def get_product(product_id: str, svc: ProductDnaServiceDep) -> ProductProf
 
 
 from fastapi import UploadFile
+
 from ....core.local_storage import save_asset
 from ....core.mime_sniff import sniff_image_mime
-from ....repositories.base import ProductRepository
 from ...dependencies import ProductRepositoryDep
+
 
 @router.post("/{product_id}/photo")
 async def upload_product_photo(

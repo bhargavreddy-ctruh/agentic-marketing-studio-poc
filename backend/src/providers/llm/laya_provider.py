@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import logging
-from typing import Any, Dict
+from typing import Any
 
 import laya
 
@@ -29,7 +28,7 @@ class LayaProvider:
         return cls._agent
 
     @classmethod
-    async def predict(cls, state: str | dict, questions: Dict[str, Any]) -> Dict[str, Any]:
+    async def predict(cls, state: str | dict, questions: dict[str, Any]) -> dict[str, Any]:
         """
         Runs a structured decision prediction using Laya.
         """

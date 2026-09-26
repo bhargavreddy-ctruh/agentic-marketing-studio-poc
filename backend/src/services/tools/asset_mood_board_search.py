@@ -11,6 +11,8 @@ real `MoodBoardRepository`/`MoodBoardService`, never raw SQL here.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...models.base import async_session_factory
 from ...repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
@@ -23,7 +25,7 @@ from .registry import register_tool
 class AssetMoodBoardSearchTool(Tool):
     name = "asset_mood_board_search"
     description = "Searches internal prior-campaign assets for mood-board references."
-    input_schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    input_schema: ClassVar[dict] = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         query = str(args.get("query") or "").strip()

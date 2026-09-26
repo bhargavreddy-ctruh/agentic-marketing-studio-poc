@@ -17,6 +17,8 @@ user chose after being shown both options, not a silent cost increase.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
 from ...core.middleware.logging import get_logger
@@ -30,7 +32,7 @@ log = get_logger(__name__)
 class ImageEditorTool(Tool):
     name = "image_editor"
     description = "Applies a targeted edit to an existing image, given its storage_ref."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "storage_ref": {"type": "string"},

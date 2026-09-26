@@ -92,7 +92,7 @@ class CanvasVersioningService:
         # `version - 1` — an element edited via chat before 2026-09-21's fix can have a `version`
         # counter ahead of what its history actually contains (see record_new_version's own
         # comment), so `version - 1` can point at a version number with no row at all.
-        versions = sorted((v.version for v in await self._versions.list_for_element(element_id)))
+        versions = sorted(v.version for v in await self._versions.list_for_element(element_id))
         earlier = [v for v in versions if v < element.version]
         if not earlier:
             raise ValidationFailed("Already at the earliest version — nothing to undo.")
@@ -100,7 +100,7 @@ class CanvasVersioningService:
 
     async def redo(self, element_id: str) -> CanvasElementModel:
         element = await self._get_or_404(element_id)
-        versions = sorted((v.version for v in await self._versions.list_for_element(element_id)))
+        versions = sorted(v.version for v in await self._versions.list_for_element(element_id))
         later = [v for v in versions if v > element.version]
         if not later:
             raise ValidationFailed("Already at the latest version — nothing to redo.")

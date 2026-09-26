@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import ClassVar
 
 from ...core.local_storage import load_asset, save_asset
 from ._ffmpeg import run_ffmpeg
@@ -23,7 +24,7 @@ from .registry import register_tool
 class VideoStitcherTool(Tool):
     name = "video_stitcher"
     description = "Concatenates one or more video clips (by storage_ref) into a single video, in order."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "storage_refs": {"type": "array", "items": {"type": "string"}},

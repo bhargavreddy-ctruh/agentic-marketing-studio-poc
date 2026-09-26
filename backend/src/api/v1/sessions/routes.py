@@ -87,7 +87,7 @@ async def update_dna(
     existing brand, shared across every one of their sessions, never a new row per session);
     Product DNA is per-SESSION (updates only this session's linked product, or creates one linked
     only here)."""
-    session = await svc.get_session(session_id, user_id=current_user.id)
+    await svc.get_session(session_id, user_id=current_user.id)  # ownership check (raises Forbidden/NotFoundError)
     session_model = await svc._sessions.get(session_id)
 
     new_brief = dict(session_model.brief)
@@ -182,6 +182,7 @@ async def update_dna(
 
 from pydantic import BaseModel
 
+
 class UpdateStyleRequest(BaseModel):
     style_ref_storage_ref: str | None = None
     style_seed: int | None = None
@@ -221,6 +222,7 @@ async def post_turn(
 
 
 from ....services.orchestration.session_service import cancel_running_turn
+
 
 @router.post("/{session_id}/cancel")
 async def cancel_turn(

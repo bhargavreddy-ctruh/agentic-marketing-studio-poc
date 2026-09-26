@@ -21,15 +21,14 @@ from ...core.exceptions import NotFoundError
 from ...core.local_storage import load_asset
 from ...core.middleware.logging import get_logger
 from ...models.base import async_session_factory
-from ...models.canvas_element import CanvasElementModel
-from ...repositories.base import CanvasRepository
 from ...providers.observability.langsmith import trace, traceable
+from ...repositories.base import CanvasRepository
 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from ..tools.registry import get_tool
+from .alignment_checker import check_alignment
 from .brand_consistency_checker import check_brand_consistency
 from .format_technical_qa import check_format_technical
 from .visual_fidelity_checker import check_visual_fidelity
-from .alignment_checker import check_alignment
 
 log = get_logger(__name__)
 
@@ -63,8 +62,8 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
     user_message = ""
     user_id: str | None = None
     async with async_session_factory() as db:
-        from ...repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
         from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+        from ...repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
         from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
         element = await SqliteCanvasRepository(db).get_element_by_storage_ref(storage_ref)
         if element:

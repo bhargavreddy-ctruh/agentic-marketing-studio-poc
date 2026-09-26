@@ -7,6 +7,7 @@ actual dominant colors via Pillow's color quantization — no model call, no hal
 from __future__ import annotations
 
 import io
+from typing import ClassVar
 
 from PIL import Image
 
@@ -23,7 +24,7 @@ def _rgb_to_hex(rgb: tuple[int, int, int]) -> str:
 class ColorPaletteExtractorTool(Tool):
     name = "color_palette_extractor"
     description = "Extracts the dominant colors from an existing image, deterministically."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {"storage_ref": {"type": "string"}, "num_colors": {"type": "integer", "default": 5}},
         "required": ["storage_ref"],

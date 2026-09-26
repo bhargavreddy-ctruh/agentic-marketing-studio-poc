@@ -80,7 +80,7 @@ class NarrativePlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "NarrativePlan":
+    def from_dict(cls, data: dict) -> NarrativePlan:
         return cls(
             shots=tuple(data["shots"]), overall_story=data["overall_story"],
             script_line=data.get("script_line"), pacing_target=data["pacing_target"],
@@ -117,7 +117,7 @@ class ScenePlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ScenePlan":
+    def from_dict(cls, data: dict) -> ScenePlan:
         return cls(
             environment_description=data["environment_description"],
             prop_description=data.get("prop_description"),

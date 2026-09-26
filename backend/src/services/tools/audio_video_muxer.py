@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import ClassVar
 
 from ...core.local_storage import load_asset, save_asset
 from ._ffmpeg import run_ffmpeg
@@ -32,7 +33,7 @@ class AudioVideoMuxerTool(Tool):
         "Combines an existing audio track onto an existing video's own container, producing one "
         "new video file with real audio. Output length is capped at the shorter of the two inputs."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "video_storage_ref": {"type": "string"},

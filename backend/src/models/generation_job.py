@@ -1,7 +1,7 @@
 """One Lead's or one direct specialist call's execution record — for tracking status and retries."""
 from __future__ import annotations
 
-from sqlalchemy import JSON, ForeignKey, Integer, String
+from sqlalchemy import ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin

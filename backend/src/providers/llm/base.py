@@ -7,9 +7,10 @@ model that resolves to — Architecture.md section 3's Tier 0-3 system.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Callable, Protocol
+from typing import Any, Protocol
 
 
 class ModelTier(IntEnum):

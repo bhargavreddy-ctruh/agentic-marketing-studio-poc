@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import time
 
 import httpx
@@ -15,7 +14,7 @@ from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from ...core.mime_sniff import sniff_image_mime
-from .base import ImageGenProvider, ImageEditProvider, ImageResult
+from .base import ImageEditProvider, ImageGenProvider, ImageResult
 
 log = get_logger(__name__)
 

@@ -47,10 +47,11 @@ async def get_brand(
 
 
 from fastapi import UploadFile
+
 from ....core.local_storage import save_asset
 from ....core.mime_sniff import sniff_image_mime
-from ....repositories.base import BrandRepository
 from ...dependencies import BrandRepositoryDep
+
 
 @router.post("/{brand_id}/logo")
 async def upload_brand_logo(

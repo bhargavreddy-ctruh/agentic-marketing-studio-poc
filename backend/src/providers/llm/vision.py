@@ -30,8 +30,8 @@ from ...core.config import settings
 from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
-from .base import LLMResult, ModelTier
 from ._openai_compatible import call_openai_compatible_chat
+from .base import LLMResult, ModelTier
 from .replicate_llm import get_replicate_llm_provider
 
 log = get_logger(__name__)

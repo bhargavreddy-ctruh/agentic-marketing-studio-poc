@@ -6,6 +6,8 @@ than fabricating one — specialists must handle that gracefully, not treat it a
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
 from .base import Tool, ToolResult
@@ -16,7 +18,7 @@ from .registry import register_tool
 class BrandKitLookupTool(Tool):
     name = "brand_kit_lookup"
     description = "Looks up brand facts (colors, voice, logo rules) relevant to a question."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {"question": {"type": "string"}},
         "required": ["question"],

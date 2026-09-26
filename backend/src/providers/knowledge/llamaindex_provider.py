@@ -23,7 +23,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from llama_index.core import Document, Settings, StorageContext, VectorStoreIndex, load_index_from_storage
+from llama_index.core import (
+    Document,
+    Settings,
+    StorageContext,
+    VectorStoreIndex,
+    load_index_from_storage,
+)
 from llama_index.core.indices.base import BaseIndex
 
 from ...core.exceptions import ProviderUnavailable

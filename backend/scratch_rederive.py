@@ -1,8 +1,11 @@
 import asyncio
+
+from sqlalchemy import text
+
 from src.models.base import async_session_factory
 from src.repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
 from src.services.knowledge.guardrail_service import GuardrailService
-from sqlalchemy import text
+
 
 async def main():
     async with async_session_factory() as db:

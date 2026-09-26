@@ -11,6 +11,8 @@ hex codes and real mood/lighting understanding are different questions.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.local_storage import load_asset
 from ...providers.llm.vision import complete_with_vision
 from .base import Tool, ToolResult
@@ -32,7 +34,7 @@ class VisualPaletteAnalyzerTool(Tool):
         "lighting — genuine visual understanding, not just extracted hex codes. Use alongside "
         "color_palette_extractor when a reference image is available."
     )
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {"storage_ref": {"type": "string"}},
         "required": ["storage_ref"],

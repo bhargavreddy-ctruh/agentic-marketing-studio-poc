@@ -4,6 +4,8 @@ Image Crop Resize Tool — Crops or resizes an existing image tile to match spec
 from __future__ import annotations
 
 import io
+from typing import ClassVar
+
 from PIL import Image, ImageOps
 
 from ...core.local_storage import load_asset, save_asset
@@ -15,7 +17,7 @@ from .registry import register_tool
 class ImageCropResizeTool(Tool):
     name = "image_crop_resize"
     description = "Crops and resizes an image asset to match explicit pixel width and height requirements or platform specs."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "storage_ref": {

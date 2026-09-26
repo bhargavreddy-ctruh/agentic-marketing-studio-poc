@@ -5,6 +5,8 @@ docstring on how to swap it for another provider later).
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 from ...core.exceptions import ProviderUnavailable
 from ...providers.search.duckduckgo import get_search_provider
 from .base import Tool, ToolResult
@@ -15,7 +17,7 @@ from .registry import register_tool
 class WebTrendSearchTool(Tool):
     name = "web_trend_search"
     description = "Searches the web for current visual trend references matching a style brief."
-    input_schema = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+    input_schema: ClassVar[dict] = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         query = str(args.get("query") or "").strip()

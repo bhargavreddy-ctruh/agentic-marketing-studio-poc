@@ -3,16 +3,14 @@ Guardrail Service — Integrates the deterministic Guardrails engine with LlamaI
 """
 from __future__ import annotations
 
-from typing import Any
-
-from ...core.guardrails import GuardrailRule, GuardrailSet, derive_guardrails, coerce_set, resolve
-from ...models.session import SessionModel
-from ...repositories.base import SessionRepository
-from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
+from ...core.guardrails import GuardrailRule, GuardrailSet, coerce_set, derive_guardrails
 from ...core.middleware.logging import get_logger
+from ...models.base import async_session_factory
+from ...models.session import SessionModel
+from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
+from ...repositories.base import SessionRepository
 from ...repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
-from ...models.base import async_session_factory
 
 log = get_logger(__name__)
 
@@ -202,10 +200,11 @@ class GuardrailService:
         Enhances a short user instruction into a robust guardrail using an LLM,
         then adds it to the session's active GuardrailSet.
         """
-        from ...providers.llm.router import get_llm_provider
-        from ...providers.llm.base import ModelTier
-        from ...core.json_extract import extract_json
         import uuid
+
+        from ...core.json_extract import extract_json
+        from ...providers.llm.base import ModelTier
+        from ...providers.llm.router import get_llm_provider
         
         prompt = f"""You are an expert marketing guardrails engineer.
 The user wants to add custom guardrails based on this input:

@@ -4,6 +4,8 @@ Logo Compositor Tool — Overlays brand logos onto image assets with precise pos
 from __future__ import annotations
 
 import io
+from typing import ClassVar
+
 from PIL import Image, ImageEnhance
 
 from ...core.local_storage import load_asset, save_asset
@@ -23,7 +25,7 @@ _POSITIONS = {
 class LogoCompositorTool(Tool):
     name = "logo_compositor"
     description = "Overlays a brand logo onto an image asset with controlled placement, scale, and opacity."
-    input_schema = {
+    input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
             "image_storage_ref": {

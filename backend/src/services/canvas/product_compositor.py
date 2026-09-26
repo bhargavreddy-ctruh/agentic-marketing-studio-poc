@@ -4,9 +4,9 @@ Product Compositor — Removes background from product subject images and compos
 from __future__ import annotations
 
 import io
+
 from PIL import Image, ImageFilter
 
-from ...core.local_storage import load_asset, save_asset
 from ...core.middleware.logging import get_logger
 
 log = get_logger(__name__)

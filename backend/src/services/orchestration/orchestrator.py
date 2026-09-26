@@ -183,8 +183,9 @@ async def route(state: GraphState) -> GraphState:
 
     llm = get_llm_provider()
     
-    from ...providers.llm.laya_provider import LayaProvider
     import asyncio
+
+    from ...providers.llm.laya_provider import LayaProvider
     
     async def _safe_laya_choice():
         try:
