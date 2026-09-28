@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* LIGHT THEME (Default) */
+    --surface-50: 15 23 42;      /* slate-900: primary dark text / titles */
+    --surface-100: 30 41 59;     /* slate-800: headings */
+    --surface-200: 51 65 85;     /* slate-700: body text */
+    --surface-300: 71 85 105;    /* slate-600: secondary text */
+    --surface-400: 100 116 139;  /* slate-500: muted text */
+    --surface-500: 148 163 184;  /* slate-400: subtle hints */
+    --surface-600: 203 213 225;  /* slate-300: active borders */
+    --surface-700: 226 232 240;  /* slate-200: borders */
+    --surface-800: 241 245 249;  /* slate-100: card hover / chips */
+    --surface-900: 255 255 255;  /* white: card / container backgrounds */
+    --surface-950: 248 250 252;  /* slate-50: page / canvas background */
+
+    --canvas-bg: #f8fafc;
+    --canvas-dot: rgba(15, 23, 42, 0.16);
+  }
+
+  .dark {
+    /* DARK THEME */
+    --surface-50: 250 250 250;   /* white/zinc-50: primary light text */
+    --surface-100: 244 244 245;  /* zinc-100: headings */
+    --surface-200: 228 228 231;  /* zinc-200: body text */
+    --surface-300: 212 212 216;  /* zinc-300: secondary text */
+    --surface-400: 161 161 170;  /* zinc-400: muted text */
+    --surface-500: 113 113 122;  /* zinc-500: subtle hints */
+    --surface-600: 82 82 91;     /* zinc-600: active borders */
+    --surface-700: 63 63 70;     /* zinc-700: borders */
+    --surface-800: 39 39 42;     /* zinc-800: card hover / chips */
+    --surface-900: 24 24 27;     /* zinc-900: card / container backgrounds */
+    --surface-950: 9 9 11;       /* zinc-950: page / canvas background */
+
+    --canvas-bg: #09090b;
+    --canvas-dot: rgba(255, 255, 255, 0.3);
+  }
+
+  body {
+    @apply bg-surface-950 text-surface-50 antialiased selection:bg-brand-500/30 selection:text-brand-600 dark:selection:text-brand-100;
+  }
+
+  /* Custom scrollbar for modern look */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-surface-400/40 rounded-full hover:bg-surface-400/70 transition-colors;
+  }
+}
+
+.bg-mesh-light {
+  background-color: #f8fafc;
+  background-image: 
+    radial-gradient(at 0% 0%, hsla(220,60%,96%,1) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(240,70%,95%,0.8) 0, transparent 50%), 
+    radial-gradient(at 100% 0%, hsla(260,80%,96%,0.6) 0, transparent 50%);
+}
+
+.bg-mesh-dark {
+  background-color: #09090b;
+  background-image: 
+    radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(225,39%,30%,0.15) 0, transparent 50%), 
+    radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
+}
