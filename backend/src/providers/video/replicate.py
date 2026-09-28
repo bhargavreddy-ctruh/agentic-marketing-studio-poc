@@ -140,3 +140,11 @@ def get_video_provider() -> VideoGenProvider:
     if _singleton is None:
         _singleton = ReplicateVideoProvider()
     return _singleton
+
+
+def reset_video_provider() -> None:
+    """See llm/router.py's reset_llm_provider() docstring — same pattern, for
+    replicate_api_token."""
+    global _singleton
+    _singleton = None
+    return _singleton

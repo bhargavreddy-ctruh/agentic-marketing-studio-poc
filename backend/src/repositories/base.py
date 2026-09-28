@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from ..models.app_setting import AppSettingModel
 from ..models.brand_profile import BrandProfileModel
 from ..models.canvas_element import CanvasElementModel
 from ..models.canvas_element_version import CanvasElementVersionModel
@@ -80,3 +81,7 @@ class GenerationJobRepository(Protocol):
 class ToolCallLogRepository(Protocol):
     async def add(self, log: ToolCallLogModel) -> ToolCallLogModel: ...
     async def list_for_session(self, session_id: str) -> list[ToolCallLogModel]: ...
+
+
+class AppSettingRepository(Protocol):
+    async def list_all(self) -> list[AppSettingModel]: ...

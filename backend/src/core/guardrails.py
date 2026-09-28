@@ -165,13 +165,31 @@ def _product_rules(product: dict, key: str = "") -> list[GuardrailRule]:
         add("must_show", f"You must always show or clearly depict: {', '.join(product['must_show'])}.")
     
     if product.get("never_show"):
-        add("never_show", f"You must never show, imply, or depict: {', '.join(product['never_show'])}.")
-        
+        # Real, live-found problem (2026-09-26): this rule's wording didn't distinguish "never
+        # present as a real fact" from "never include in the frame at all" — a model reading it
+        # played it safe and produced flat, undecorated scenes even when nothing here actually
+        # forbade visual creativity, only fabricated FACTS. Reworded to land precisely on that
+        # boundary (see also `claims_disallowed` below, the same fix).
+        add("never_show", (
+            f"Never present {', '.join(product['never_show'])} as a real, verified fact about "
+            "this product — do not state a specific number, spec, or claim for these that isn't "
+            "given above. This does NOT restrict pure visual style: decorative sci-fi/energy/"
+            "holographic effects, fictional HUD-style graphic elements, glowing readouts, or "
+            "other stylized atmosphere are fine and encouraged — they are not factual claims "
+            "about the product, even if they show numbers or text."
+        ))
+
     if product.get("claims_allowed"):
         add("claims_allowed", f"You are allowed to make the following claims: {', '.join(product['claims_allowed'])}.")
-        
+
     if product.get("claims_disallowed"):
-        add("claims_disallowed", f"You are strictly prohibited from making the following claims: {', '.join(product['claims_disallowed'])}.")
+        add("claims_disallowed", (
+            f"Never present {', '.join(product['claims_disallowed'])} as a real, verified fact or "
+            "spec about this product. This does NOT restrict pure visual style: decorative "
+            "sci-fi/energy/holographic effects, fictional HUD-style graphic elements, and "
+            "stylized atmosphere are fine and encouraged — they are not factual claims about the "
+            "product."
+        ))
         
     if product.get("label_visibility"):
         add("label_visibility", f"Label visibility requirement: {product['label_visibility']}.")

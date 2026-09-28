@@ -10,6 +10,7 @@ import uuid
 
 from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
+from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import (
     emit,
     get_current_turn_events,
@@ -232,6 +233,7 @@ class SessionService:
         free_text: str | None,
         referenced_element_ids: list[str] | None = None,
         target_product_id: str | None = None,
+        start_new_product: bool = False,
     ) -> SessionResponse:
         session = await self._get_owned_session(session_id, user_id=user_id)
         if not picked_option_id and not free_text:
@@ -311,7 +313,7 @@ class SessionService:
                 session.brief = brief_with_target
                 return await self._run_turn(
                     session, user_message=original_message, referenced_element_ids=referenced_element_ids,
-                    target_product_id=target_product_id,
+                    target_product_id=target_product_id, start_new_product=start_new_product,
                 )
             # Neither a clear approve nor a clear cancel (e.g. the user typed something else
             # entirely instead of picking either option) — treat it as a genuinely new message,
@@ -362,7 +364,7 @@ class SessionService:
                 referenced_element_ids = real_refs
         return await self._run_turn(
             session, user_message=user_message, referenced_element_ids=referenced_element_ids,
-            target_product_id=target_product_id,
+            target_product_id=target_product_id, start_new_product=start_new_product,
         )
 
     async def get_session(self, session_id: str, *, user_id: str) -> SessionResponse:
@@ -381,7 +383,7 @@ class SessionService:
 
     async def _run_turn(
         self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None,
-        target_product_id: str | None = None,
+        target_product_id: str | None = None, start_new_product: bool = False,
     ) -> SessionResponse:
         # Sets the ContextVar every nested call (Leads, specialists, tools) reads to emit live
         # events for THIS turn, without session_id being threaded through every function
@@ -408,7 +410,7 @@ class SessionService:
         try:
             return await self._run_turn_inner(
                 session, user_message=user_message, referenced_element_ids=referenced_element_ids,
-                target_product_id=target_product_id,
+                target_product_id=target_product_id, start_new_product=start_new_product,
             )
         except Exception as exc:
             # A real, live-found regression in the "generating" marker just added above
@@ -449,7 +451,7 @@ class SessionService:
 
     async def _run_turn_inner(
         self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None,
-        target_product_id: str | None = None,
+        target_product_id: str | None = None, start_new_product: bool = False,
     ) -> SessionResponse:
         # The direct_fix route needs something to act on — the most recently produced element by
         # default (Memory.md, Phase 3 conformance audit), or the one the user explicitly picked in
@@ -491,9 +493,17 @@ class SessionService:
             if picked_product:
                 resolved_product_id = picked_product.id
                 resolved_product_name = picked_product.name
-        elif parent_element and parent_element.product_id:
+        elif parent_element and parent_element.product_id and not start_new_product:
             # No explicit target — inherit the referenced element's own product, so a follow-up
             # generation from an existing product's asset stays grouped with it by default.
+            # `start_new_product` (Phase 1, 2026-09-28) is the user's explicit "+ Start new
+            # product" choice — it defeats this inheritance on purpose, even though a parent WAS
+            # referenced, so the new element starts fresh (chat-detection/unassigned) instead of
+            # silently landing back in the product it was branched FROM. `resolved_parent_element_id`
+            # above is untouched either way — the lineage badge ("🔗 Based on...") should still
+            # show what this was derived from, even when it's deliberately grouped differently;
+            # `target_product_id: null`/omitted with no explicit flag still means "no opinion,
+            # infer as before" — unchanged, only this NEW explicit flag skips inheritance.
             resolved_product_id = parent_element.product_id
             resolved_product_name = parent_element.product_name
         # Genuinely nothing resolved yet — may still be filled in after the graph runs (see
@@ -534,6 +544,13 @@ class SessionService:
         # Read-only, sourced from the session's own column, never persisted back into brief JSON
         # (Memory.md, Phase 4: "approve" mode's per-stage pipeline gates).
         brief_for_graph["approval_mode"] = session.approval_mode
+        # Scratch, turn-input-only (2026-09-26, Fix 3 of the image/video quality investigation):
+        # the raw current message, threaded through `brief` so `runner.py`'s single shared
+        # tool-execution choke point can deterministically enforce a detected aspect ratio
+        # (`infer_aspect_ratio_from_text`) regardless of which node/route ends up calling the
+        # image/video generation tool — `brief["idea"]` is not always this turn's own message (it
+        # can be stale/summarized), so this is threaded separately rather than reusing that field.
+        brief_for_graph["_current_turn_message"] = user_message
         # Fallback fields for backwards compatibility with parts of graph that expect latest_element
         if latest_element:
             brief_for_graph["latest_element_id"] = latest_element.id
@@ -542,9 +559,28 @@ class SessionService:
 
         # Multi-element context
         ref_context = []
-        # If no specific references were provided, fallback to the latest element, if any
-        elements_to_contextualize = referenced_elements if referenced_elements else ([latest_element] if latest_element else [])
-        
+        # Fix 7 (2026-09-26, real gap: "it keeps taking the same image no matter what I say" —
+        # confirmed root cause was zero semantic reasoning here, a pure boolean branch that
+        # blindly defaulted to `existing_elements[-1]`, the single most-recently-created element
+        # in the ENTIRE session, regardless of what the message actually says). When the user gave
+        # an explicit reference, that's authoritative — no ambiguity, no reasoning needed (cost
+        # discipline: skip when deterministic). Otherwise, when there's genuinely more than one
+        # real candidate to choose between, a small CAPPED set of the most recent ones is handed
+        # to the orchestrator's own classification call (already running once per turn regardless
+        # — no new LLM round-trip) as real candidates, flagged via `_element_disambiguation_needed`
+        # so its prompt knows to pick which ONE (if any) the message is actually about — same or
+        # different from any previous one — rather than a hardcoded recency guess. See
+        # `orchestrator.py`'s `route()`, which narrows `referenced_elements_context` down to the
+        # resolved single element (or none) before this turn's generation ever runs.
+        _MAX_DISAMBIGUATION_CANDIDATES = 3
+        if referenced_elements:
+            elements_to_contextualize = referenced_elements
+        elif len(existing_elements) > 1:
+            elements_to_contextualize = existing_elements[-_MAX_DISAMBIGUATION_CANDIDATES:]
+            brief_for_graph["_element_disambiguation_needed"] = True
+        else:
+            elements_to_contextualize = [latest_element] if latest_element else []
+
         for el in elements_to_contextualize:
             meta = el.metadata_json or {}
             description = (
@@ -561,7 +597,7 @@ class SessionService:
                 "id": el.id,
                 "storage_ref": el.storage_ref,
                 "element_type": el.element_type,
-                "description": description or "(no description recorded)"
+                "description": description or NO_DESCRIPTION_SENTINEL
             })
             
             # for backwards compatibility for older prompts relying on this
@@ -570,27 +606,99 @@ class SessionService:
                 
         brief_for_graph["referenced_elements_context"] = ref_context
 
+        # Real, live-found ordering bug (2026-09-26, root-caused by tracing an actual bad
+        # generation end-to-end): this chat-driven product detection/switch used to run AFTER
+        # `graph.ainvoke` below, which meant a turn about a NEW product still generated using the
+        # PREVIOUS turn's product photo/guardrails as its image-to-image anchor — `qwen-image-3`'s
+        # i2i mode then structurally locked onto that stale, irrelevant photo (confirmed: a Red
+        # Bull collab request generated as a re-skinned iPhone product photo from an earlier,
+        # unrelated campaign in the same session). Moved here, BEFORE guardrail derivation and the
+        # `product_photo_storage_ref` injection below, so both correctly reflect the product THIS
+        # turn is actually about — not one turn late. This is a reordering, not new logic; every
+        # piece was already computed, just too late to matter for the turn that needed it.
+        stripped_message = user_message.strip()
+        if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
+            from ...core.exceptions import SpecialistFailed
+            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            from ..knowledge.product_dna_service import ProductDnaService
+
+            try:
+                async with async_session_factory() as db:
+                    product_repo = SqliteProductRepository(db)
+                    product_dna_svc = ProductDnaService(product_repo)
+                    linked_ids = list(session.brief.get("product_profile_ids") or [])
+                    existing_products = [
+                        p for pid in linked_ids if (p := await product_repo.get(pid)) is not None
+                    ]
+                    product = await product_dna_svc.upsert_product_from_chat(
+                        user_id=session.user_id,
+                        existing_products=existing_products,
+                        raw_text=stripped_message,
+                    )
+                if product is not None:
+                    if product.id not in linked_ids:
+                        linked_ids.append(product.id)
+                    session.brief = {**session.brief, "product_profile_ids": linked_ids}
+                    session.product_profile_id = product.id
+                    # Canvas Grouping's second resolution pass — only fills in what the EARLY pass
+                    # (explicit pick / inherited parent, above) left unresolved. An explicit pick
+                    # or a real parent's own product always takes precedence over a fresh
+                    # chat-detected one, so refining an existing product's DNA mid-turn never
+                    # silently re-groups an element the user already anchored elsewhere.
+                    if resolved_product_id is None:
+                        resolved_product_id = product.id
+                        resolved_product_name = product.name
+            except SpecialistFailed as exc:
+                log.warning(
+                    "product_dna_chat_upsert_failed",
+                    extra={"_extra_session_id": session.id, "_extra_error": exc.message},
+                )
+
         from ..knowledge.guardrail_service import GuardrailService
         guardrail_svc = GuardrailService(self._sessions)
-        
+
         # Per the reference design (guardrails.py::resolve): guardrails are derived ONCE from
         # brand/product at session creation and live in the session brief forever.
         # They are NEVER re-inferred from chat messages — doing so causes mid-session rules like
         # "do not show prices" to block the agent on a "try again" turn.
         # The ONLY way to add new rules is via the explicit user action: clicking Add in the
         # Guardrails UI, which calls add_rule_from_user_context() via POST /guardrails.
+        # (Derived AFTER the chat-driven product detection above, so a product switched THIS turn
+        # is reflected in the rules the specialists actually see during generation, not the
+        # previous turn's product's rules.)
         guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
         brief_for_graph["guardrails"] = guardrail_set.model_dump()
 
         # Inject product photo storage ref into the brief so base_image_generator can
         # auto-use it as image-to-image reference when no explicit reference_storage_ref is given.
-        if session.product_profile_id and not brief_for_graph.get("product_photo_storage_ref"):
+        # (Reads `session.product_profile_id` AFTER the chat-driven update above, so this is the
+        # CURRENT turn's product's photo, not a stale one left over from an earlier campaign.)
+        if session.product_profile_id and not start_new_product and (
+            not brief_for_graph.get("product_photo_storage_ref") or resolved_product_id is None
+        ):
+            # `not start_new_product` guards this WHOLE block (2026-09-28, Phase 1): both effects
+            # below — auto-grounding generation on the session's current product photo, AND the
+            # session-level grouping fallback — are exactly the kind of unrequested inheritance
+            # `start_new_product` exists to defeat. Without this guard, "+ Start new product"
+            # would still silently land back in the session's existing product here, one level
+            # down from the parent-inheritance check above.
             async with async_session_factory() as db:
                 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
                 product_repo = SqliteProductRepository(db)
                 product = await product_repo.get(session.product_profile_id)
-                if product and product.photo_storage_ref:
-                    brief_for_graph["product_photo_storage_ref"] = product.photo_storage_ref
+                if product:
+                    if product.photo_storage_ref and not brief_for_graph.get("product_photo_storage_ref"):
+                        brief_for_graph["product_photo_storage_ref"] = product.photo_storage_ref
+                    # Fix 5 (2026-09-26): last-resort grouping fallback — an explicit pick, an
+                    # inherited parent's product, or this turn's own chat-detected product (all
+                    # above) all still take precedence; only when NONE of those resolved anything
+                    # does a plain creative-direction turn now still land in the session's current
+                    # product instead of `None`/"Unassigned" (verified: 5/61 elements resolved a
+                    # product before this fix — this closes that gap for any session that has ever
+                    # had one attached, reusing the same DB fetch above, no extra query).
+                    if resolved_product_id is None:
+                        resolved_product_id = product.id
+                        resolved_product_name = product.name
 
         from ...core.events import set_current_guardrails_xml
         # Per-session toggle (2026-09-25) — when off, every specialist's system prompt this turn
@@ -616,6 +724,7 @@ class SessionService:
         _scratch_keys = (
             "latest_element_id", "latest_element_storage_ref", "latest_element_type",
             "latest_element_description", "approval_mode", "_recent_chat_history", "_retrieved_memory",
+            "_current_turn_message", "_element_disambiguation_needed",
             # This turn's own mood/style announcement (ideation_service.py) — read out via
             # result.metadata below, same as partial_generation_note; never persisted, or it would
             # keep re-announcing an old choice on later, unrelated turns.
@@ -633,58 +742,10 @@ class SessionService:
         new_guardrails = result_state.get("new_guardrails") or []
         other_new_rules = [g for g in new_guardrails if isinstance(g, dict) and g.get("source") != "product"]
 
-        # Real, live-found reliability bug (2026-09-25, explicit user report: "product dna... are
-        # not auto filled" — confirmed live: a real message listing full product specs never
-        # produced any Product DNA). This used to only run when ideation's `new_guardrails`
-        # happened to contain a `source: "product"` entry — a side-instruction bolted onto an LLM
-        # call whose real job is judging message CLARITY, and it silently skipped real, product-
-        # rich messages more often than not. Now called unconditionally for every substantive
-        # message — `upsert_product_from_chat`'s OWN `is_product_related` field (not a guess made
-        # here beforehand) correctly no-ops on "approve"/"make it more vibrant"/etc, so this closes
-        # the reliability gap without either missing real product messages or fabricating products
-        # from unrelated ones. A cheap, deterministic pre-filter (bare approve/cancel commands, or
-        # a message too short to contain real facts) skips the LLM call entirely for the obviously
-        # irrelevant case, same "deterministic beats a maybe" reasoning this codebase already uses
-        # for greetings (`ideation_service.py`'s `_is_bare_greeting`).
-        product_updated = False
-        stripped_message = user_message.strip()
-        if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
-            from ...core.exceptions import SpecialistFailed
-            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
-            from ..knowledge.product_dna_service import ProductDnaService
-
-            try:
-                async with async_session_factory() as db:
-                    product_repo = SqliteProductRepository(db)
-                    product_dna_svc = ProductDnaService(product_repo)
-                    linked_ids = list(session.brief.get("product_profile_ids") or [])
-                    existing_products = [
-                        p for pid in linked_ids if (p := await product_repo.get(pid)) is not None
-                    ]
-                    product = await product_dna_svc.upsert_product_from_chat(
-                        user_id=session.user_id,
-                        existing_products=existing_products,
-                        raw_text=stripped_message,
-                    )
-                if product is not None:
-                    if product.id not in linked_ids:
-                        linked_ids.append(product.id)
-                    session.brief = {**session.brief, "product_profile_ids": linked_ids}
-                    session.product_profile_id = product.id
-                    product_updated = True
-                    # Canvas Grouping's second resolution pass (2026-09-25) — only fills in what
-                    # the EARLY pass (explicit pick / inherited parent) left unresolved. An
-                    # explicit pick or a real parent's own product always takes precedence over
-                    # a fresh chat-detected one, so refining an existing product's DNA mid-turn
-                    # never silently re-groups an element the user already anchored elsewhere.
-                    if resolved_product_id is None:
-                        resolved_product_id = product.id
-                        resolved_product_name = product.name
-            except SpecialistFailed as exc:
-                log.warning(
-                    "product_dna_chat_upsert_failed",
-                    extra={"_extra_session_id": session.id, "_extra_error": exc.message},
-                )
+        # (Chat-driven product detection/upsert used to run here, after the graph — moved earlier
+        # in this function, before guardrail derivation and the graph call, so a product switched
+        # THIS turn is reflected in what the graph actually sees instead of one turn late. See the
+        # "Real, live-found ordering bug (2026-09-26...)" comment above `guardrail_svc = ...`.)
 
         if other_new_rules:
             from ...core.guardrails import GuardrailRule
@@ -699,13 +760,6 @@ class SessionService:
             # call here was pure redundant re-indexing of the same data, removed alongside making
             # `index_guardrails` properly async/awaited (2026-09-25).
             await guardrail_svc.update_guardrails(session.id, guardrail_set.model_dump())
-            session.brief["guardrails"] = guardrail_set.model_dump()
-
-        if product_updated:
-            # Re-derive now that the product DNA above may have changed — folds the new/updated
-            # product's rules in immediately rather than waiting for the next turn's own
-            # `get_or_derive_for_session` call at the top of `_run_turn_inner`.
-            guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
             session.brief["guardrails"] = guardrail_set.model_dump()
 
         result = result_state.get("result")

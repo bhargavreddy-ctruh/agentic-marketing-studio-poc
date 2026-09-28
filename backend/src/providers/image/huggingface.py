@@ -75,3 +75,10 @@ def get_image_edit_provider() -> ImageEditProvider:
     if _singleton is None:
         _singleton = HuggingFaceImageEditProvider()
     return _singleton
+
+
+def reset_image_edit_provider() -> None:
+    """See llm/router.py's reset_llm_provider() docstring — same pattern, for
+    huggingface_api_token."""
+    global _singleton
+    _singleton = None

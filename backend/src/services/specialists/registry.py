@@ -36,14 +36,17 @@ class SpecialistSpec:
     # `orchestrator.py`'s route classifier and `specialist_classifier.py`'s target picker (Rules.md
     # section 1: DRY), is enough to disambiguate this reliably.
     description: str = ""
-    # Opt-in, not opt-out: real, live-found regressions (2026-09-21, Memory.md) showed the
-    # self-hosted TIER_1 model failing badly on every task tested EXCEPT Reference Curator's
-    # (gathering references has no hard constraint to violate) — Overlay Artist specifically
-    # fabricated a $250,000 price with zero grounding, directly disobeying its own prompt's
-    # explicit "never invent a price" guardrail. Defaults to False (Groq-first, the same reliable
-    # path every other tier already uses) until a specialist is individually verified safe the
-    # same rigorous way Reference Curator was — never assumed safe by category alone.
-    prefer_local: bool = False
+    # Code-enforced output contract (2026-09-26, decomposition-quality investigation): every
+    # specialist's own prompt file already declares a strict <output_format> — this is that same
+    # declaration, mirrored here so it's actually checked in code (`runner.py`), not just hoped
+    # for in the prompt. Every specialist's real schema follows one consistent shape verified by
+    # reading all `<output_format>` blocks directly: either ALL of these keys are present (even if
+    # a value is legitimately "" or false), OR the whole response degrades to `{"error": "..."}` —
+    # so validation checks KEY PRESENCE only, and always exempts a genuine `error` response.
+    # Empty tuple (the default) means "no schema to enforce" — correct for specialists with no
+    # `<output_format>` block at all (e.g. brand_asset_applier, which only ever reports success via
+    # its tool calls), not an oversight.
+    required_output_fields: tuple[str, ...] = ()
 
     def load_prompt(self) -> str:
         """The specialist's own prompt, with the shared security-boundary block appended —
@@ -91,9 +94,7 @@ def load_all_specialists() -> None:
         allowed_tools=("web_trend_search", "asset_mood_board_search", "brand_kit_lookup"),
         tier=ModelTier.TIER_1,
         description="Gathers mood/trend references BEFORE any generation — never produces or edits an asset itself.",
-        # The one specialist actually verified live against the local model (Memory.md,
-        # 2026-09-21): real tool calls, real results, correct final reasoning — not assumed safe.
-        prefer_local=True,
+        required_output_fields=("reference_summary",),
     ))
     register_specialist(SpecialistSpec(
         name="palette_strategist",
@@ -101,22 +102,20 @@ def load_all_specialists() -> None:
         allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup"),
         tier=ModelTier.TIER_1,
         description="Decides a color direction BEFORE generation — never produces or edits an asset itself.",
-        # Verified live against the local model (2026-09-21, 3 real runs: no brand kit, a real
-        # brand_kit_lookup check, a nonexistent reference image) — correctly called tools only
-        # when relevant, never fabricated a brand identity/price, always returned valid final
-        # JSON. One real, disclosed downside: it retries a failing color_palette_extractor 3x
-        # before giving up when the referenced image doesn't actually exist, instead of noticing
-        # sooner — a latency cost, not a correctness one, so kept enabled.
-        prefer_local=True,
+        required_output_fields=("color_palette",),
     ))
     register_specialist(SpecialistSpec(
         name="illustrator",
         # product_lookup added per the reference doc's tool table ("Product Lookup ... Used by:
         # Illustrator, Overlay Artist, Visual Fidelity Checker") — Illustrator never had it before.
+        # collab_image_generator added 2026-09-26 (Fix 9) — a distinct tool for combining 2+ real
+        # visual assets (e.g. a sponsor logo + product photo) in one generation; base_image_generator
+        # stays the default for everything else.
         prompt_file="illustrator.md",
-        allowed_tools=("base_image_generator", "image_editor", "brand_kit_lookup", "product_lookup"),
+        allowed_tools=("base_image_generator", "collab_image_generator", "image_editor", "brand_kit_lookup", "product_lookup"),
         tier=ModelTier.TIER_3,
         description="Generates the base still IMAGE from scratch (full_image pipeline's core step).",
+        required_output_fields=("image_prompt", "aspect_ratio", "brand_facts_used"),
     ))
     register_specialist(SpecialistSpec(
         name="composition_artist",
@@ -128,6 +127,7 @@ def load_all_specialists() -> None:
         allowed_tools=("image_editor", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_2,
         description="Applies a targeted EDIT to an already-existing image using the image_editor tool (direct_fix use case). Handles ALL visual modifications to images: recoloring, changing subjects, editing content, striking through prices, adding discounted prices visually onto an image, modifying text baked into images, and any request that says 'image edit' or 'edit image'. This is the DEFAULT specialist for any image edit request. Never generates a new image from scratch, never touches video. Also writes the real creative-brief text card for a just-generated image.",
+        required_output_fields=("notes",),
     ))
     register_specialist(SpecialistSpec(
         name="camera_director",
@@ -135,6 +135,7 @@ def load_all_specialists() -> None:
         allowed_tools=("base_video_generator", "brand_kit_lookup"),
         tier=ModelTier.TIER_3,
         description="Generates NEW raw video footage/clips from scratch (full_video pipeline's Motion Lead step) — this is the specialist for 'make a video of X', not video_editor_cutter.",
+        required_output_fields=("motion_prompt", "camera_motion", "aspect_ratio"),
     ))
     register_specialist(SpecialistSpec(
         name="video_editor_cutter",
@@ -146,6 +147,7 @@ def load_all_specialists() -> None:
             "new footage at all. Never route a request to CREATE a new video here; that always "
             "needs camera_director (full_video pipeline) instead."
         ),
+        required_output_fields=("pacing_note",),
     ))
     register_specialist(SpecialistSpec(
         name="sound_designer",
@@ -157,6 +159,7 @@ def load_all_specialists() -> None:
         allowed_tools=("brand_kit_lookup", "text_to_speech"),
         tier=ModelTier.TIER_1,
         description="Produces voiceover/narration audio (text_to_speech) independently of the video itself — decides whether it should later be muxed in, but never touches video directly.",
+        required_output_fields=("audio_recommendation", "voiceover_line", "should_mux", "notes"),
     ))
     register_specialist(SpecialistSpec(
         name="overlay_artist",
@@ -167,6 +170,7 @@ def load_all_specialists() -> None:
         ),
         tier=ModelTier.TIER_1,
         description="Adds a SIMPLE text label or headline onto an image as a floating overlay (NOT baked into the image). ONLY use when the user explicitly asks to 'add text', 'add a headline', or 'add a caption' as a separate layer. Do NOT use for image edits, price modifications, striking through prices, or any visual modification of the image content itself — those go to composition_artist.",
+        required_output_fields=("needs_overlay", "discount_facts", "reasoning", "overlay_text"),
     ))
     register_specialist(SpecialistSpec(
         name="shot_planner",
@@ -177,6 +181,7 @@ def load_all_specialists() -> None:
         allowed_tools=("web_trend_search", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_2,
         description="Plans shot composition for the full_video pipeline BEFORE any footage is generated — never produces or edits a media asset itself, but does write the real shot-list text card.",
+        required_output_fields=("overall_story", "shots"),
     ))
     register_specialist(SpecialistSpec(
         name="script_writer",
@@ -184,6 +189,7 @@ def load_all_specialists() -> None:
         allowed_tools=("brand_kit_lookup",),
         tier=ModelTier.TIER_1,
         description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio).",
+        required_output_fields=("has_script", "script_line"),
     ))
     register_specialist(SpecialistSpec(
         # Deliberately NOT given brand_kit_lookup, unlike every other specialist — the reference
@@ -195,6 +201,7 @@ def load_all_specialists() -> None:
         allowed_tools=(),
         tier=ModelTier.TIER_1,
         description="Reasoning-only pacing feedback for the full_video pipeline — no tools, produces no asset.",
+        required_output_fields=("pacing_target",),
     ))
     register_specialist(SpecialistSpec(
         name="environment_designer",
@@ -202,6 +209,7 @@ def load_all_specialists() -> None:
         allowed_tools=("base_image_generator", "brand_kit_lookup"),
         tier=ModelTier.TIER_2,
         description="Generates a background/scene IMAGE from scratch for the full_video pipeline's Scene Lead step.",
+        required_output_fields=("environment_description", "use_existing_image_as_scene"),
     ))
     register_specialist(SpecialistSpec(
         name="prop_stylist",
@@ -209,6 +217,7 @@ def load_all_specialists() -> None:
         allowed_tools=("image_editor", "brand_kit_lookup"),
         tier=ModelTier.TIER_1,
         description="Applies a targeted prop/detail EDIT to an already-existing image (e.g., recoloring, adding/removing objects) — never generates a new image from scratch.",
+        required_output_fields=("prop_description",),
     ))
     register_specialist(SpecialistSpec(
         name="lighting_designer",
@@ -219,6 +228,7 @@ def load_all_specialists() -> None:
         allowed_tools=("image_editor", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
         description="Applies a targeted lighting EDIT to an already-existing image — never generates a new image from scratch. Also writes the real scene-description text card for the scene.",
+        required_output_fields=("lighting_description",),
     ))
     register_specialist(SpecialistSpec(
         # Added 2026-09-22, per an explicit user ask: text (a description of an existing element,
@@ -234,6 +244,7 @@ def load_all_specialists() -> None:
         allowed_tools=("text_card_writer", "brand_kit_lookup", "audio_transcriber"),
         tier=ModelTier.TIER_2,
         description="Writes a real text card describing an existing image/video/audio element, or a narrative/summary in writing — never generates or edits an image/video/audio asset itself. The right target whenever the user asks for something to be DESCRIBED, narrated, or summarized in text, not generated/edited as a new media asset.",
+        required_output_fields=("narration_text", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="brand_asset_applier",

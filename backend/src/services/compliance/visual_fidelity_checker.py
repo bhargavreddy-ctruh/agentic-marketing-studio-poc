@@ -84,9 +84,6 @@ async def check_visual_fidelity(
                 system=_TEXT_FALLBACK_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": context}],
                 max_tokens=1024,
-                # Same reasoning as brand_consistency_checker.py's own text-fallback call
-                # (2026-09-21) — a compliance gate skips local-first routing.
-                prefer_local=False,
             )
         except Exception as exc:
             raise SpecialistFailed("visual_fidelity_checker", str(exc)) from exc

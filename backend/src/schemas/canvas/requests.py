@@ -23,3 +23,13 @@ class CreateElementRequest(BaseModel):
     user is placing existing bytes onto the canvas directly, not asking a specialist to generate
     anything, so there's no prompt/instruction here at all."""
     storage_ref: str
+
+
+class GroupElementRequest(BaseModel):
+    """Real, live-found gap (2026-09-26): there was no way for a user to correct an element's
+    product grouping after creation at all — it was write-once, set only at generation/upload
+    time, sometimes wrongly (an unrelated upload silently auto-guessed into the wrong product, or
+    a generation left ungrouped). `product_id: null` explicitly ungroups; a real id groups/regroups
+    — "user will group it if he feels they are the same" needs exactly this, an explicit action,
+    not an automatic guess."""
+    product_id: str | None = None

@@ -57,7 +57,6 @@ class ReplicateLLMProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-        prefer_local: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if not self._api_token:
@@ -129,8 +128,21 @@ class ReplicateLLMProvider(LLMProvider):
                     return full_text
 
                 content = await loop.run_in_executor(None, _run)
+                stripped = content.strip()
+                if not stripped:
+                    # Real, live-found bug (2026-09-28): `replicate.stream(...)` can yield zero/
+                    # all-empty chunks without raising — this used to return a "successful"
+                    # LLMResult with text="" straight through, since this provider is the LAST
+                    # fallback (no ProviderUnavailable = no retry engages, and there's nothing left
+                    # for router.py to fall back to). Raising here instead routes into the same
+                    # except-block retry loop below, giving it real chances to recover before
+                    # actually giving up — matching the same guard `_openai_compatible.py`'s
+                    # streaming path already has for this exact failure shape.
+                    raise ProviderUnavailable(
+                        "replicate_llm", f"{_REPLICATE_LLM_MODEL} returned empty content"
+                    )
                 return LLMResult(
-                    text=content.strip(),
+                    text=stripped,
                     model=_REPLICATE_LLM_MODEL,
                     tool_calls=[],
                     stop_reason="stop",

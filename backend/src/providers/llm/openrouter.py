@@ -30,11 +30,16 @@ from .base import LLMProvider, LLMResult, ModelTier
 
 log = get_logger(__name__)
 
-_TIER_TO_MODELS: dict[ModelTier, str | None] = {
-    ModelTier.TIER_1: settings.model_tier_1,
-    ModelTier.TIER_2: settings.model_tier_2,
-    ModelTier.TIER_3: settings.model_tier_3,
-}
+
+def _tier_to_models(tier: ModelTier) -> str | None:
+    # Reads `settings` fresh on every call rather than a module-level dict frozen at import time
+    # (2026-09-28 fix) — model_tier_1/2/3 are now DB-editable via
+    # services/settings/settings_service.py, and a frozen dict would never see a live override.
+    return {
+        ModelTier.TIER_1: settings.model_tier_1,
+        ModelTier.TIER_2: settings.model_tier_2,
+        ModelTier.TIER_3: settings.model_tier_3,
+    }.get(tier)
 
 
 class OpenRouterProvider(LLMProvider):
@@ -43,7 +48,7 @@ class OpenRouterProvider(LLMProvider):
         self._base_url = (base_url or settings.openrouter_base_url).rstrip("/")
 
     def _resolve_models(self, tier: ModelTier) -> list[str]:
-        raw = _TIER_TO_MODELS.get(tier)
+        raw = _tier_to_models(tier)
         if not raw:
             raise ProviderUnavailable(
                 "openrouter",
@@ -59,7 +64,6 @@ class OpenRouterProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-        prefer_local: bool = True,  # unused — only LLMRouter acts on this, see base.py's docstring
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if not self._api_key:

@@ -36,6 +36,10 @@ from .registry import get_specialist
 
 log = get_logger(__name__)
 
+# Tools whose `aspect_ratio` arg gets deterministically enforced from the real user message
+# instead of trusted from the model's own tool-call arg — see the call site below.
+_ASPECT_RATIO_ENFORCED_TOOLS = frozenset({"base_image_generator", "image_editor", "base_video_generator"})
+
 
 def _extract_balanced_call_args(text: str, open_paren_idx: int) -> str | None:
     """Scans forward from an opening '(' to find its matching ')', respecting quoted strings (so
@@ -245,12 +249,15 @@ async def run_specialist_agentic(
     # in a row with "could not parse JSON from model response: Expecting value: line 1 column 1
     # (char 0)"): a model that returns non-JSON prose with no tool call at all (not the same as an
     # EMPTY response, which `extract_json` already reports distinctly) used to kill the whole
-    # specialist step immediately — zero retry, anywhere. `reference_curator` specifically prefers
-    # the local model (`spec.prefer_local`), whose instruction-following is genuinely weaker than
-    # Groq/OpenRouter's free models, making this the specialist most likely to hit it. One bounded
-    # corrective retry, same shape as the existing failed-tool-call correction just below (a real
-    # system note telling the model exactly what was wrong), instead of raising on the first miss.
+    # specialist step immediately — zero retry, anywhere. One bounded corrective retry, same shape
+    # as the existing failed-tool-call correction just below (a real system note telling the model
+    # exactly what was wrong), instead of raising on the first miss.
     _json_parse_retries_left = 1
+    # Code-enforced output contract (2026-09-26, decomposition-quality investigation): every
+    # specialist's own prompt already declares a strict <output_format>, but nothing checked the
+    # model actually returned those keys — same bounded-retry shape as the JSON-parse-failure
+    # case just above, not a new retry system.
+    _missing_fields_retries_left = 1
 
     # A dynamic per-call trace name (`trace()`, not `@traceable`) — this one function runs every
     # specialist, so a static decorator name would make all of them look identical in LangSmith. A
@@ -270,11 +277,6 @@ async def run_specialist_agentic(
                     # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
                     # finding as ideation_service.py, and again with Groq's gpt-oss models.
                     max_tokens=2048,
-                    # Per-specialist opt-in (registry.py's SpecialistSpec.prefer_local, default
-                    # False) — a real, live-found regression (2026-09-21) showed the local model
-                    # isn't safe to assume for every specialist just because one (Reference
-                    # Curator) tested fine.
-                    prefer_local=spec.prefer_local,
                     # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
                     # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
                     # streams (see base.py's own docstring on this parameter).
@@ -316,6 +318,22 @@ async def run_specialist_agentic(
                             error=f"'{tool_name}' is not in {specialist_name}'s allowed_tools",
                         )
                     else:
+                        # Real, live-found bug (2026-09-26): a deterministic aspect-ratio detector
+                        # already existed (`infer_aspect_ratio_from_text`) and correctly matched an
+                        # explicit "9:16" in a real user request — but it was only ever wired in as
+                        # a soft PROMPT HINT the model could (and did) ignore; the real generation
+                        # still went out as the model's own default. Enforced here instead, at the
+                        # one shared tool-execution point every specialist's tool call passes
+                        # through (same choke point the stale-photo-reference fix uses) — covers
+                        # image AND video AND every route (dynamic executor, visual_design_lead,
+                        # motion_lead) at once, not a hint repeated at three separate call sites.
+                        if tool_name in _ASPECT_RATIO_ENFORCED_TOOLS and brief:
+                            from ..leads.base import infer_aspect_ratio_from_text
+                            detected_ratio = infer_aspect_ratio_from_text(
+                                brief.get("_current_turn_message") or brief.get("idea") or ""
+                            )
+                            if detected_ratio and args.get("aspect_ratio") != detected_ratio:
+                                args["aspect_ratio"] = detected_ratio
                         # Its own trace span, nested under this specialist's — real per-tool
                         # visibility (name, real args, real result), not just a line in the
                         # specialist's own log.
@@ -438,6 +456,34 @@ async def run_specialist_agentic(
                 exc = SpecialistFailed(specialist_name, parsed["error"])
                 exc.partial_result = partial
                 raise exc
+
+            # Code-enforced output contract: every specialist's real schema is either ALL of its
+            # declared keys (even if a value is legitimately "" or false) OR the `error` escape
+            # hatch above — verified by reading every specialist's own <output_format> block
+            # directly, not assumed. KEY PRESENCE only, matching that real schema shape.
+            missing_fields = [f for f in spec.required_output_fields if f not in parsed]
+            if missing_fields:
+                if _missing_fields_retries_left > 0:
+                    _missing_fields_retries_left -= 1
+                    log.warning(
+                        "specialist_missing_required_output_fields",
+                        extra={"_extra_specialist": specialist_name, "_extra_missing": missing_fields},
+                    )
+                    messages.append({"role": "assistant", "content": result.text or ""})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Your final JSON is missing required field(s): {', '.join(missing_fields)}. "
+                            "Return your final JSON again with ALL required fields present (or call a "
+                            "tool if you're not actually done yet, or return ONLY {\"error\": \"...\"} "
+                            "if you genuinely cannot fulfill the request)."
+                        ),
+                    })
+                    continue
+                raise SpecialistFailed(
+                    specialist_name,
+                    f"final response missing required field(s) after retry: {', '.join(missing_fields)}",
+                )
 
             log.info(
                 "specialist_step_ok",

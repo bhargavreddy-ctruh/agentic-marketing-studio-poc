@@ -59,6 +59,7 @@ def load_all_tools() -> None:
         base_image_generator,
         base_video_generator,
         brand_kit_lookup,
+        collab_image_generator,
         color_palette_extractor,
         discount_claims_calculator,
         discount_math_calculator,

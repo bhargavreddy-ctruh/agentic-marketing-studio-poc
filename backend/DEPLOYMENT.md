@@ -6,9 +6,9 @@ doc to hand to whoever provisions the EC2 instance — read this before touching
 ## How it works, in one sentence
 
 Every push to `main` that touches `backend/` or `docker-compose.yml` runs tests, then — if they
-pass — SSHes into a pre-provisioned EC2 instance, pulls the new code, and restarts the backend +
-Ollama containers with `docker compose`. Nothing else needs to change by hand after the one-time
-setup below.
+pass — SSHes into a pre-provisioned EC2 instance, pulls the new code, and restarts the backend
+container with `docker compose`. Nothing else needs to change by hand after the one-time setup
+below.
 
 This intentionally reuses [docker-compose.yml](../docker-compose.yml) as-is — the same file used
 for local dev — rather than introducing a separate AWS-only deployment format (ECS task
@@ -24,16 +24,16 @@ bottom.
 
 ### 1. Provision the EC2 instance
 
-- **Size**: at minimum `t3.large` (2 vCPU / 8 GB RAM). The `ollama` container loads a full
-  `llama3.1:8b` model into RAM — anything smaller will swap heavily or OOM-kill the container.
-  Go larger if you expect concurrent generation requests.
+- **Size**: `t3.small`/`t3.medium` (1-2 vCPU / 2-4 GB RAM) is enough — local Ollama was removed
+  (2026-09-28), so nothing on this instance needs to load a full LLM into RAM anymore; all
+  reasoning goes to Groq/Replicate. Go larger if you expect concurrent generation requests (the
+  heavy Python ML deps — torch, sentence-transformers, faster-whisper — still have their own
+  footprint even without Ollama).
 - **AMI**: Amazon Linux 2023 or Ubuntu 22.04+, either works.
-- **Storage**: 30 GB+ EBS volume. Docker images, the Ollama model (~5 GB), and generated
-  assets (`backend/var/`) all live on this disk.
+- **Storage**: 15 GB+ EBS volume. Docker images and generated assets (`backend/var/`, if not
+  using Cloudinary) live on this disk — no Ollama model weights to account for anymore.
 - **Security group**: open port 22 (SSH, ideally restricted to a known IP range or a bastion —
-  not `0.0.0.0/0`) and port 8000 (the backend API). Do NOT expose port 11434 (Ollama) publicly —
-  it has no auth of its own; only the `backend` container needs to reach it, over the compose
-  network.
+  not `0.0.0.0/0`) and port 8000 (the backend API).
 - **Elastic IP**: attach one, so the instance's address doesn't change on stop/restart — CI's
   `EC2_HOST` secret (below) assumes a stable address.
 
@@ -78,13 +78,12 @@ PUBLIC_BACKEND_URL=https://your-actual-backend-domain.com
 OLLAMA_MODEL=llama3.1:8b
 ```
 `PUBLIC_FRONTEND_URL` must match wherever the frontend is actually served from, or the backend
-will reject its requests via CORS. `OLLAMA_MODEL` must match `backend/.env`'s own
-`LOCAL_LLM_MODEL_TIER_1` — nothing keeps these two in sync automatically.
+will reject its requests via CORS.
 
 ### 5. First manual start (confirms everything works before wiring up CI)
 
 ```bash
-docker compose up -d --build backend ollama
+docker compose up -d --build backend
 docker compose logs -f backend   # watch it come up; Ctrl-C to stop tailing
 curl http://localhost:8000/health
 ```
@@ -111,8 +110,8 @@ See [.github/workflows/backend-ci-cd.yml](../.github/workflows/backend-ci-cd.yml
    the deploy step at all.
 2. **Deploy job** (only on a push to `main`, only after tests pass): SSHes in, `git fetch` +
    `git reset --hard origin/main` (the deploy path is dedicated to this — never make manual edits
-   there, they'll be silently discarded on the next deploy), `docker compose up -d --build backend
-   ollama`, then prunes old images so the disk doesn't fill up over time.
+   there, they'll be silently discarded on the next deploy), `docker compose up -d --build
+   backend`, then prunes old images so the disk doesn't fill up over time.
 3. **Health check**: polls `http://localhost:8000/health` for up to a minute; fails the workflow
    loudly if the backend doesn't come back up, instead of silently leaving a broken deploy running.
 

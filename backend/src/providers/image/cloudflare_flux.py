@@ -157,3 +157,10 @@ def get_cloudflare_flux_provider() -> CloudflareFluxProvider:
     if _singleton is None:
         _singleton = CloudflareFluxProvider()
     return _singleton
+
+
+def reset_cloudflare_flux_provider() -> None:
+    """See llm/router.py's reset_llm_provider() docstring — same pattern, for
+    cloudflare_account_id/cloudflare_api_token."""
+    global _singleton
+    _singleton = None

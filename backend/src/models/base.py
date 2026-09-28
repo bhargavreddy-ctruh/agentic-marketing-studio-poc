@@ -52,11 +52,12 @@ async def init_models() -> None:
             ("sessions", "style_seed", "INTEGER"),
             ("sessions", "approval_mode", "VARCHAR(16)"),
             ("sessions", "next_prompt_json", "JSON"),
-            # Explicit DEFAULT 1 (not just the model's own Python-side default), so an existing
+            # Explicit DEFAULT TRUE (not just the model's own Python-side default), so an existing
             # session's already-stored NULL from before this migration reads back as guardrails ON,
             # never as falsy/off — a real gap the other nullable-with-a-default columns above don't
-            # have to worry about since Python None there just means "not set yet."
-            ("sessions", "guardrails_enabled", "BOOLEAN DEFAULT 1"),
+            # have to worry about since Python None there just means "not set yet." TRUE (not the
+            # SQLite-only integer literal `1`) so this same statement works verbatim on Postgres too.
+            ("sessions", "guardrails_enabled", "BOOLEAN DEFAULT TRUE"),
             ("canvas_elements", "pending_storage_ref", "VARCHAR(255)"),
             ("canvas_elements", "pending_metadata", "JSON"),
             ("canvas_elements", "pending_action", "VARCHAR(32)"),
@@ -78,14 +79,29 @@ async def init_models() -> None:
         from ..core.middleware.logging import get_logger
 
         log = get_logger(__name__)
+        # Postgres (Supabase) supports `ADD COLUMN IF NOT EXISTS` natively — cleaner and race-free,
+        # unlike the try/except-swallow below. SQLite's ALTER TABLE ADD COLUMN has no IF NOT EXISTS
+        # clause at all, so it still needs the try/except path. Branching on dialect here (rather
+        # than picking one syntax) keeps both a local SQLite dev run and a Supabase deploy working
+        # off the exact same migrations list.
+        is_postgres = conn.dialect.name == "postgresql"
         for table, col, col_type in migrations:
-            try:
-                await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
-            except Exception as exc:  # expected/normal once the column already exists
-                log.debug(
-                    "add_column_skipped",
-                    extra={"_extra_table": table, "_extra_column": col, "_extra_error": str(exc)},
+            if is_postgres:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
                 )
+            else:
+                try:
+                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                except Exception as exc:  # expected/normal once the column already exists
+                    log.debug(
+                        "add_column_skipped",
+                        extra={
+                            "_extra_table": table,
+                            "_extra_column": col,
+                            "_extra_error": str(exc),
+                        },
+                    )
 
 
 def get_engine():

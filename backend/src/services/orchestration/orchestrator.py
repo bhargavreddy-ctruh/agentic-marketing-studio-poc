@@ -64,6 +64,8 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 6b. **Reference Image Handling:** If the user provided a reference image and their instruction is clear on how to use it, you MUST explicitly tell the first generating specialist (e.g., `illustrator`) how to use it. For example, if it's an image-to-image base, add to the instruction: "You MUST use the provided referenced element as your image-to-image reference_storage_ref".
 7. **Editing Existing Assets:** If the user request is to modify, fix, or edit an existing referenced element (e.g., "edit this image", "strike out the price", "change the color"), you MUST use route 'direct_fix' and provide the 'target_specialist'. Do NOT use 'dynamic' for edits on existing assets. For image content edits (recoloring, changing subjects, adding/removing visual elements, modifying the image itself), use 'composition_artist'. Only use 'overlay_artist' for pure TEXT overlays (adding price tags, discount labels, promotional text ON TOP of an image). This applies to 'dynamic' plans too: if a referenced element exists and the request is an edit to it, NEVER put a from-scratch generator (e.g. 'illustrator') as a plan step — that discards the referenced element and produces an unrelated new asset instead of the edit the user asked for. Either route 'direct_fix' to 'composition_artist' (preferred for a single edit), or, only if the request genuinely needs multiple steps, make the first 'dynamic' step an editing-capable specialist operating on the referenced element's storage_ref.
 8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
+9. **Element Disambiguation (only when explicitly flagged "candidates to choose from"):** When several existing elements are shown as candidates rather than one confirmed reference, decide — the same way a real assistant re-reads a conversation to figure out which prior image "try again" means — which ONE (if any) this message is actually about, from their real descriptions and the message's own wording: "try again"/"regenerate"/no new subject mentioned → the single most recent candidate whose description best fits the ongoing conversation; a message describing a clearly different subject than any candidate depicts → none of them (a genuinely new, unrelated request); a message whose wording matches one particular candidate's own description more than the others → that one specifically, even if it isn't the most recent. Set `resolved_element_id` to that element's id, or `null` when none of them are what the message means. Never guess when it's genuinely unclear which one — set `resolved_element_id` to `null` and let the request proceed as a new, ungrouped generation rather than silently acting on the wrong asset.
+10. **Parallel Steps (only in a 'dynamic' plan, only when genuinely independent):** If two or more steps each generate a completely FRESH, independent asset from scratch that do NOT depend on each other's output (e.g. two separate illustrator variants for A/B options, or an illustrator image alongside an unrelated sound_designer voiceover) — no need for one to have finished before the other starts — give them the SAME `parallel_group` number so they can run concurrently. NEVER put a step that EDITS an existing asset (composition_artist, prop_stylist, lighting_designer, overlay_artist) in a group with anything else, and NEVER group a step that needs another step's own not-yet-produced storage_ref — those must stay ungrouped (omit `parallel_group`, or give it a number no other step shares) so they run in your intended order. When genuinely unsure whether two steps are independent, leave `parallel_group` unset — sequential is always correct, grouping wrongly is not.
 </rules>
 
 <specialists>
@@ -78,9 +80,11 @@ Return ONLY valid JSON matching this schema:
   "plan": [ // Required ONLY IF route is 'dynamic'. Otherwise null.
     {{
       "specialist": "the exact name of the specialist",
-      "instruction": "Clear instruction for what this specialist needs to accomplish in this step"
+      "instruction": "Clear instruction for what this specialist needs to accomplish in this step",
+      "parallel_group": "OPTIONAL, per rule 10 — an integer shared by 2+ steps that are genuinely independent fresh-generation steps, so they run concurrently. Omit (or use a number no other step shares) for anything sequential or uncertain — this is the safe default."
     }}
-  ]
+  ],
+  "resolved_element_id": "ONLY when the context explicitly says multiple candidate elements are given to choose between (rule 9) — the id of the ONE you decided this message is about, or null if none of them are. Omit/null in every other case (a single confirmed reference needs no decision here)."
 }}
 </output_format>
 """
@@ -155,29 +159,50 @@ async def route(state: GraphState) -> GraphState:
     if retrieved_memory:
         classification_context.append(f"Relevant historical chat memory:\n{retrieved_memory}")
     
+    # Fix 8 (2026-09-26) was considered here too, but deliberately NOT applied: this classifier
+    # always runs on `ModelTier.TIER_1` (Groq's `gpt-oss-20b`, confirmed via `core/config.py`'s
+    # own comment to be text-only — this codebase already has a
+    # SEPARATE, dedicated `groq_vision_model` specifically because the tiered gpt-oss models can't
+    # see images at all). Attaching real image content to this call risks a hard API error on the
+    # single most load-bearing path in the app (every turn routes through this), with no safe way
+    # to verify the failure mode without a real (paid) call — too risky to ship unverified here.
+    # `_direct_fix_node`/`_dynamic_executor_node` keep their real image attachment (pre-existing,
+    # already-shipped behavior for `_dynamic_executor_node`); this call site stays text-only.
+    needs_disambiguation = bool(brief.get("_element_disambiguation_needed"))
     if referenced_elements:
         elements_desc = []
         for i, el in enumerate(referenced_elements, 1):
             kind = el.get("element_type", "unknown kind")
             desc = el.get("description", "(no description recorded)")
-            elements_desc.append(f"Element {i} (Type: {kind}): {desc}")
-            
+            elements_desc.append(f"Element {i} (id: {el.get('id')}, Type: {kind}): {desc}")
+
         elements_str = "\n".join(elements_desc)
-        classification_context.append(
-            f"The following existing generated elements ARE available to fix:\n{elements_str}\n"
-            f"Compare this against the user's most recent message: if the message is asking for "
-            f"something about a DIFFERENT subject/kind than what these existing elements actually "
-            f"are (e.g. the existing element is a logo and the new message asks for a car photo "
-            f"unrelated to any logo), that is a NEW/DIFFERENT asset request, never direct_fix on "
-            f"these elements — route to whichever full_* route matches what's actually being asked "
-            f"for instead.\n"
-            f"If instead the message is asking to edit/modify/fix/add something ON one of these "
-            f"same elements (a price tag, a discount, a color change, a text strike-out, etc.), "
-            f"you MUST ground your plan in that element: route 'direct_fix' to 'composition_artist' "
-            f"(or 'overlay_artist' only for a pure text overlay), never route 'dynamic' with a "
-            f"from-scratch generator like 'illustrator' — that would throw away this exact element "
-            f"and produce an unrelated new one instead of the edit being asked for."
-        )
+        if needs_disambiguation:
+            # Fix 7 (2026-09-26): more than one real candidate — no explicit reference was given
+            # by the user for this turn (see `session_service.py`), so which ONE (if any) applies
+            # is a genuine judgment call, not a hardcoded recency default. Rule 9 covers how to
+            # decide; `resolved_element_id` in the output carries the decision back.
+            classification_context.append(
+                f"Multiple existing elements are given as CANDIDATES to choose between (no "
+                f"specific one was explicitly referenced this turn) — see rule 9:\n{elements_str}\n"
+                f"Decide which ONE (if any) the user's most recent message is actually about."
+            )
+        else:
+            classification_context.append(
+                f"The following existing generated elements ARE available to fix:\n{elements_str}\n"
+                f"Compare this against the user's most recent message: if the message is asking for "
+                f"something about a DIFFERENT subject/kind than what these existing elements actually "
+                f"are (e.g. the existing element is a logo and the new message asks for a car photo "
+                f"unrelated to any logo), that is a NEW/DIFFERENT asset request, never direct_fix on "
+                f"these elements — route to whichever full_* route matches what's actually being asked "
+                f"for instead.\n"
+                f"If instead the message is asking to edit/modify/fix/add something ON one of these "
+                f"same elements (a price tag, a discount, a color change, a text strike-out, etc.), "
+                f"you MUST ground your plan in that element: route 'direct_fix' to 'composition_artist' "
+                f"(or 'overlay_artist' only for a pure text overlay), never route 'dynamic' with a "
+                f"from-scratch generator like 'illustrator' — that would throw away this exact element "
+                f"and produce an unrelated new one instead of the edit being asked for."
+            )
     else:
         classification_context.append("An existing generated element is available to fix: no")
 
@@ -199,17 +224,42 @@ async def route(state: GraphState) -> GraphState:
     laya_task = asyncio.create_task(_safe_laya_choice())
     
     try:
+        # Real, live-found gap (2026-09-26): this single call decides EVERYTHING downstream — the
+        # route, the target specialist, and the entire `dynamic` plan's task breakdown — yet it
+        # ran on TIER_1 (`gpt-oss-20b`), the smallest configured model, no different from a
+        # one-off text classification. Task decomposition quality is exactly the kind of judgment
+        # this codebase already treats as worth a better model elsewhere (Fix 4/7's own
+        # reasoning) — bumped to TIER_2 (`gpt-oss-120b`, already what TIER_3 uses by default too,
+        # so this gives the SAME capability the actual generation specialists get, not a new tier
+        # to configure).
         result = await llm.complete(
-            tier=ModelTier.TIER_1,
+            tier=ModelTier.TIER_2,
             system=_SYSTEM_PROMPT.format(specialist_descriptions=describe_specialists()),
             messages=build_history_messages(brief, "\n\n".join(classification_context)),
             max_tokens=1536,
-            prefer_local=False,
         )
         parsed = extract_json(result.text)
         chosen_route = str(parsed.get("route") or "")
         target_specialist = str(parsed.get("target_specialist") or "").strip() or None
         dynamic_plan = parsed.get("plan") or None
+
+        # Fix 7 (2026-09-26): narrow the candidate set down to the model's real, reasoned decision
+        # — downstream nodes (`_direct_fix_node`, `_dynamic_executor_node`) read
+        # `brief["referenced_elements_context"]` directly, so this is what actually makes "try
+        # again" regenerate the right element instead of always the most recent one in the
+        # session. Only touched when disambiguation was genuinely needed (an explicit single
+        # reference from the user is left completely alone, never second-guessed).
+        if needs_disambiguation:
+            resolved_element_id = parsed.get("resolved_element_id")
+            matched = None
+            if resolved_element_id:
+                matched = next(
+                    (el for el in referenced_elements if el.get("id") == str(resolved_element_id)),
+                    None,
+                )
+            brief["referenced_elements_context"] = [matched] if matched else []
+            brief.pop("_element_disambiguation_needed", None)
+            state["brief"] = brief
 
         if chosen_route not in _VALID_ROUTES:
             raise ValueError(f"model returned an invalid route: {chosen_route!r}")
@@ -297,7 +347,14 @@ async def route(state: GraphState) -> GraphState:
         )
         emit("route_decided", route=chosen_route, target_specialist=target_specialist)
     except (ProviderUnavailable, ValueError) as exc:
-        # LLM gateways are down, or it returned something unparseable.
+        # LLM gateways are down, or it returned something unparseable — no model available to
+        # make Fix 7's real disambiguation judgment call, so this degraded path falls back to the
+        # single most recent candidate (the old safe default) rather than leaving multiple
+        # ambiguous candidates for a downstream node to sort out on its own.
+        if needs_disambiguation and referenced_elements:
+            brief["referenced_elements_context"] = [referenced_elements[-1]]
+            brief.pop("_element_disambiguation_needed", None)
+            state["brief"] = brief
         # Try asking the Laya model to predict the specialist first.
         options_list = list(SPECIALIST_REGISTRY.keys())
         try:

@@ -124,13 +124,20 @@ async def update_dna(
 
         bd = body.brandDetails
         if bd is not None and (bd.voiceAndTone or bd.visualIdentity or bd.logoRules):
+            # Real, live-found bug (2026-09-26, root-caused via a real corrupted brand row found
+            # this session: name "Bewakoof" but a business overview describing "Infinix" — a
+            # completely different brand): this used to fall back to
+            # `brand_repo.list_for_user(current_user.id)[0]` — the user's FIRST EVER brand across
+            # ALL their sessions — and MERGE new facts into that same row whenever THIS session
+            # didn't already have its own `brand_profile_id` set. Two different sessions onboarding
+            # different real brands both hit this same fallback and got merged into one
+            # contaminated row. `session.brand_profile_id` is already a single nullable field —
+            # "one brand per session" only holds in practice if a session with none yet gets a
+            # genuinely NEW row, never an arbitrary existing one borrowed from elsewhere.
             existing_brand = None
             existing_brand_id = session_model.brand_profile_id
             if existing_brand_id:
                 existing_brand = await brand_repo.get(existing_brand_id)
-            if existing_brand is None:
-                user_brands = await brand_repo.list_for_user(current_user.id)
-                existing_brand = user_brands[0] if user_brands else None
             raw_facts = {
                 k: v for k, v in {
                     "Voice and Tone": bd.voiceAndTone,
@@ -140,10 +147,10 @@ async def update_dna(
             }
             brand = await brand_svc.onboard_brand(
                 user_id=current_user.id,
-                # This simplified form has no "Brand Name" field at all — preserve the existing
-                # brand's real name rather than guessing one; only a brand-new brand (the rare
-                # path — normally onboarded with a real name via the home page's panel) falls
-                # back to a placeholder.
+                # This simplified form has no "Brand Name" field at all — preserve THIS session's
+                # own existing brand's real name if it already has one (an edit, not a fresh
+                # onboard); a session with no brand yet always gets a placeholder name, never
+                # another session's real name.
                 name=existing_brand.name if existing_brand else "Untitled Brand",
                 raw_facts=raw_facts,
                 brand_id=existing_brand.id if existing_brand else None,
@@ -218,6 +225,7 @@ async def post_turn(
         free_text=body.free_text,
         referenced_element_ids=body.referenced_element_ids,
         target_product_id=body.target_product_id,
+        start_new_product=body.start_new_product,
     )
 
 

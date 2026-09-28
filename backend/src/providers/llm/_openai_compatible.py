@@ -333,6 +333,26 @@ async def call_openai_compatible_chat(
             choice = (data.get("choices") or [{}])[0]
             msg = choice.get("message") or {}
             usage = data.get("usage") or {}
+
+            # Real, live-found gap (2026-09-28): the streaming path already guards against this
+            # exact shape (`_stream_one_attempt` above) — a genuine HTTP 200 with no content and no
+            # tool_calls — but this non-streaming path never got the same check, so it used to
+            # return a "successful" LLMResult with text="" straight through, only failing much
+            # later as an opaque "empty model response" deep in the specialist parser. Treated the
+            # same as the 429/5xx branches above: retryable within this call's own budget.
+            if not msg.get("content") and not msg.get("tool_calls"):
+                last_error = ProviderUnavailable(provider_name, f"{model} returned empty content")
+                if attempt == retries:
+                    break
+                wait = 1.0 * (attempt + 1)
+                log.warning(
+                    "llm_http_empty_response",
+                    extra={"_extra_provider": provider_name, "_extra_model": model},
+                )
+                emit("llm_retry", provider=provider_name, model=model, wait_s=wait, reason="empty_response")
+                await asyncio.sleep(wait)
+                continue
+
             log.info(
                 "llm_http_call",
                 extra={

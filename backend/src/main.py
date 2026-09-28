@@ -4,6 +4,7 @@ schema. `uvicorn src.main:app --reload` from poc/backend/.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -22,12 +23,14 @@ from .core.middleware.error_handler import register_error_handlers
 from .core.middleware.logging import configure_logging, get_logger
 from .models.base import async_session_factory, init_models
 from .providers.observability.langsmith import configure_langsmith
+from .repositories.sqlite.sqlite_app_setting_repository import SqliteAppSettingRepository
 from .repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
 from .repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
 from .repositories.sqlite.sqlite_product_repository import SqliteProductRepository
 from .services.knowledge.brand_dna_service import reindex_all_brands
 from .services.knowledge.mood_board_service import reindex_all_mood_board_assets
 from .services.knowledge.product_dna_service import reindex_all_products
+from .services.settings.settings_service import sync_from_db as sync_settings_from_db
 from .services.specialists.registry import load_all_specialists
 from .services.tools.registry import load_all_tools
 
@@ -35,10 +38,30 @@ configure_logging(settings.log_level)
 log = get_logger(__name__)
 
 
+async def _settings_poll_loop() -> None:
+    """Background loop (2026-09-28) — the user hand-edits `app_settings` rows directly in
+    Supabase's dashboard, so there's no in-app write path to react to sooner than this. Runs for
+    the life of the process; each iteration is a single cheap SELECT plus, at most, whichever
+    provider resets a changed key actually needs (settings_service.sync_from_db diffs against the
+    last-applied value, so an unchanged row is a no-op)."""
+    while True:
+        try:
+            async with async_session_factory() as db:
+                await sync_settings_from_db(SqliteAppSettingRepository(db))
+        except Exception:
+            log.exception("settings_poll_loop_iteration_failed")
+        await asyncio.sleep(settings.settings_poll_interval_seconds)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_langsmith()
     await init_models()
+    # Apply any DB-stored settings overrides BEFORE anything below gets a chance to build a
+    # provider singleton off the un-overridden `.env` value.
+    async with async_session_factory() as db:
+        await sync_settings_from_db(SqliteAppSettingRepository(db))
+    settings_poll_task = asyncio.create_task(_settings_poll_loop())
     load_all_tools()
     load_all_specialists()
     # Rehydrate LlamaIndex's in-memory Brand/Product DNA collections from the real, persisted SQL
@@ -50,6 +73,7 @@ async def lifespan(app: FastAPI):
         await reindex_all_mood_board_assets(SqliteMoodBoardRepository(db))
     log.info("app_started", extra={"_extra_project": settings.langsmith_project})
     yield
+    settings_poll_task.cancel()
     log.info("app_shutdown")
 
 

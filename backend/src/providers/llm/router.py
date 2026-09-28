@@ -1,20 +1,18 @@
 """
-LLMRouter — combines LocalLLMProvider (TIER_1 primary with prefer_local) and
-ReplicateLLMProvider (final fallback) behind the single LLMProvider protocol.
+LLMRouter — combines GroqProvider (primary) and ReplicateLLMProvider (final fallback) behind the
+single LLMProvider protocol.
 
-For TIER_1 + prefer_local=True: tries the self-hosted local Ollama model first ($0,
-no remote rate limit). On failure, falls through to Groq → ReplicateLLM.
+Every tier: tries Groq first (one attempt per key, never retries — fail fast and move on). On
+failure, falls back to ReplicateLLM, which retries with exponential backoff.
 
-For all other tiers (and TIER_1 with prefer_local=False): tries Groq first (one
-attempt per key, never retries — fail fast and move on). On failure, falls back to
-ReplicateLLM which retries with exponential backoff.
-
-The local model is NO LONGER the final fallback — it was producing low-quality
-output and failing on multimodal requests. ReplicateLLM (google/gemini-2.5-flash)
-is the correct fallback.
+Local Ollama was removed entirely (2026-09-28, explicit user decision) — it was already unused in
+practice (every one of this app's 9 TIER_1 specialists had opted out via `prefer_local=False`
+following a real, measured 106.5s/524-timeout incident; none of the others were ever individually
+quality-verified on it either), so there was no reason to keep the dead code path around.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -23,17 +21,32 @@ from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 from .groq import GroqProvider
-from .local_llm import LocalLLMProvider
 from .replicate_llm import ReplicateLLMProvider
 
 log = get_logger(__name__)
 
+# Real, live-found noise/waste (2026-09-26, explicit user report — a screenshot showing the SAME
+# "groq unavailable — switching to replicate_llm" line repeated 4 times in a row for one
+# specialist's run): Groq's own per-call retry already tries every configured key once and gives
+# up fast (`groq.py`'s `retries=0`) — correct for a single call. But `LLMRouter` had no memory
+# ACROSS calls, so every iteration of the same specialist's multi-tool-call agentic loop
+# re-attempted Groq from scratch, hit the exact same rate limit again, and re-logged/re-emitted
+# the identical fallback message — wasted requests and repeated noise, not a retry that could ever
+# plausibly succeed sooner than the rate limit actually resets. A rate-limit window is normally on
+# the order of a minute, not milliseconds, so "try again next call" was never a real recovery
+# chance anyway.
+_GROQ_COOLDOWN_SECONDS = 60.0
+
 
 class LLMRouter(LLMProvider):
     def __init__(self):
-        self._local = LocalLLMProvider()
         self._primary = GroqProvider()
         self._fallback = ReplicateLLMProvider()
+        # Monotonic timestamp until which Groq is skipped entirely (0 = never tripped / already
+        # expired). Instance-level, not per-call — `get_llm_provider()` is a singleton, so this
+        # state is naturally shared across every specialist/tool-calling iteration in the process,
+        # which is exactly the scope a rate limit actually applies at.
+        self._groq_cooldown_until: float = 0.0
 
     async def complete(
         self,
@@ -43,33 +56,26 @@ class LLMRouter(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-        prefer_local: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
-        if tier == ModelTier.TIER_1 and prefer_local:
-            try:
-                return await self._local.complete(
-                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
-                    on_delta=on_delta,
-                )
-            except ProviderUnavailable as exc:
-                log.warning(
-                    "llm_router_falling_back_to_groq_from_local",
-                    extra={"_extra_tier": tier.name, "_extra_local_error": exc.message},
-                )
-                # Real, live-found bug (2026-09-24, per an explicit user report: "the node model
-                # has latency... 30 seconds lag sometimes"): switching providers here is itself a
-                # real, silent gap in the SAME class `_openai_compatible.py`'s own retry loop had —
-                # the frontend never knew a provider was being abandoned entirely, only that
-                # nothing was happening. `emit()` is a safe no-op with no turn active.
-                emit("llm_provider_fallback", tier=tier.name, from_provider="local", to_provider="groq")
-
-        try:
-            return await self._primary.complete(
+        now = time.monotonic()
+        if now < self._groq_cooldown_until:
+            # Already tripped recently — go straight to the fallback, no repeat attempt, no
+            # repeat log/event (that already happened once, when the cooldown started below).
+            return await self._fallback.complete(
                 tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
                 on_delta=on_delta,
             )
+
+        try:
+            result = await self._primary.complete(
+                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                on_delta=on_delta,
+            )
+            self._groq_cooldown_until = 0.0  # a real success clears any earlier trip
+            return result
         except ProviderUnavailable as exc:
+            self._groq_cooldown_until = now + _GROQ_COOLDOWN_SECONDS
             log.warning(
                 "llm_router_falling_back_to_replicate",
                 extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
@@ -90,3 +96,12 @@ def get_llm_provider() -> LLMProvider:
     if _singleton is None:
         _singleton = LLMRouter()
     return _singleton
+
+
+def reset_llm_provider() -> None:
+    """Drops the cached router (and, with it, its Groq/Replicate-LLM sub-providers, both
+    constructed inside LLMRouter.__init__) so the next get_llm_provider() call rebuilds them off
+    the current `settings` values — used by services/settings/settings_service.py after a
+    DB-driven override changes any of the keys those providers baked in at construction."""
+    global _singleton
+    _singleton = None

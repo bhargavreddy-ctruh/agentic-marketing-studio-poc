@@ -21,6 +21,7 @@ from ....schemas.canvas.requests import (
     CommentRequest,
     CreateElementRequest,
     DirectEditRequest,
+    GroupElementRequest,
     TargetedRegenerateRequest,
 )
 from ....schemas.canvas.responses import (
@@ -121,7 +122,18 @@ async def create_element(
                 if product.id not in linked_ids:
                     linked_ids.append(product.id)
                 session.brief = {**session.brief, "product_profile_ids": linked_ids}
-                session.product_profile_id = product.id
+                # Real, live-found bug (2026-09-26, explicit user report: "when user adds an
+                # asset its directly getting grouped, even if they are unrelated"): this used to
+                # also unconditionally do `session.product_profile_id = product.id` — silently
+                # repointing the session's "current product" (which Fix 1/5's grouping-fallback
+                # logic then applies to every LATER, unrelated generation too) off nothing more
+                # than a vision model's own unconfirmed guess about an uploaded photo. Linking the
+                # product into `product_profile_ids` above is safe (additive, makes it available
+                # to explicitly pick later via `target_product_id`) — repointing the session's
+                # current product is not, and is removed. Grouping this specific upload, or
+                # changing the session's current product, is now something the user does
+                # explicitly (`PUT /elements/{id}/group`, `target_product_id` on a turn) rather
+                # than an automatic side effect of any photo upload.
                 await sessions.update(session)
                 await GuardrailService(sessions).get_or_derive_for_session(session_id)
         except Exception as exc:  # provider outage, parse failure — never blocks the real upload
@@ -132,6 +144,34 @@ async def create_element(
             )
 
     return CanvasMapper.to_response(created)
+
+
+@router.put("/elements/{element_id}/group", response_model=CanvasElementResponse)
+async def group_element(
+    element_id: str,
+    body: GroupElementRequest,
+    canvas: CanvasRepositoryDep,
+    products: ProductRepositoryDep,
+) -> CanvasElementResponse:
+    """The manual grouping/correction path Fix 6 adds (2026-09-26) — until now, an element's
+    `product_id` was write-once (set only at generation/upload time, sometimes wrong, never
+    correctable). `body.product_id: null` explicitly ungroups; a real id groups/regroups — the
+    real name is looked up server-side, never trusted from the client, same as every other
+    product-id-accepting route in this app."""
+    element = await canvas.get_element(element_id)
+    if element is None:
+        raise NotFoundError("CanvasElement", element_id)
+    if body.product_id is None:
+        element.product_id = None
+        element.product_name = None
+    else:
+        product = await products.get(body.product_id)
+        if product is None:
+            raise NotFoundError("Product", body.product_id)
+        element.product_id = product.id
+        element.product_name = product.name
+    updated = await canvas.update_element(element)
+    return CanvasMapper.to_response(updated)
 
 
 @router.get("/assets/{storage_ref}")

@@ -1,12 +1,14 @@
 """
 Base Image Generator tool — Architecture.md section 1b. Wraps whichever ImageGenProvider is
-currently active (Pollinations today; Gemini/Vertex/Bedrock once quota returns — Rules.md
-section 6). The specialist calling this never knows which provider actually ran.
+currently active (`alibaba/qwen-image-3` via Replicate today — see `replicate_provider.py`;
+Gemini/Vertex/Bedrock/Pollinations provider files exist but are unwired). The specialist calling
+this never knows which provider actually ran.
 """
 from __future__ import annotations
 
 from typing import ClassVar
 
+from ...core.element_descriptions import is_real_description
 from ...core.exceptions import ProviderUnavailable
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.replicate_provider import get_image_gen_provider
@@ -122,12 +124,22 @@ class BaseImageGeneratorTool(Tool):
         # 3. Seed fallback from context style_seed if not explicitly given
         seed = int(args["seed"]) if args.get("seed") is not None else ctx.get("style_seed")
         
-        # 4. Inject visual description into prompt for text-to-image fallback (e.g. Pollinations)
+        # 4. Inject visual description into prompt so the image-to-image reference is grounded in
+        # words too, not just pixels.
+        # Real, live-found bug (2026-09-26): `el.get("description")` used to be treated as real
+        # descriptive text whenever it was merely non-empty — but `session_service.py` fills a
+        # placeholder sentinel (`NO_DESCRIPTION_SENTINEL`) when no real description was ever
+        # captured, and that placeholder was getting appended VERBATIM into the actual prompt sent
+        # to the image model: "...Visually ground the generation in this reference: (no
+        # description recorded)." An image model has no way to know that's a placeholder — it
+        # renders it as literal instruction. `is_real_description` rejects the sentinel (and any
+        # other empty/falsy value), so a missing description now correctly means "skip this append
+        # entirely," not "append meaningless text."
         if reference_storage_ref:
             elements = ctx.get("referenced_elements_context") or []
             for el in elements:
-                if el.get("storage_ref") == reference_storage_ref and el.get("description"):
-                    desc = el.get("description")
+                desc = el.get("description")
+                if el.get("storage_ref") == reference_storage_ref and is_real_description(desc):
                     if desc.lower() not in prompt.lower():
                         prompt = f"{prompt}. Visually ground the generation in this reference: {desc}"
                     break

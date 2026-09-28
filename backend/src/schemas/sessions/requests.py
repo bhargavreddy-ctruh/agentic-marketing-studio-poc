@@ -49,6 +49,15 @@ class PostTurnRequest(BaseModel):
     # or whatever product this turn's own chat message gets auto-detected as being about; with
     # neither, it lands in the unassigned bucket.
     target_product_id: str | None = None
+    # Real gap closed (2026-09-28, Phase 1 of the combined grouping plan): `target_product_id:
+    # null`/omitted was already overloaded to mean BOTH "no explicit choice, please infer" AND (the
+    # thing the frontend now needs) "explicitly do NOT inherit the referenced parent's product" —
+    # `None` can't distinguish those. This is that distinct signal: when true, the parent-element
+    # inheritance branch in `session_service.py`'s resolution is skipped entirely, even though a
+    # parent was referenced — the new element starts fresh (chat-detection/unassigned), the same
+    # as if nothing were referenced at all. Defaults false — today's inherit-by-default behavior is
+    # unchanged unless the user explicitly asks otherwise.
+    start_new_product: bool = False
 
 class CampaignDetails(BaseModel):
     campaignIdea: str | None = None

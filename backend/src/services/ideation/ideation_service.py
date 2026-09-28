@@ -255,11 +255,6 @@ async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None
             system=_FOLLOWUP_CLARITY_PROMPT,
             messages=build_history_messages(brief, context),
             max_tokens=768,
-            # Same reasoning as the main ideation call just above: a wrong "clear enough" judgment
-            # either annoys the user with a pointless question or lets a genuinely ambiguous
-            # request through to a real (sometimes paid) generation step — not worth the local
-            # model's measurably weaker judgment on this exact kind of call.
-            prefer_local=False,
         )
         parsed = extract_json(result.text)
     except Exception as exc:
@@ -388,14 +383,6 @@ async def run_ideation(state: GraphState) -> GraphState:
             # real tokens on internal reasoning before or interleaved with the visible JSON
             # content, and got cut off mid-response at the lower budget.
             max_tokens=1536,
-            # Real, live-found reason (2026-09-21): the self-hosted TIER_1 model's judgment on
-            # "is this brief ready" is measurably worse than Groq's — a side-by-side test on the
-            # exact same input ("A red Ferrari") had the local model return `ready: false` and
-            # silently drop "red Ferrari" from its own brief synthesis. Ideation gates the whole
-            # conversation and any detail it drops never comes back, so it skips local-first
-            # routing entirely rather than risk that — unlike the tool-calling Tier 1 specialists,
-            # which tested fine locally and keep the default.
-            prefer_local=False,
             # Real live "thinking" text, per the user's explicit ask (2026-09-21).
             on_delta=lambda delta: emit("llm_delta", node="ideation", text=delta),
         )

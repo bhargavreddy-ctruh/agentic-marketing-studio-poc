@@ -50,7 +50,6 @@ class GroqProvider(LLMProvider):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-        prefer_local: bool = True,  # unused — only LLMRouter acts on this, see base.py's docstring
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if not self._api_key:

@@ -18,18 +18,14 @@ RUN pip install --no-cache-dir -e .
 
 RUN mkdir -p var/assets
 
-# Pre-fetch the models that are otherwise downloaded lazily on first use, so a fresh deploy's
-# first real request isn't slowed down by a cold download. HF_HUB_DISABLE_XET=1 is the same fix
-# used at runtime in docker-compose.yml (the newer XET transfer backend hangs in a container
-# network) — needed here too, or this build step itself hangs the same way.
+# Model pre-fetch TEMPORARILY DISABLED (2026-09-26, real live incident): this build step itself
+# started hanging at 0% CPU for 35+ minutes — the exact same network-stalled-download symptom
+# `HF_HUB_DISABLE_XET=1` was meant to fix, but apparently not covering all three downloads here
+# (faster-whisper's CTranslate2 conversion and/or laya's own downloader may not respect this env
+# var the way huggingface_hub's own client does). Reverted to the original lazy-load-on-first-use
+# behavior (known working) to unblock a real deploy rather than debug this further mid-incident —
+# re-enabling this optimization is real, disclosed follow-up work, not abandoned, just deferred.
 ENV HF_HUB_DISABLE_XET=1
-RUN python -c "\
-from sentence_transformers import SentenceTransformer; \
-SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2'); \
-from faster_whisper import WhisperModel; \
-WhisperModel('small', device='cpu', compute_type='int8'); \
-import laya; \
-laya.load('convaiinnovations/laya')"
 
 EXPOSE 8000
 

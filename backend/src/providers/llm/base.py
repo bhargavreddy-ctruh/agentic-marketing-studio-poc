@@ -41,19 +41,9 @@ class LLMProvider(Protocol):
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         max_tokens: int = 2048,
-        prefer_local: bool = True,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
-        """`prefer_local` only means anything to `LLMRouter` (router.py) — whether a TIER_1 call
-        should try the self-hosted model first. Real, live-found reason it exists (2026-09-21):
-        the self-hosted TIER_1 model handles simple tool-calling specialists fine, but produces
-        materially worse judgment on Ideation's own "is this brief ready, and what's the real
-        synthesis of it" decision — a side-by-side test on the exact same input ("A red Ferrari")
-        showed the local model return `ready: false` and silently drop "red Ferrari" from its own
-        brief synthesis entirely, while Groq correctly returned `ready: true` with the detail
-        intact. Every other provider ignores this parameter; only the router acts on it.
-
-        `on_delta`, when given, is called with each real streamed text fragment as it arrives from
+        """`on_delta`, when given, is called with each real streamed text fragment as it arrives from
         the provider (2026-09-21, per the user's explicit ask to show real LLM "thinking" live,
         not just a final result) — the caller (`runner.py`, `ideation_service.py`, etc.) already
         knows which node/specialist is running and is responsible for attributing the fragment

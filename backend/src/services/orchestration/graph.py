@@ -31,6 +31,7 @@ from langgraph.graph import END, StateGraph
 
 from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
+from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import emit
 from ...core.exceptions import SpecialistFailed, SpecialistNotFound
 from ...core.json_extract import extract_json
@@ -50,7 +51,7 @@ from ..leads.motion_lead import run_motion_lead
 from ..leads.narrative_lead import run_narrative_lead
 from ..leads.scene_lead import run_scene_lead
 from ..leads.visual_design_lead import run_visual_design_lead
-from ..specialists.runner import run_specialist_with_review
+from ..specialists.runner import run_concurrent_specialists, run_specialist_with_review
 from .orchestrator import route, route_condition
 from .state import GraphState
 
@@ -87,6 +88,19 @@ _ELEMENT_TYPE_BY_TOOL = {
 # card sitting next to the image, never overwrite the image's own storage_ref with text (which
 # would corrupt/destroy it). Checked before deciding `update_existing_element_id` below.
 _ANNOTATION_ONLY_TOOLS = {"text_card_writer"}
+
+# Parallel dynamic-plan dispatch safety guard (2026-09-26, parallel-dispatch investigation): the
+# orchestrator's own `parallel_group` claim on a dynamic plan step is verified here before ever
+# being trusted, not blindly acted on — same "deterministic beats a maybe" principle already used
+# elsewhere in this codebase. Specialists that EDIT an existing asset (via image_editor/
+# text_overlay) are never allowed into a concurrent group — an editing tool operates on a specific
+# existing asset, and grouping it risks a race against a sibling step's own not-yet-produced
+# output. Only genuinely independent FRESH-generation steps are safe to run concurrently —
+# matches the same real, audited pattern `motion_lead.py`'s `run_concurrent_specialists` usage
+# already proved out (independent GENERATION branches, never independent EDITS of the same thing).
+_ASSET_MUTATING_SPECIALISTS = frozenset(
+    {"composition_artist", "prop_stylist", "lighting_designer", "overlay_artist"}
+)
 
 
 def _produced_ref(step) -> tuple[str | None, str | None]:
@@ -187,10 +201,6 @@ async def _plan_multi_generation(
             system=_MULTI_GENERATION_PLAN_PROMPT.format(medium=medium, max_count=max_count),
             messages=[{"role": "user", "content": context}],
             max_tokens=1024,
-            # Same reasoning as orchestrator.py's own classification call — a wrong split wastes a
-            # whole generation attempt (or, for video, several real paid ones), not worth the local
-            # model's measurably weaker judgment on this exact kind of call.
-            prefer_local=False,
         )
         parsed = extract_json(result.text)
     except Exception as exc:
@@ -1011,6 +1021,20 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
         state["result"] = {"message": "Could not determine which specialist should handle this fix."}
         return state
 
+    # Fix 8 (2026-09-26) was considered here too (this route — "just fix/edit this specific
+    # element" — reasons from plain description strings, no image ever attached, the literal
+    # "JSON alone" anti-pattern), but deliberately NOT applied yet: `target` can be any specialist
+    # (composition_artist, overlay_artist, ...), each running on a Tier 1/2/3 model
+    # (`core/config.py`'s own comment confirms these gpt-oss models are text-only — a dedicated
+    # SEPARATE `groq_vision_model` exists specifically because they can't see images). Attaching
+    # real image content here would either error and silently escalate every such turn to the
+    # paid Replicate fallback (a real cost/latency regression, not a free win) or do nothing useful
+    # — genuinely giving this real vision grounding needs routing through `vision.py`'s
+    # `complete_with_vision` (or confirming these tiers actually support it), a separate,
+    # deliberate integration decision, not something to attach speculatively. Left as the
+    # pre-existing plain-text context for now.
+    import json
+
     context_parts = [f"User request:\n{state.get('user_message', '')}"]
     if brief.get("idea"):
         context_parts.append(f"Campaign idea so far:\n{brief['idea']}")
@@ -1020,7 +1044,7 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
         for i, el in enumerate(referenced_elements, 1):
             ref = el.get("storage_ref")
             kind = el.get("element_type", "unknown")
-            desc = el.get("description") or "(no original prompt was recorded for this element)"
+            desc = el.get("description") or NO_DESCRIPTION_SENTINEL
             context_parts.append(
                 f"Element {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
             )
@@ -1029,7 +1053,6 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             "request asks to change — do not generate an unrelated new one."
         )
 
-    import json
     direct_fix_context = "\n\n".join(context_parts)
     direct_fix_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
     emit("lead_started", lead="direct_fix", target_specialist=target)
@@ -1156,34 +1179,41 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     import json
     
     current_context = [{"type": "text", "text": f"Campaign idea so far:\n{brief.get('idea') or user_message}"}]
-    
+
+    # Real, live-found ordering fix (2026-09-26, decomposition-quality investigation): the full
+    # brief JSON dump used to come AFTER the referenced-element context and BEFORE the
+    # aspect-ratio hint — burying the actual actionable instructions behind the biggest, noisiest
+    # block right before the model has to act. Moved here instead, right after the campaign idea
+    # and well before anything that needs to stay salient — the referenced-element context and the
+    # aspect-ratio hint below are now the LAST things the model reads, not buried before a JSON
+    # wall.
+    current_context[0]["text"] += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
-        text_part = "\n\nThe following existing generated elements are available to reference or fix:"
-        import base64
-
-        from ...core.local_storage import load_asset
+        # Fix 8 (2026-09-26): real image + real JSON together, never JSON alone — shared with
+        # `_direct_fix_node` and `orchestrator.py`'s classifier so all three places that reason
+        # about "what is this element" see the same real image+metadata pairing.
+        from ...core.element_context import build_element_context_blocks
+        current_context.append({
+            "type": "text",
+            "text": "The following existing generated elements are available to reference or fix:",
+        })
         for i, el in enumerate(referenced_elements, 1):
-            ref = el.get("storage_ref")
-            kind = el.get("element_type", "unknown")
-            desc = el.get("description") or "(no original prompt was recorded for this element)"
-            text_part += f"\nElement {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}\n(Note: If generating a new visual base from this, pass this storage_ref as 'reference_storage_ref' to base_image_generator)"
-            if kind == "image" and ref:
-                loaded = load_asset(ref)
-                if loaded:
-                    img_bytes, mime = loaded
-                    b64_img = base64.b64encode(img_bytes).decode("utf-8")
-                    current_context.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64_img}"}})
-        current_context[0]["text"] += text_part
-            
-    # Include the full brief so the specialist has access to `_recent_chat_history`, guardrails metadata, etc.
-    current_context[0]["text"] += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+            blocks = build_element_context_blocks(el)
+            blocks[0]["text"] = f"Element {i}: {blocks[0]['text']}\n(Note: If generating a new visual base from this, pass this storage_ref as 'reference_storage_ref' to base_image_generator)"
+            current_context.append(blocks[0])
+            current_context.extend(blocks[1:])
 
     # Deterministic aspect-ratio backstop (2026-09-25) — same shared helper `visual_design_lead.py`
     # uses for the `full_image` route; this is the OTHER call site (Task plan item 4), since a
-    # dynamic-routed edit/follow-up request never goes through visual_design_lead.py at all.
+    # dynamic-routed edit/follow-up request never goes through visual_design_lead.py at all. Its
+    # own trailing block now (not appended into block 0) so it stays the LAST/most recent thing
+    # before the model acts, regardless of how many referenced-element blocks came before it.
     from ..leads.base import aspect_ratio_hint_block
-    current_context[0]["text"] += aspect_ratio_hint_block(user_message or brief.get("idea") or "")
+    hint = aspect_ratio_hint_block(user_message or brief.get("idea") or "")
+    if hint:
+        current_context.append({"type": "text", "text": hint})
 
     latest_storage_ref = None
     latest_tool = None
@@ -1191,89 +1221,160 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     all_metadata = {}
     extra_elements = []
 
+    # Only enforce asset generation for specialists that actually produce assets,
+    # not for planning/strategy specialists (like reference_curator or palette_strategist)
+    generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
+
+    async def _run_one_step(i: int, step_info: dict, latest_ref_snapshot: str | None):
+        """Builds one step's context and runs it — a pure function of the plan/brief/context plus
+        an explicit `latest_ref_snapshot` (never the outer loop's own mutable `latest_storage_ref`
+        directly), so this is safe to call either sequentially (with the up-to-date value) or
+        concurrently as part of a verified-safe parallel group (all members get the SAME
+        pre-group snapshot — none of them can see a sibling's not-yet-produced output, by
+        design)."""
+        import copy
+        specialist = step_info.get("specialist")
+        instruction = step_info.get("instruction", "")
+
+        step_context = copy.deepcopy(current_context)
+        # Real, live-found gap (2026-09-26, decomposition-quality investigation): coordination
+        # across a multi-step dynamic plan was purely sequential pass-forward — nothing
+        # re-stated the ORIGINAL collective goal at each step, so a later step could drift from
+        # it after several steps' worth of accumulated context. Cheaper than a new
+        # cross-step verification LLM call (which this session's own cost-efficiency principle
+        # argues against): just repeat a short, fixed anchor at every step instead.
+        goal_anchor = f"Overall collective goal (do not drift from this): {brief.get('idea') or user_message}"
+        instruction_text = f"\n\n{goal_anchor}\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
+        if latest_ref_snapshot:
+            instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_ref_snapshot}. Use this asset as your source image/video if applicable."
+        elif not referenced_elements:
+            # Real, live-found bug (2026-09-25, live-reproduced: a fresh request with nothing
+            # to reference yet — e.g. "make a mclaren campaign post" — reached `palette_strategist`
+            # right after `reference_curator` produced no real asset). Nothing in this step's
+            # context ever told the specialist a real image genuinely doesn't exist yet, so a
+            # model asked to use `color_palette_extractor` (which requires a real `storage_ref`)
+            # guessed/hallucinated one, got a real "asset not found" tool failure, then — with
+            # no clear instruction for how to recover — answered in plain English instead of
+            # its required JSON shape, failing the whole plan. This is a deterministic, structural
+            # fact about the plan's current state (not something worth another LLM guess), stated
+            # explicitly so any tool needing a real image is correctly skipped instead of guessed.
+            instruction_text += (
+                "\n\nNO REAL IMAGE OR ASSET EXISTS YET for this request — no reference was "
+                "given and no earlier step in this plan has produced one. Do NOT call any tool "
+                "that requires an existing storage_ref (e.g. color_palette_extractor, "
+                "image_editor) — you have no real storage_ref to give it, and guessing one will "
+                "fail. Work from the written campaign/brand/product context only, or if your "
+                "role genuinely cannot proceed without a real image, respond with your required "
+                "JSON shape and an \"error\" field explaining why — never plain prose."
+            )
+
+        # Find the text dict and append the instruction to it
+        for part in step_context:
+            if part.get("type") == "text":
+                part["text"] += instruction_text
+                break
+
+        # Run the specialist with self-correction retry, passing brief so the real
+        # _recent_chat_history is injected as proper conversation messages (enabling
+        # user "go ahead" / override confirmations to actually reach the LLM).
+        return await run_specialist_with_review(
+            specialist,
+            context=step_context,
+            needs_retry=lambda r, specialist=specialist: (
+                specialist in generating_specialists and _produced_ref(r)[0] is None
+            ),
+            reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
+            brief=brief,
+        )
+
+    def _group_plan_steps(plan_steps: list[dict]) -> list[list[int]]:
+        """Groups plan step indices by the orchestrator's own `parallel_group` claim (missing/None
+        => its own singleton group) — preserves overall plan order; a group's position is where
+        its FIRST member appears."""
+        groups: list[list[int]] = []
+        group_pos: dict[object, int] = {}
+        for idx, s in enumerate(plan_steps):
+            gid = s.get("parallel_group")
+            if gid is None:
+                groups.append([idx])
+                continue
+            if gid in group_pos:
+                groups[group_pos[gid]].append(idx)
+            else:
+                group_pos[gid] = len(groups)
+                groups.append([idx])
+        return groups
+
     emit("lead_started", lead="dynamic_executor")
     try:
-        import copy
-        for i, step_info in enumerate(plan):
-            specialist = step_info.get("specialist")
-            instruction = step_info.get("instruction", "")
-            
-            if not specialist:
+        for group_indices in _group_plan_steps(plan):
+            group_indices = [gi for gi in group_indices if plan[gi].get("specialist")]
+            if not group_indices:
                 continue
 
-            step_context = copy.deepcopy(current_context)
-            instruction_text = f"\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
-            if latest_storage_ref:
-                instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_storage_ref}. Use this asset as your source image/video if applicable."
-            elif not referenced_elements:
-                # Real, live-found bug (2026-09-25, live-reproduced: a fresh request with nothing
-                # to reference yet — e.g. "make a mclaren campaign post" — reached `palette_strategist`
-                # right after `reference_curator` produced no real asset). Nothing in this step's
-                # context ever told the specialist a real image genuinely doesn't exist yet, so a
-                # model asked to use `color_palette_extractor` (which requires a real `storage_ref`)
-                # guessed/hallucinated one, got a real "asset not found" tool failure, then — with
-                # no clear instruction for how to recover — answered in plain English instead of
-                # its required JSON shape, failing the whole plan. This is a deterministic, structural
-                # fact about the plan's current state (not something worth another LLM guess), stated
-                # explicitly so any tool needing a real image is correctly skipped instead of guessed.
-                instruction_text += (
-                    "\n\nNO REAL IMAGE OR ASSET EXISTS YET for this request — no reference was "
-                    "given and no earlier step in this plan has produced one. Do NOT call any tool "
-                    "that requires an existing storage_ref (e.g. color_palette_extractor, "
-                    "image_editor) — you have no real storage_ref to give it, and guessing one will "
-                    "fail. Work from the written campaign/brand/product context only, or if your "
-                    "role genuinely cannot proceed without a real image, respond with your required "
-                    "JSON shape and an \"error\" field explaining why — never plain prose."
-                )
-
-            # Find the text dict and append the instruction to it
-            for part in step_context:
-                if part.get("type") == "text":
-                    part["text"] += instruction_text
-                    break
-
-            # Only enforce asset generation for specialists that actually produce assets,
-            # not for planning/strategy specialists (like reference_curator or palette_strategist)
-            generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
-            
-            # Run the specialist with self-correction retry, passing brief so the real
-            # _recent_chat_history is injected as proper conversation messages (enabling
-            # user "go ahead" / override confirmations to actually reach the LLM).
-            step_result = await run_specialist_with_review(
-                specialist,
-                context=step_context,
-                needs_retry=lambda r, specialist=specialist, generating_specialists=generating_specialists: (
-                    specialist in generating_specialists and _produced_ref(r)[0] is None
-                ),
-                reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
-                brief=brief,
+            # Code-level verification of the orchestrator's own `parallel_group` claim — never
+            # blindly trusted. Only a group with 2+ real members, none of which mutate an existing
+            # asset (`_ASSET_MUTATING_SPECIALISTS`), is dispatched concurrently; anything else runs
+            # sequentially exactly as before (always correct, just not necessarily fastest).
+            is_verified_parallel = len(group_indices) > 1 and not any(
+                plan[gi].get("specialist") in _ASSET_MUTATING_SPECIALISTS for gi in group_indices
             )
-            
-            produced_ref, produced_tool = _produced_ref(step_result)
-            
-            for c in step_result.tool_calls:
-                ref = c.data.get("storage_ref")
-                if c.ok and ref and ref != produced_ref:
-                    extra_elements.append({
-                        "storage_ref": ref,
-                        "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
-                        "produced_by_specialist": specialist,
-                        "metadata": {"dynamic_plan_step": True, "tool_used": c.tool_name},
-                    })
 
-            if produced_ref:
-                if latest_storage_ref and latest_storage_ref != produced_ref:
-                    extra_elements.append({
-                        "storage_ref": latest_storage_ref,
-                        "element_type": _ELEMENT_TYPE_BY_TOOL.get(latest_tool, brief.get("latest_element_type", "image")),
-                        "produced_by_specialist": last_completed_specialist,
-                        "metadata": {"dynamic_plan_step": True, "tool_used": latest_tool},
-                    })
-                latest_storage_ref = produced_ref
-                latest_tool = produced_tool
-                last_completed_specialist = specialist
+            if is_verified_parallel:
+                emit("dynamic_plan_group_parallel", step_count=len(group_indices))
+                # All group members get the SAME pre-group snapshot — none can see a sibling's
+                # not-yet-produced output, by design (that's exactly what makes this safe).
+                branches = {
+                    f"step_{gi}_{plan[gi].get('specialist')}": _run_one_step(gi, plan[gi], latest_storage_ref)
+                    for gi in group_indices
+                }
+                results_by_key = await run_concurrent_specialists(branches)
+                step_results = [results_by_key[f"step_{gi}_{plan[gi].get('specialist')}"] for gi in group_indices]
+            else:
+                # Sequential: each call's snapshot is the immediately preceding step's own output
+                # within this same group — a purely local variable, not yet folded into the outer
+                # `latest_storage_ref`/`extra_elements` bookkeeping (that happens uniformly below,
+                # for both paths, so the fold logic is never duplicated/inconsistent between them).
+                step_results = []
+                running_ref = latest_storage_ref
+                for gi in group_indices:
+                    result = await _run_one_step(gi, plan[gi], running_ref)
+                    step_results.append(result)
+                    produced_ref, _ = _produced_ref(result)
+                    if produced_ref:
+                        running_ref = produced_ref
 
-            all_metadata[f"step_{i}_{specialist}"] = step_result.data
+            # Fold every step's result in the group back into shared state, in stable plan order —
+            # ONE unified fold, identical regardless of whether the group ran concurrently or
+            # sequentially (this is exactly the original single-step logic, just applied per
+            # group member instead of per individual step).
+            for gi, step_result in zip(group_indices, step_results):
+                specialist = plan[gi].get("specialist")
+                produced_ref, produced_tool = _produced_ref(step_result)
+
+                for c in step_result.tool_calls:
+                    ref = c.data.get("storage_ref")
+                    if c.ok and ref and ref != produced_ref:
+                        extra_elements.append({
+                            "storage_ref": ref,
+                            "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
+                            "produced_by_specialist": specialist,
+                            "metadata": {"dynamic_plan_step": True, "tool_used": c.tool_name},
+                        })
+
+                if produced_ref:
+                    if latest_storage_ref and latest_storage_ref != produced_ref:
+                        extra_elements.append({
+                            "storage_ref": latest_storage_ref,
+                            "element_type": _ELEMENT_TYPE_BY_TOOL.get(latest_tool, brief.get("latest_element_type", "image")),
+                            "produced_by_specialist": last_completed_specialist,
+                            "metadata": {"dynamic_plan_step": True, "tool_used": latest_tool},
+                        })
+                    latest_storage_ref = produced_ref
+                    latest_tool = produced_tool
+                    last_completed_specialist = specialist
+
+                all_metadata[f"step_{gi}_{specialist}"] = step_result.data
 
     except SpecialistFailed as exc:
         # Real, live-found bug (2026-09-24, per an explicit user report: "most of the generations
