@@ -427,6 +427,33 @@ async def run_specialist_agentic(
                 continue  # let the model see the real tool results before deciding what's next
 
             # No tool calls this turn -> the model considers itself done; parse its final decision.
+            # Real, live-found bug (2026-09-30): a specialist with an EMPTY `required_output_fields`
+            # (registry.py's own convention for "no schema to enforce" — e.g. `brand_asset_applier`,
+            # whose prompt file has no `<output_format>` block at all and only ever reports success
+            # via its tool calls) still got forced through `extract_json()` unconditionally here —
+            # its own prompt never asked the model for JSON, so a genuinely correct plain-text
+            # answer ("I've applied the logo to the tile...") failed to parse and raised
+            # SpecialistFailed for no real reason. Skip the JSON requirement entirely for that case
+            # and accept the raw text directly — `notes` matches the field name several other
+            # specialists already use for a short free-text summary (Rules.md section 1: DRY).
+            if not spec.required_output_fields:
+                log.info(
+                    "specialist_step_ok",
+                    extra={
+                        "_extra_specialist": specialist_name,
+                        "_extra_tier": spec.tier.name,
+                        "_extra_model": result.model,
+                        "_extra_iterations": iteration + 1,
+                        "_extra_tool_calls": len(tool_calls),
+                        "_extra_no_json_schema": True,
+                    },
+                )
+                emit("specialist_completed", specialist=specialist_name, tool_call_count=len(tool_calls))
+                return AgenticStepResult(
+                    specialist_name=specialist_name, model=result.model,
+                    data={"notes": (result.text or "").strip()}, tool_calls=tool_calls,
+                )
+
             try:
                 parsed = extract_json(result.text)
             except ValueError as exc:
