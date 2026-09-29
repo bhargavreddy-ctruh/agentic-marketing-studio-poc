@@ -16,6 +16,11 @@ COPY pyproject.toml .
 COPY src/ ./src/
 RUN pip install --no-cache-dir -e .
 
+# Product/Brand crawler (2026-09-28) — Playwright needs its own browser binary + OS deps, not
+# just the pip package. A real, disclosed image-size/build-time cost (~300-400MB for Chromium +
+# its deps) with no way around it for a Playwright-based scraper.
+RUN playwright install --with-deps chromium
+
 RUN mkdir -p var/assets
 
 # Model pre-fetch TEMPORARILY DISABLED (2026-09-26, real live incident): this build step itself

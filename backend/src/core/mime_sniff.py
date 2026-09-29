@@ -17,5 +17,12 @@ def sniff_image_mime(data: bytes, declared: str | None = None) -> str:
         return "image/webp"
     if len(data) >= 6 and data[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
+    # Real, live-found bug (2026-09-28, via the Product/Brand crawler): SVG has no fixed magic
+    # bytes, so this used to silently fall through to the "image/jpeg" default below for ANY SVG
+    # — mislabeling real SVG bytes as JPEG rather than reporting what they actually are. A cheap,
+    # tolerant text sniff (SVGs may start with whitespace, a BOM, or an XML prolog before `<svg`).
+    head = data[:256].lstrip(b"\xef\xbb\xbf \t\r\n")
+    if head.startswith((b"<?xml", b"<svg")):
+        return "image/svg+xml"
     mime = declared or "image/jpeg"
     return "image/jpeg" if mime == "image/jpg" else mime

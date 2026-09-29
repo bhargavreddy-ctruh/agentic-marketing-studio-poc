@@ -104,3 +104,30 @@ def load_asset(storage_ref: str) -> tuple[bytes, str] | None:
     if not data_path.exists():
         return None
     return data_path.read_bytes(), mime_type
+
+
+def asset_mime_type(storage_ref: str) -> str | None:
+    """The mime_type recorded in a storage_ref's metadata sidecar — a plain local file read, no
+    network call, unlike `load_asset()`. Lets a caller that only needs to know WHETHER an asset is
+    an image (not its bytes) skip downloading a Cloudinary-hosted asset entirely."""
+    meta_candidates = list(_STORAGE_DIR.glob(f"{storage_ref}.json"))
+    if not meta_candidates:
+        return None
+    meta = json.loads(meta_candidates[0].read_text(encoding="utf-8"))
+    return meta.get("mime_type")
+
+
+def public_url(storage_ref: str | None) -> str | None:
+    """The real Cloudinary URL behind a storage_ref, when one exists — lets callers (canvas
+    responses, the vision LLM path) hand a browser/model provider a direct CDN link instead of
+    round-tripping bytes through this backend a second time. Returns None for a bare/unknown
+    storage_ref OR when running in local-disk mode (no CLOUDINARY_URL configured) — callers fall
+    back to the existing `/api/v1/canvas/assets/{storage_ref}` proxy route in either case, so
+    nothing regresses in dev."""
+    if not storage_ref:
+        return None
+    meta_candidates = list(_STORAGE_DIR.glob(f"{storage_ref}.json"))
+    if not meta_candidates:
+        return None
+    meta = json.loads(meta_candidates[0].read_text(encoding="utf-8"))
+    return meta.get("cloudinary_url")

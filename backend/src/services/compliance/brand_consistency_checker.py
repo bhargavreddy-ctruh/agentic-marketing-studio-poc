@@ -51,7 +51,7 @@ Return ONLY JSON:
 @traceable(name="brand_consistency_checker")
 async def check_brand_consistency(
     *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None,
-    user_id: str | None = None,
+    image_url: str | None = None, user_id: str | None = None,
 ) -> dict:
     # Real, live-found bug (2026-09-25): this call used to pass no `context` at all, so
     # `BrandKitLookupTool` always hit its own `if not user_id: return configured: False` early
@@ -65,10 +65,11 @@ async def check_brand_consistency(
 
     checked_with_vision = False
     try:
-        if image_bytes is not None:
+        if image_bytes is not None or image_url is not None:
             result = await complete_with_vision(
                 image_bytes=image_bytes,
                 mime_type=mime_type or "image/jpeg",
+                image_url=image_url,
                 system=_VISION_SYSTEM_PROMPT,
                 question=f"Do the real, visible contents of this image comply?\n\n{facts_context}",
             )

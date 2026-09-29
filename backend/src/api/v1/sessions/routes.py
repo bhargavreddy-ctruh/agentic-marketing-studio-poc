@@ -15,6 +15,7 @@ from fastapi import APIRouter
 from starlette.responses import StreamingResponse
 
 from ....core.events import stream_events
+from ....core.middleware.logging import get_logger
 from ....schemas.sessions.requests import (
     CreateSessionRequest,
     PostTurnRequest,
@@ -26,6 +27,7 @@ from ....schemas.sessions.responses import ChatTurnResponse, SessionResponse
 from ...dependencies import CurrentUserDep, SessionServiceDep
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+log = get_logger(__name__)
 
 
 @router.post("", response_model=SessionResponse)
@@ -279,3 +281,26 @@ async def stream_session_events(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
+
+
+import asyncio
+
+from ....schemas.crawlers.requests import CrawlRequest
+from ....services.crawlers.crawl_runner import run_crawl_and_ingest
+
+_crawl_tasks: set[asyncio.Task] = set()  # same asyncio.create_task + tracking-set pattern as
+                                          # session_service.py's _background_tasks
+
+
+@router.post("/{session_id}/crawl")
+async def crawl_url(
+    session_id: str, body: CrawlRequest, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> dict:
+    """Product/Brand crawler (2026-09-28) — background-dispatched, fire-and-forget: this returns
+    immediately, and progress/results surface purely via the existing SSE `crawler_*` events (see
+    `GET /{session_id}/events`)."""
+    await svc.get_session(session_id, user_id=current_user.id)  # ownership check
+    task = asyncio.create_task(run_crawl_and_ingest(session_id, body.url))
+    _crawl_tasks.add(task)
+    task.add_done_callback(_crawl_tasks.discard)
+    return {"status": "started", "url": body.url}

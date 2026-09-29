@@ -142,6 +142,17 @@ class Settings(BaseSettings):
     replicate_api_token: str | None = None
     replicate_model: str = "bytedance/seedance-2.0-fast"
 
+    # --- Product/Brand crawler (2026-09-28) — Ollama revived, scoped ONLY to crawler extraction
+    # (services/knowledge/{brand,product}_dna_service.py's crawl_*_from_url methods). General LLM
+    # reasoning stays exactly Groq -> Replicate (router.py), never touches Ollama. Not DB-managed
+    # (settings_service.py) since these are plain local config (where the container lives), not
+    # a secret to rotate.
+    ollama_base_url: str = "http://ollama:11434/v1"
+    ollama_model: str = "gemma2:2b"
+    # firecrawl_api_key IS DB-managed (settings_service.py's _STR_SETTINGS_KEYS) like every other
+    # provider key in this app — this default is only the env-var/local fallback.
+    firecrawl_api_key: str | None = None
+
     # --- Persistence ---
     database_url: str = "sqlite+aiosqlite:///./poc.db"
 

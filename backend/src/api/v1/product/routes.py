@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ....mappers.product_mapper import ProductMapper
-from ....schemas.product.requests import OnboardProductRequest
+from ....schemas.product.requests import OnboardProductRequest, UpdateProductRequest
 from ....schemas.product.responses import ProductProfileResponse
 from ...dependencies import CurrentUserDep, ProductDnaServiceDep
 
@@ -33,6 +33,26 @@ async def onboard_product(
 async def get_product(product_id: str, svc: ProductDnaServiceDep) -> ProductProfileResponse:
     product = await svc.get_product(product_id)
     return ProductMapper.to_response(product)
+
+
+@router.patch("/{product_id}", response_model=ProductProfileResponse)
+async def update_product(
+    product_id: str, body: UpdateProductRequest, svc: ProductDnaServiceDep
+) -> ProductProfileResponse:
+    """Edit a wrongly-crawled or outdated Product DNA profile (2026-09-28) — patch semantics, only
+    the fields actually given are changed."""
+    product = await svc.update_product_attributes(
+        product_id, name=body.name, attributes_patch=body.attributes_patch
+    )
+    return ProductMapper.to_response(product)
+
+
+@router.delete("/{product_id}", status_code=204)
+async def delete_product(product_id: str, svc: ProductDnaServiceDep) -> None:
+    """Delete a wrongly-crawled or outdated Product DNA profile (2026-09-28). Does not cascade to
+    canvas elements tagged with this product — see `ProductDnaService.delete_product`'s own
+    docstring."""
+    await svc.delete_product(product_id)
 
 
 from fastapi import UploadFile

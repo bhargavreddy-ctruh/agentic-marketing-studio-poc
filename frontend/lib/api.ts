@@ -201,3 +201,14 @@ export async function cancelTurn(sessionId: string): Promise<{ cancelled: boolea
     method: "POST",
   });
 }
+
+/** Product/Brand crawler (2026-09-28) — background-dispatched on the backend, returns
+ * immediately; progress/results surface purely via the SSE `crawler_*` events already streamed
+ * through the same event-stream helper turn narration uses. */
+export async function crawlUrl(sessionId: string, url: string): Promise<{ status: string; url: string }> {
+  return request<{ status: string; url: string }>(`/api/v1/sessions/${sessionId}/crawl`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url }),
+  });
+}

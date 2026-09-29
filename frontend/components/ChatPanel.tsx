@@ -9,6 +9,7 @@ import {
   ScenePlan,
   SessionResponse,
   createSession,
+  crawlUrl,
   getSession,
   listTurns,
   postTurn,
@@ -220,6 +221,27 @@ function ChatPanel(
   // inherit-by-default behavior, unchanged); reset after every send, same lifecycle as the
   // reference chip itself, so it never silently leaks into a later, unrelated turn.
   const [startNewProduct, setStartNewProduct] = useState(false);
+
+  // Product/Brand crawler "🔗 Add Link" popover (2026-09-28).
+  const [showLinkPopover, setShowLinkPopover] = useState(false);
+  const [linkInput, setLinkInput] = useState("");
+  const [linkCrawling, setLinkCrawling] = useState(false);
+
+  async function handleTriggerLinkCrawl() {
+    const url = linkInput.trim();
+    if (!url || linkCrawling || !sessionId) return;
+    setLinkCrawling(true);
+    try {
+      await crawlUrl(sessionId, url);
+      setMessages((m) => [...m, { id: newId(), role: "assistant", text: `🔗 Crawling ${url} — extracting DNA… (progress shows above as it runs)` }]);
+      setLinkInput("");
+      setShowLinkPopover(false);
+    } catch (err) {
+      appendError(err);
+    } finally {
+      setLinkCrawling(false);
+    }
+  }
 
   // Always show the latest chat content (2026-09-22, per an explicit user ask) — scrolls the
   // message list to the bottom whenever anything new appears: a message, live-streamed thinking,
@@ -555,7 +577,7 @@ function ChatPanel(
           {sessionId && (
             <div className="flex items-center gap-3 text-xs text-surface-500">
               <span className="font-mono">ID: {sessionId.slice(0, 8)}</span>
-              <button onClick={handleRefresh} className="hover:text-white transition-colors">
+              <button onClick={handleRefresh} className="hover:text-surface-50 transition-colors">
                 <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                 </svg>
@@ -924,12 +946,38 @@ function ChatPanel(
       )}
 
       <form
-        className="mt-4 flex flex-col gap-2 rounded-2xl border border-surface-700/60 bg-surface-800/40 p-2 shadow-inner transition-colors focus-within:border-surface-600 focus-within:bg-surface-800/60"
+        className="relative mt-4 flex flex-col gap-2 rounded-2xl border border-surface-700/60 bg-surface-800/40 p-2 shadow-inner transition-colors focus-within:border-surface-600 focus-within:bg-surface-800/60"
         onSubmit={(e) => {
           e.preventDefault();
           handleSend();
         }}
       >
+        {showLinkPopover && (
+          // Positioned relative to the whole input bar (the <form>), not the tiny 🔗 icon —
+          // anchoring to the icon with a fixed width let the popover overflow past the panel's
+          // own left edge in a narrow chat panel (real, live-found UI bug, 2026-09-28).
+          <div className="absolute bottom-full left-0 right-0 z-10 mb-2 rounded-xl border border-surface-700 bg-surface-900 p-2.5 shadow-xl">
+            <p className="mb-1.5 text-[10px] font-semibold text-surface-400">Paste a company or product link</p>
+            <div className="flex gap-1.5">
+              <input
+                autoFocus
+                className="min-w-0 flex-1 rounded-lg border border-surface-700 bg-surface-800 px-2 py-1.5 text-xs text-surface-50 focus:border-brand-500 focus:outline-none"
+                placeholder="https://..."
+                value={linkInput}
+                onChange={(e) => setLinkInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleTriggerLinkCrawl()}
+              />
+              <button
+                type="button"
+                onClick={handleTriggerLinkCrawl}
+                disabled={linkCrawling || !linkInput.trim()}
+                className="shrink-0 rounded-lg bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
+              >
+                {linkCrawling ? "…" : "Crawl"}
+              </button>
+            </div>
+          </div>
+        )}
         <textarea
           ref={inputRef}
           rows={1}
@@ -990,6 +1038,15 @@ function ChatPanel(
           </div>
 
           <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setShowLinkPopover((v) => !v)}
+              disabled={!sessionId}
+              className="text-surface-500 hover:text-surface-300 transition-colors disabled:opacity-30"
+              title="Add a brand/product link to auto-extract DNA"
+            >
+              🔗
+            </button>
             <button type="button" className="text-surface-500 hover:text-surface-300 transition-colors" title="Voice Input">
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />

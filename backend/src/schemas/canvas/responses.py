@@ -12,6 +12,13 @@ class CanvasElementResponse(BaseModel):
     produced_by_specialist: str
     version: int
     storage_ref: str | None
+    # Real, live-found latency win (2026-09-29, per an explicit user ask to "reduce latency"):
+    # when the asset already lives on Cloudinary, this is its real, direct CDN url — the frontend
+    # uses it as an <img src> straight to Cloudinary instead of proxying bytes a second time
+    # through this backend's own `/canvas/assets/{storage_ref}` route (`core/local_storage.py`'s
+    # `public_url()`). None in local-disk dev mode (no CLOUDINARY_URL configured) or when this
+    # element has no asset yet — callers fall back to the proxy route in both cases, unchanged.
+    url: str | None = None
     created_at: datetime
     updated_at: datetime
     # A real staged edit awaiting approve/reject (Memory.md, Phase 4 "approve" mode) — all null

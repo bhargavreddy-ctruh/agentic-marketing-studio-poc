@@ -68,16 +68,45 @@ def _downscale_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, st
         return image_bytes, mime_type
 
 
-async def complete_with_vision(
-    *, image_bytes: bytes, mime_type: str, system: str, question: str, max_tokens: int = 700
-) -> LLMResult:
+def _build_image_url_content(
+    *, image_bytes: bytes | None, mime_type: str, image_url: str | None
+) -> dict:
+    """Real, live-found latency win (2026-09-29, per an explicit user ask to reduce latency by
+    passing URL-based images to the LLM wherever possible): when the asset already has a real
+    Cloudinary CDN url, hand the model THAT directly — both Groq's `image_url.url` and
+    `replicate_llm.py`'s `images` field genuinely accept a real https:// URI, not just a `data:`
+    one (confirmed in that file's own docstring: "array of URIs"). This skips downloading the
+    asset a second time, the PIL resize, AND the base64 33%-size inflation entirely — Cloudinary's
+    own on-the-fly transform suffix (`w_1024,q_85,f_jpg`) reproduces the exact same "cap payload
+    size for a call that only needs to SEE the image" behavior `_downscale_for_vision` exists for,
+    done by Cloudinary's CDN instead of this backend's CPU. Falls back to the original
+    download-resize-base64 path when no direct url exists (local-disk dev mode) — `image_bytes`
+    is required in that case."""
+    if image_url:
+        # Only apply Cloudinary's transform syntax to an actual Cloudinary IMAGE delivery url —
+        # never touch a video/raw url or a non-Cloudinary host, which wouldn't understand it.
+        transformed = image_url.replace("/image/upload/", "/image/upload/w_1024,q_85,f_jpg/", 1)
+        return {"type": "image_url", "image_url": {"url": transformed}}
+    assert image_bytes is not None, "image_bytes is required when no direct image_url is available"
     resized_bytes, resized_mime = _downscale_for_vision(image_bytes, mime_type)
     b64 = base64.b64encode(resized_bytes).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:{resized_mime};base64,{b64}"}}
+
+
+async def complete_with_vision(
+    *,
+    image_bytes: bytes | None = None,
+    mime_type: str = "image/jpeg",
+    image_url: str | None = None,
+    system: str,
+    question: str,
+    max_tokens: int = 700,
+) -> LLMResult:
     user_message = {
         "role": "user",
         "content": [
             {"type": "text", "text": question},
-            {"type": "image_url", "image_url": {"url": f"data:{resized_mime};base64,{b64}"}},
+            _build_image_url_content(image_bytes=image_bytes, mime_type=mime_type, image_url=image_url),
         ],
     }
 

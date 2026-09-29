@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ..core.local_storage import load_asset
+from ..core.local_storage import load_asset, public_url
 from ..models.canvas_element import CanvasElementModel
 from ..schemas.canvas.responses import CanvasElementResponse, CanvasStateResponse
 
@@ -67,6 +67,7 @@ class CanvasMapper:
             produced_by_specialist=entity.produced_by_specialist,
             version=entity.version,
             storage_ref=entity.storage_ref,
+            url=public_url(entity.storage_ref),
             created_at=entity.created_at,
             updated_at=entity.updated_at,
             pending_storage_ref=entity.pending_storage_ref,

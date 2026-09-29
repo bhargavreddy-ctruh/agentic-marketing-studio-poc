@@ -207,6 +207,33 @@ export function buildPipelineNodes(events: LiveEvent[]): PipelineNode[] {
         touchStart(n, event);
         break;
       }
+      // Product/Brand crawler (2026-09-28) — a real node (label "crawler") so AgentHUD's
+      // keyword-matched Director/Brand Guard highlighting (SPECIALIST_ROSTER's "crawl"/"crawler"
+      // keywords) has something real to match against; without a node here, crawler_* events would
+      // fall through the `default` narration-only case and never light up the HUD at all.
+      case "crawler_started": {
+        const n = ensure("crawler", "crawler", "specialist");
+        n.status = "running";
+        touchStart(n, event);
+        break;
+      }
+      case "crawler_step": {
+        const n = ensure("crawler", "crawler", "specialist");
+        if (event.status === "failed") {
+          n.status = "failed";
+          n.reason = String(event.error ?? "");
+        }
+        touchStart(n, event);
+        break;
+      }
+      case "crawler_completed": {
+        const n = ensure("crawler", "crawler", "specialist");
+        n.status = "completed";
+        n.output = event.url_type === "brand" ? "Brand DNA extracted" : "Product DNA extracted";
+        touchStart(n, event);
+        touchEnd(n, event);
+        break;
+      }
       case "llm_delta": {
         const { id, label, kind } = nodeIdentity(String(event.node ?? ""));
         const n = ensure(id, label, kind);
@@ -387,6 +414,14 @@ export function describeEvent(event: LiveEvent): string | null {
     // to detect exactly that, no change needed there.
     case "dynamic_plan_group_parallel":
       return `⚡ Running ${event.step_count} steps in parallel…`;
+    // Product/Brand crawler (2026-09-28) — POST /{session_id}/crawl and chat's turn
+    // auto-detection both emit these via the same real `emit()` (core/events.py).
+    case "crawler_started":
+      return `🔗 Crawling ${event.url} — extracting ${event.url_type === "brand" ? "Brand" : "Product"} DNA…`;
+    case "crawler_step":
+      return event.status === "failed" ? `❌ Crawl failed — ${event.error}` : null;
+    case "crawler_completed":
+      return `✅ Crawled ${event.url} — ${event.url_type === "brand" ? "Brand" : "Product"} DNA extracted`;
     default:
       return null; // turn_started/turn_completed are structural, not narration lines
   }

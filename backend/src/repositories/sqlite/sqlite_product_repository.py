@@ -33,3 +33,13 @@ class SqliteProductRepository:
             select(ProductProfileModel).where(ProductProfileModel.user_id == user_id)
         )
         return list(result.scalars().all())
+
+    async def update(self, product: ProductProfileModel) -> ProductProfileModel:
+        return await self.add(product)
+
+    async def delete(self, product_id: str) -> None:
+        product = await self.get(product_id)
+        if product is None:
+            return
+        await self._db.delete(product)
+        await self._db.commit()

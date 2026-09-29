@@ -73,7 +73,7 @@ export function PromptModal({
             ref={inputRef}
             type="text"
             placeholder={placeholder}
-            className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm text-white placeholder:text-surface-500 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2.5 text-sm text-surface-50 placeholder:text-surface-500 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
           />
           <div className="flex justify-end gap-3">
             <button

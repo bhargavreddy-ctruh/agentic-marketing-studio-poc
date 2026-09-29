@@ -52,7 +52,7 @@ Return ONLY JSON:
 @traceable(name="visual_fidelity_checker")
 async def check_visual_fidelity(
     *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None,
-    user_id: str | None = None,
+    image_url: str | None = None, user_id: str | None = None,
 ) -> dict:
     # Real, live-found bug (2026-09-25) — same as `brand_consistency_checker.py`'s: no `context`
     # meant `ProductLookupTool` always hit its own `if not user_id: return configured: False`
@@ -65,10 +65,11 @@ async def check_visual_fidelity(
 
     checked_with_vision = False
     try:
-        if image_bytes is not None:
+        if image_bytes is not None or image_url is not None:
             result = await complete_with_vision(
                 image_bytes=image_bytes,
                 mime_type=mime_type or "image/jpeg",
+                image_url=image_url,
                 system=_VISION_SYSTEM_PROMPT,
                 question=f"Are the must-show facts genuinely visible in this image, with no never-show items?\n\n{facts_context}",
             )

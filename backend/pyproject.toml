@@ -28,6 +28,10 @@ dependencies = [
     "cairosvg>=2.7.1",
     "laya>=0.3.7",
     "faster-whisper>=1.2.1",
+    "playwright>=1.47.0",
+    "beautifulsoup4>=4.12.3",
+    "colorthief>=0.2.1",
+    "firecrawl-py>=1.0.0",
 ]
 
 [project.optional-dependencies]

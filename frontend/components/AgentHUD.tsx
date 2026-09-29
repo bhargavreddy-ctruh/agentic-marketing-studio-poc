@@ -23,7 +23,10 @@ export const SPECIALIST_ROSTER: SpecialistAgent[] = [
     avatar: "🎬",
     badgeColor: "bg-purple-500/20 text-purple-300 border-purple-500/30",
     glowColor: "rgba(168, 85, 247, 0.4)",
-    keywords: ["orchestrator", "ideation", "classifier", "turn_started", "route_decided"],
+    // "crawl"/"crawler" (2026-09-28): matches crawler_started/crawler_step's node text below —
+    // the crawler itself has no dedicated HUD slot, so it borrows the Director's, matching the
+    // Product/Brand crawler plan's "highlight Brand Guard and Director" intent.
+    keywords: ["orchestrator", "ideation", "classifier", "turn_started", "route_decided", "crawl", "crawler"],
   },
   {
     id: "copywriter",
@@ -73,7 +76,9 @@ export const SPECIALIST_ROSTER: SpecialistAgent[] = [
     avatar: "🛡️",
     badgeColor: "bg-rose-500/20 text-rose-300 border-rose-500/30",
     glowColor: "rgba(244, 63, 94, 0.4)",
-    keywords: ["compliance", "guardrail", "review", "brand_dna", "qa"],
+    // "crawl"/"crawler" (2026-09-28) — same crawler_* events also highlight Brand Guard, since
+    // a crawl re-derives this session's guardrails on completion.
+    keywords: ["compliance", "guardrail", "review", "brand_dna", "qa", "crawl", "crawler"],
   },
 ];
 
@@ -285,7 +290,7 @@ export default function AgentHUD({
             <div className="flex items-center gap-2">
               <span className="text-xl">{hoveredState.agent.avatar}</span>
               <div>
-                <p className="text-xs font-semibold text-white">{hoveredState.agent.name}</p>
+                <p className="text-xs font-semibold text-surface-50">{hoveredState.agent.name}</p>
                 <p className="text-[10px] text-surface-400">{hoveredState.agent.role}</p>
               </div>
             </div>

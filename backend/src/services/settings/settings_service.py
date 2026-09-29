@@ -40,6 +40,12 @@ _STR_SETTINGS_KEYS = {
     "falai_api_key",
     "replicate_api_token",
     "langsmith_api_key",
+    # Product/Brand crawler (2026-09-28) — providers/crawlers/firecrawl_provider.py constructs its
+    # client fresh on every call (crawls are infrequent, unlike the constantly-called LLM/image
+    # providers), reading `settings.firecrawl_api_key` directly each time — so a live override
+    # takes effect on the very next call with no cached singleton to reset, hence no resetter entry
+    # below.
+    "firecrawl_api_key",
 }
 
 # Not a `Settings` field at all — `core/local_storage.py` reads this straight from os.environ

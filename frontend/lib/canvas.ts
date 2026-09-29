@@ -18,6 +18,9 @@ export interface CanvasElement {
   produced_by_specialist: string;
   version: number;
   storage_ref: string | null;
+  // Real, direct Cloudinary CDN url for this asset (2026-09-29, latency win) — null in local-disk
+  // dev mode or before an asset exists; `assetUrl()` prefers this over the backend proxy route.
+  url: string | null;
   created_at: string;
   updated_at: string;
   pending_storage_ref: string | null;

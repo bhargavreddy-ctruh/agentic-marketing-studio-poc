@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, User, logout, me } from "@/lib/auth";
-import { SessionResponse, createSession, listSessions } from "@/lib/api";
+import { SessionResponse, createSession, crawlUrl, listSessions } from "@/lib/api";
 import { BrandProfile, listBrands, onboardBrand } from "@/lib/brand";
 import { ProductProfile, listOnboardedProducts, onboardProduct } from "@/lib/product";
 import { MoodBoardAsset, listMoodBoardAssets, moodBoardAssetUrl, uploadMoodBoardAsset } from "@/lib/moodboard";
@@ -28,6 +28,10 @@ export default function HomePage() {
   const [showNewWorkflow, setShowNewWorkflow] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newApprovalMode, setNewApprovalMode] = useState<"auto" | "approve">("auto");
+  // Product/Brand crawler (2026-09-28) — optional, additive: filling either kicks off a crawl
+  // right after the session is created, alongside the existing create flow.
+  const [newCompanyUrl, setNewCompanyUrl] = useState("");
+  const [newProductUrl, setNewProductUrl] = useState("");
   const [creating, setCreating] = useState(false);
 
   const [showSettings, setShowSettings] = useState(false);
@@ -101,6 +105,10 @@ export default function HomePage() {
     setCreating(true);
     try {
       const created = await createSession(newApprovalMode, newTitle.trim() || undefined);
+      // Fire-and-forget — the crawl runs as the session's own background task (same
+      // POST /{id}/crawl route ChatPanel's "🔗 Add Link" popover uses); never blocks navigation.
+      if (newCompanyUrl.trim()) crawlUrl(created.id, newCompanyUrl.trim()).catch(() => {});
+      if (newProductUrl.trim()) crawlUrl(created.id, newProductUrl.trim()).catch(() => {});
       router.push(`/studio/${created.id}`);
     } catch (err) {
       setWorkflowsError(err instanceof ApiError ? err.message : "Could not create a new workflow.");
@@ -219,7 +227,7 @@ export default function HomePage() {
 
   // ── Input class helper ─────────────────────────────────────────────────────
   const inputCls =
-    "rounded-lg border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-white placeholder-surface-500 transition-colors focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500";
+    "rounded-lg border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-50 placeholder-surface-500 transition-colors focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500";
 
   return (
     <div className="mx-auto min-h-screen w-full max-w-5xl px-6 py-10">
@@ -244,7 +252,7 @@ export default function HomePage() {
             className={`flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-all ${
               showSettings
                 ? "border-brand-500/50 bg-brand-500/10 text-brand-300"
-                : "border-surface-700/50 text-surface-300 hover:bg-surface-800/60 hover:text-white"
+                : "border-surface-700/50 text-surface-300 hover:bg-surface-800/60 hover:text-surface-50"
             }`}
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -256,7 +264,7 @@ export default function HomePage() {
           </button>
           <button
             onClick={handleLogout}
-            className="flex items-center gap-2 rounded-lg border border-surface-700/50 px-3 py-1.5 text-sm text-surface-300 transition-all hover:bg-surface-800/60 hover:text-white"
+            className="flex items-center gap-2 rounded-lg border border-surface-700/50 px-3 py-1.5 text-sm text-surface-300 transition-all hover:bg-surface-800/60 hover:text-surface-50"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -299,6 +307,18 @@ export default function HomePage() {
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
                   autoFocus
+                />
+                <input
+                  placeholder="Company / brand URL (optional — auto-extracts brand DNA)"
+                  className={inputCls}
+                  value={newCompanyUrl}
+                  onChange={(e) => setNewCompanyUrl(e.target.value)}
+                />
+                <input
+                  placeholder="Product URL (optional — auto-extracts product DNA)"
+                  className={inputCls}
+                  value={newProductUrl}
+                  onChange={(e) => setNewProductUrl(e.target.value)}
                 />
                 <label className="flex items-center gap-2 text-sm text-surface-400">
                   Mode
@@ -371,7 +391,7 @@ export default function HomePage() {
                     className={`flex-1 rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-200 ${
                       settingsTab === tab
                         ? "bg-brand-500 text-white shadow-[0_0_10px_rgba(99,102,241,0.4)]"
-                        : "text-surface-400 hover:text-white"
+                        : "text-surface-400 hover:text-surface-50"
                     }`}
                   >
                     {tab === "brand" ? "Brand DNA" : tab === "product" ? "Product DNA" : "Mood Board"}

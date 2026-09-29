@@ -38,18 +38,42 @@ services:
       # `./backend/var` below; set in the root .env to move asset storage to Cloudinary instead
       # (see backend/.env.example's own CLOUDINARY_URL comment for the exact format).
       CLOUDINARY_URL: "${CLOUDINARY_URL:-}"
+      # Product/Brand crawler (2026-09-28) — Ollama revived, scoped ONLY to crawler extraction
+      # (services/knowledge/{brand,product}_dna_service.py's crawl_*_from_url methods). General
+      # LLM reasoning stays Groq->Replicate (router.py), untouched, so backend does NOT hard-depend
+      # on the `ollama` service below — OllamaProvider degrades gracefully to that fallback chain
+      # if Ollama is slow to pull its model on first start or briefly unavailable.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434/v1}"
     networks:
       - app-network
     restart: unless-stopped
 
+  # Product/Brand crawler's extraction model only (2026-09-28 revival) — NOT used for general
+  # reasoning, which remains entirely Groq->Replicate. See backend service's OLLAMA_BASE_URL above.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ams-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+    # Pulls gemma2:2b on first start only (a no-op, fast, on every later start since it's already
+    # present in the ollama_data volume).
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull ${OLLAMA_MODEL:-gemma2:2b} && wait"]
+
   frontend:
     build:
-      # Switched (2026-09-26, explicit user correction) from ./frontend (poc/frontend, the OLDER
-      # snapshot missing this session's DNA-tab fix/guardrails-toggle/product-grouping work) to
-      # the sibling directory one level up — the one actually used and fixed throughout this
-      # session. Its own Dockerfile/.dockerignore/next.config.js "output: standalone" were added
-      # to match, mirroring poc/frontend's exactly.
-      context: ../frontend
+      # Real, live-found deploy blocker (2026-09-29): this pointed at `../frontend`, a sibling
+      # directory ONE LEVEL ABOVE this repo — confirmed not tracked by git at all, so a fresh
+      # `git clone`/`git reset --hard origin/main` on a real EC2 instance (exactly what this
+      # repo's own CI/CD does) would never have that directory, and the frontend build would fail
+      # outright. Pointed back at the repo's own tracked `./frontend` (poc/frontend) — 45 files,
+      # already has its own correct `Dockerfile`/`.dockerignore`/`next.config.js` ("output:
+      # standalone"), fully deploy-ready as-is. Any newer frontend work that only ever lived in
+      # that untracked sibling directory needs to be committed into THIS `frontend/` before it can
+      # reach a real deploy — it was never reachable from a fresh clone regardless of this setting.
+      context: ./frontend
       dockerfile: Dockerfile
       args:
         # Baked into the client JS bundle at build time (NEXT_PUBLIC_* vars run in the BROWSER,
@@ -82,3 +106,4 @@ networks:
 
 volumes:
   hf_cache:
+  ollama_data:

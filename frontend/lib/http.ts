@@ -42,7 +42,13 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /** The real URL for the bytes behind a storage_ref (`GET /api/v1/canvas/assets/{storage_ref}`,
- * Phase 4b) — every other canvas endpoint returns metadata only. */
-export function assetUrl(storageRef: string): string {
-  return `${API_BASE_URL}/api/v1/canvas/assets/${storageRef}`;
+ * Phase 4b) — every other canvas endpoint returns metadata only.
+ *
+ * `directUrl` (2026-09-29, latency win): when the backend response already carries a real
+ * Cloudinary CDN url for this asset (`CanvasElementResponse.url` / `BrandProfileResponse.logo_url`
+ * — `None` in local-disk dev mode or before an asset exists), use it straight — the browser hits
+ * Cloudinary directly instead of this backend proxying the bytes a second time. Falls back to the
+ * proxy route exactly as before when there's no direct url yet. */
+export function assetUrl(storageRef: string, directUrl?: string | null): string {
+  return directUrl || `${API_BASE_URL}/api/v1/canvas/assets/${storageRef}`;
 }
