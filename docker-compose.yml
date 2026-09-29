@@ -8,7 +8,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend/poc.db:/app/poc.db
       - ./backend/var:/app/var
       # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
       # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
@@ -30,10 +29,17 @@ services:
       # LAN IP or a since-expired Cloudflare quick-tunnel URL). See `.env.example` at the repo
       # root. Defaults to localhost:3000 if unset, for a same-machine dev run.
       FRONTEND_ORIGINS: "${PUBLIC_FRONTEND_URL:-http://localhost:3000}"
-      # Free-tier deploy (2026-09-28): overridable via the root .env's DATABASE_URL, e.g. a
-      # Supabase Postgres DSN (`postgresql+asyncpg://...`) — defaults to the same local SQLite
-      # file this always used, so an existing deploy with nothing set keeps working unchanged.
-      DATABASE_URL: "${DATABASE_URL:-sqlite+aiosqlite:////app/poc.db}"
+      # Real, live-found incident (2026-09-29): the old SQLite fallback here
+      # (`${DATABASE_URL:-sqlite+aiosqlite:////app/poc.db}`) meant a deploy that forgot to set
+      # DATABASE_URL in the root `.env` silently started against a separate, empty local SQLite
+      # database instead of the real Supabase Postgres one — no error, no warning, just a backend
+      # that "worked" (login/register succeeded) against the wrong store, with canvas/session data
+      # invisible until the missing `.env` was found by hand. Postgres/Supabase is the only real
+      # supported store now (Rules.md section 6 — no silent fallback masking a real deploy
+      # mistake): `:?` makes Compose refuse to start at all with a clear error instead of quietly
+      # substituting SQLite, the same "deterministic beats a maybe" principle already used
+      # elsewhere in this app.
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required — set it in the root .env (see .env.example)}"
       # Same free-tier deploy — unset (default) keeps writing generated assets to the bind-mounted
       # `./backend/var` below; set in the root .env to move asset storage to Cloudinary instead
       # (see backend/.env.example's own CLOUDINARY_URL comment for the exact format).
