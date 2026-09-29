@@ -366,7 +366,7 @@ class ProductDnaService:
             # asset this image_bytes came from — if it has a direct Cloudinary url, hand the
             # vision model that instead of re-encoding the bytes we already have as base64.
             result = await complete_with_vision(
-                image_bytes=image_bytes, mime_type=mime_type, image_url=public_url(storage_ref),
+                image_bytes=image_bytes, mime_type=mime_type, image_url=await public_url(storage_ref),
                 system=_IMAGE_SYSTEM_PROMPT, question=question, max_tokens=1024,
             )
             parsed = extract_json(result.text)
@@ -461,7 +461,7 @@ class ProductDnaService:
                     # for this crawler's purpose) is never useful as a product canvas tile.
                     if mime_type == "image/svg+xml":
                         continue
-                    storage_ref = save_asset(
+                    storage_ref = await save_asset(
                         image_bytes, mime_type,
                         metadata={"source": "product_crawl", "product_id": product.id, "url": image_url},
                     )

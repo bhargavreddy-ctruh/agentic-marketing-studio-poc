@@ -48,7 +48,7 @@ router = APIRouter(prefix="/api/v1/canvas", tags=["canvas"])
 @router.get("/{session_id}", response_model=CanvasStateResponse)
 async def get_canvas_state(session_id: str, repo: CanvasRepositoryDep) -> CanvasStateResponse:
     elements = await repo.list_for_session(session_id)
-    return CanvasMapper.to_state_response(session_id, elements)
+    return await CanvasMapper.to_state_response(session_id, elements)
 
 
 def _element_type_from_mime(mime_type: str) -> str:
@@ -75,7 +75,7 @@ async def create_element(
     session = await sessions.get(session_id)
     if session is None:
         raise NotFoundError("Session", session_id)
-    loaded = load_asset(body.storage_ref)
+    loaded = await load_asset(body.storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", body.storage_ref)
     image_bytes, mime_type = loaded
@@ -143,7 +143,7 @@ async def create_element(
                 extra={"_extra_session_id": session_id, "_extra_error": str(exc)},
             )
 
-    return CanvasMapper.to_response(created)
+    return await CanvasMapper.to_response(created)
 
 
 @router.put("/elements/{element_id}/group", response_model=CanvasElementResponse)
@@ -171,7 +171,7 @@ async def group_element(
         element.product_id = product.id
         element.product_name = product.name
     updated = await canvas.update_element(element)
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.get("/assets/{storage_ref}")
@@ -179,7 +179,7 @@ async def get_asset(storage_ref: str) -> Response:
     """Streams the real bytes behind a storage_ref (Phase 4b) — every other endpoint here returns
     metadata only (storage_ref strings), so this is the one route the frontend canvas actually
     loads pixels/video/audio from, e.g. `<img src="/api/v1/canvas/assets/{storage_ref}">`."""
-    loaded = load_asset(storage_ref)
+    loaded = await load_asset(storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", storage_ref)
     data, mime_type = loaded
@@ -199,7 +199,7 @@ async def upload_asset(file: UploadFile) -> AssetUploadResponse:
     server-side canvas element it gets attached to via PUT .../direct-edit below."""
     data = await file.read()
     mime = sniff_image_mime(data, file.content_type)
-    storage_ref = save_asset(data, mime, metadata={"source": "direct_edit_upload"})
+    storage_ref = await save_asset(data, mime, metadata={"source": "direct_edit_upload"})
     return AssetUploadResponse(storage_ref=storage_ref, mime_type=mime)
 
 
@@ -225,7 +225,7 @@ async def direct_edit_element(
         action="direct_edit",
         approval_mode=session.approval_mode if session else "auto",
     )
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/regenerate", response_model=CanvasElementResponse)
@@ -241,7 +241,7 @@ async def targeted_regenerate(
     updated = await regenerate_element(
         canvas=canvas, versions=versions, sessions=sessions, element_id=element_id, instruction=body.instruction
     )
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/comments", response_model=CanvasElementResponse)
@@ -258,7 +258,7 @@ async def comment_on_element(
     updated = await resolve_comment(
         canvas=canvas, versions=versions, sessions=sessions, element_id=element_id, comment=body.text
     )
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/approve-edit", response_model=CanvasElementResponse)
@@ -266,26 +266,26 @@ async def approve_pending_edit(element_id: str, versioning: VersioningServiceDep
     """"approve" mode only (Memory.md, Phase 4): commits a staged regenerate/comment/direct-edit
     result as the new current version. A no-op error if there's nothing pending."""
     updated = await versioning.approve_pending_edit(element_id)
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/reject-edit", response_model=CanvasElementResponse)
 async def reject_pending_edit(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
     """"approve" mode only: discards a staged edit — the current version is untouched."""
     updated = await versioning.reject_pending_edit(element_id)
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/undo", response_model=CanvasElementResponse)
 async def undo_element(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
     updated = await versioning.undo(element_id)
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/redo", response_model=CanvasElementResponse)
 async def redo_element(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
     updated = await versioning.redo(element_id)
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.get("/elements/{element_id}/versions", response_model=list[CanvasElementVersionResponse])
@@ -332,8 +332,8 @@ async def masked_edit_element(
     if element is None:
         raise NotFoundError("CanvasElement", element_id)
         
-    src_loaded = load_asset(element.storage_ref)
-    mask_loaded = load_asset(body.mask_storage_ref)
+    src_loaded = await load_asset(element.storage_ref)
+    mask_loaded = await load_asset(body.mask_storage_ref)
     if src_loaded is None or mask_loaded is None:
         raise NotFoundError("Asset", element.storage_ref)
         
@@ -348,7 +348,7 @@ async def masked_edit_element(
         mask_mime_type=mask_loaded[1],
     )
     
-    new_storage_ref = save_asset(
+    new_storage_ref = await save_asset(
         result.image_bytes,
         result.mime_type,
         metadata={"masked_edit": True, "instruction": body.instruction, "edited_from": element.storage_ref},
@@ -362,7 +362,7 @@ async def masked_edit_element(
         action="masked_edit",
         approval_mode=session.approval_mode if session else "auto",
     )
-    return CanvasMapper.to_response(updated)
+    return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/export-all-specs")
@@ -374,7 +374,7 @@ async def export_all_ad_specs(
     if element is None:
         raise NotFoundError("CanvasElement", element_id)
         
-    loaded = load_asset(element.storage_ref)
+    loaded = await load_asset(element.storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", element.storage_ref)
         

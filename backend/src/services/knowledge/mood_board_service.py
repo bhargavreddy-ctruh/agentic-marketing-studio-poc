@@ -25,7 +25,7 @@ class MoodBoardService:
         self._assets = assets
 
     async def add_asset(self, *, data: bytes, mime_type: str, description: str) -> MoodBoardAssetModel:
-        storage_ref = save_asset(data, mime_type, metadata={"source": "mood_board_upload"})
+        storage_ref = await save_asset(data, mime_type, metadata={"source": "mood_board_upload"})
         asset = MoodBoardAssetModel(
             id=uuid.uuid4().hex, storage_ref=storage_ref, mime_type=mime_type, description=description
         )

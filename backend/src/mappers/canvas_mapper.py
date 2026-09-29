@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 from ..core.local_storage import load_asset, public_url
 from ..models.canvas_element import CanvasElementModel
 from ..schemas.canvas.responses import CanvasElementResponse, CanvasStateResponse
 
 
-def _text_content(entity: CanvasElementModel) -> str | None:
+async def _text_content(entity: CanvasElementModel) -> str | None:
     """A real, live-found bug (2026-09-22): a `text_card_writer` tool call (the real, modular
     path — `composition_artist`/`shot_planner`/`lighting_designer`/`narrator`) writes its content
     to a real `text/plain` ASSET on disk via `save_asset`, referenced by `storage_ref` — it never
@@ -19,7 +21,7 @@ def _text_content(entity: CanvasElementModel) -> str | None:
     if embedded:
         return embedded
     if entity.element_type == "text" and entity.storage_ref:
-        loaded = load_asset(entity.storage_ref)
+        loaded = await load_asset(entity.storage_ref)
         if loaded is not None:
             data, mime_type = loaded
             if mime_type == "text/plain":
@@ -59,7 +61,10 @@ def _description(entity: CanvasElementModel) -> str | None:
 
 class CanvasMapper:
     @staticmethod
-    def to_response(entity: CanvasElementModel) -> CanvasElementResponse:
+    async def to_response(entity: CanvasElementModel) -> CanvasElementResponse:
+        url, text_content = await asyncio.gather(
+            public_url(entity.storage_ref), _text_content(entity)
+        )
         return CanvasElementResponse(
             id=entity.id,
             session_id=entity.session_id,
@@ -67,14 +72,14 @@ class CanvasMapper:
             produced_by_specialist=entity.produced_by_specialist,
             version=entity.version,
             storage_ref=entity.storage_ref,
-            url=public_url(entity.storage_ref),
+            url=url,
             created_at=entity.created_at,
             updated_at=entity.updated_at,
             pending_storage_ref=entity.pending_storage_ref,
             pending_action=entity.pending_action,
             last_comment=(entity.metadata_json or {}).get("comment"),
             compliance_status=entity.compliance_status,
-            text_content=_text_content(entity),
+            text_content=text_content,
             description=_description(entity),
             alignment_warning=(entity.metadata_json or {}).get("alignment_warning"),
             product_id=entity.product_id,
@@ -83,10 +88,8 @@ class CanvasMapper:
         )
 
     @staticmethod
-    def to_state_response(
+    async def to_state_response(
         session_id: str, entities: list[CanvasElementModel]
     ) -> CanvasStateResponse:
-        return CanvasStateResponse(
-            session_id=session_id,
-            elements=[CanvasMapper.to_response(e) for e in entities],
-        )
+        elements = await asyncio.gather(*(CanvasMapper.to_response(e) for e in entities))
+        return CanvasStateResponse(session_id=session_id, elements=list(elements))

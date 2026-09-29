@@ -48,5 +48,5 @@ class TextCardWriterTool(Tool):
         if not text:
             return ToolResult(ok=False, data={}, error="text is required")
 
-        storage_ref = save_asset(text.encode("utf-8"), "text/plain", metadata={"label": label})
+        storage_ref = await save_asset(text.encode("utf-8"), "text/plain", metadata={"label": label})
         return ToolResult(ok=True, data={"storage_ref": storage_ref, "mime_type": "text/plain", "label": label})

@@ -133,7 +133,7 @@ class TextOverlayTool(Tool):
         if not storage_ref or not text:
             return ToolResult(ok=False, data={}, error="storage_ref and text are required")
 
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         image_bytes, _mime_type = loaded
@@ -208,7 +208,7 @@ class TextOverlayTool(Tool):
                 combined.save(buf, format="JPEG", quality=92)
                 res_bytes = buf.getvalue()
 
-                new_ref = save_asset(
+                new_ref = await save_asset(
                     res_bytes,
                     "image/jpeg",
                     metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "svg", "edited_from": storage_ref},
@@ -269,7 +269,7 @@ class TextOverlayTool(Tool):
         combined.save(buf, format="JPEG", quality=92)
         result_bytes = buf.getvalue()
 
-        new_ref = save_asset(
+        new_ref = await save_asset(
             result_bytes,
             "image/jpeg",
             metadata={"text_overlay": text, "placement": placement, "font_family": font_family, "backend": "pillow", "edited_from": storage_ref},

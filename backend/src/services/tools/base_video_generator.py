@@ -43,7 +43,7 @@ class BaseVideoGeneratorTool(Tool):
                 ok=False, data={}, error="prompt and source_image_storage_ref are required"
             )
 
-        loaded = load_asset(source_ref)
+        loaded = await load_asset(source_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {source_ref}")
         image_bytes, _mime_type = loaded
@@ -60,7 +60,7 @@ class BaseVideoGeneratorTool(Tool):
         except ProviderUnavailable as exc:
             return ToolResult(ok=False, data={}, error=exc.message)
 
-        storage_ref = save_asset(
+        storage_ref = await save_asset(
             result.video_bytes,
             result.mime_type,
             metadata={

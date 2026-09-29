@@ -25,7 +25,7 @@ async def onboard_brand(
         user_id=current_user.id, name=body.name, raw_facts=body.raw_facts,
         brand_id=body.brand_id, merge=False,
     )
-    return BrandMapper.to_response(brand)
+    return await BrandMapper.to_response(brand)
 
 
 @router.get("", response_model=list[BrandProfileResponse])
@@ -35,7 +35,7 @@ async def list_brands(
     """The current user's own brand DNA profiles (Tasks_Workflows.md #3) — the home page's
     Brand DNA settings panel real data source."""
     brands = await svc.list_brands(user_id=current_user.id)
-    return [BrandMapper.to_response(b) for b in brands]
+    return [await BrandMapper.to_response(b) for b in brands]
 
 
 @router.get("/{brand_id}", response_model=BrandProfileResponse)
@@ -43,7 +43,7 @@ async def get_brand(
     brand_id: str, svc: BrandDnaServiceDep, current_user: CurrentUserDep
 ) -> BrandProfileResponse:
     brand = await svc.get_brand(brand_id, user_id=current_user.id)
-    return BrandMapper.to_response(brand)
+    return await BrandMapper.to_response(brand)
 
 
 from fastapi import UploadFile
@@ -64,7 +64,7 @@ async def upload_brand_logo(
     brand = await svc.get_brand(brand_id, user_id=current_user.id)
     data = await file.read()
     mime = sniff_image_mime(data, file.content_type)
-    storage_ref = save_asset(data, mime, metadata={"brand_id": brand_id, "type": "brand_logo"})
+    storage_ref = await save_asset(data, mime, metadata={"brand_id": brand_id, "type": "brand_logo"})
     
     brand.logo_storage_ref = storage_ref
     await repo.add(brand)
@@ -83,7 +83,7 @@ async def upload_brand_font(
     brand = await svc.get_brand(brand_id, user_id=current_user.id)
     data = await file.read()
     mime = file.content_type or "font/ttf"
-    storage_ref = save_asset(data, mime, metadata={"brand_id": brand_id, "font_family": font_family})
+    storage_ref = await save_asset(data, mime, metadata={"brand_id": brand_id, "font_family": font_family})
     
     font_refs = dict(brand.font_storage_refs or {})
     font_refs[font_family] = storage_ref

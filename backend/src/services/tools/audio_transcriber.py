@@ -38,7 +38,7 @@ class AudioTranscriberTool(Tool):
         if not storage_ref:
             return ToolResult(ok=False, data={}, error="storage_ref is required")
 
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         audio_bytes, mime_type = loaded

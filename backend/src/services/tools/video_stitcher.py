@@ -42,7 +42,7 @@ class VideoStitcherTool(Tool):
             concat_lines = []
             for i, ref in enumerate(storage_refs):
                 ref = str(ref).strip()
-                loaded = load_asset(ref)
+                loaded = await load_asset(ref)
                 if loaded is None:
                     return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {ref}")
                 video_bytes, _mime = loaded
@@ -62,7 +62,7 @@ class VideoStitcherTool(Tool):
 
             stitched_bytes = output_path.read_bytes()
 
-        storage_ref = save_asset(
+        storage_ref = await save_asset(
             stitched_bytes, "video/mp4", metadata={"stitched_from": storage_refs}
         )
         return ToolResult(

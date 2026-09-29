@@ -54,7 +54,7 @@ async def _probe_video_dimensions(data: bytes) -> tuple[int | None, int | None]:
 async def check_format_technical(
     *, storage_ref: str, expected_aspect_ratio: str | None, text_area_max_pct: float | None = 20.0
 ) -> dict:
-    loaded = load_asset(storage_ref)
+    loaded = await load_asset(storage_ref)
     if loaded is None:
         return {"passed": False, "reason": f"no asset found for storage_ref {storage_ref}"}
     data, mime_type = loaded

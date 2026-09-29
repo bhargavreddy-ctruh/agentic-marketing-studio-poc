@@ -74,7 +74,7 @@ class CollabImageGeneratorTool(Tool):
 
         reference_images: list[tuple[bytes, str]] = []
         for ref in refs:
-            loaded = load_asset(str(ref))
+            loaded = await load_asset(str(ref))
             if loaded is None or not loaded[1].startswith("image/"):
                 return ToolResult(
                     ok=False, data={},
@@ -93,7 +93,7 @@ class CollabImageGeneratorTool(Tool):
         except ProviderUnavailable as exc:
             return ToolResult(ok=False, data={}, error=exc.message)
 
-        storage_ref = save_asset(
+        storage_ref = await save_asset(
             result.image_bytes,
             result.mime_type,
             metadata={

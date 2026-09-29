@@ -55,9 +55,9 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
     # to two separate vision calls that immediately re-encode it as base64 anyway.
     image_bytes, mime_type, image_url = None, None, None
     if element_type == "image":
-        image_url = public_url(storage_ref)
+        image_url = await public_url(storage_ref)
         if image_url is None:  # local-disk dev mode — no direct url, fall back to real bytes
-            loaded = load_asset(storage_ref)
+            loaded = await load_asset(storage_ref)
             if loaded is not None:
                 image_bytes, mime_type = loaded
 

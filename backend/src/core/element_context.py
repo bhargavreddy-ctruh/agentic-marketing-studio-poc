@@ -48,7 +48,7 @@ def _downscale_thumbnail(image_bytes: bytes, mime_type: str) -> tuple[bytes, str
         return image_bytes, mime_type
 
 
-def build_element_context_blocks(
+async def build_element_context_blocks(
     element: dict[str, Any], *, thumbnail: bool = True
 ) -> list[dict[str, Any]]:
     """Builds ONE element's context as a content-block list: a text block with its real JSON
@@ -68,7 +68,7 @@ def build_element_context_blocks(
         {"type": "text", "text": f"Element (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"}
     ]
     if kind == "image" and ref:
-        loaded = load_asset(ref)
+        loaded = await load_asset(ref)
         if loaded is not None:
             image_bytes, mime_type = loaded
             if thumbnail:
