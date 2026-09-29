@@ -19,6 +19,6 @@ If a required tool fails or you cannot fulfill the request, ignore the schema be
     "alternative headline 1",
     "alternative headline 2"
   ],
-  "hook_strategy": "brief rationale on how this angle engages the target audience"
+  "hook_strategy": "brief rationale (1-2 sentences, under ~300 characters) on how this angle engages the target audience"
 }
 </output_format>

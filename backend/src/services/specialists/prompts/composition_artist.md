@@ -24,7 +24,7 @@ Return this JSON AND you MUST also call the required tools to execute your task 
 If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
 
 {
-  "notes": "Brief summary of the edit you applied or the brief you wrote."
+  "notes": "Brief summary (1-2 sentences, under ~300 characters) of the edit you applied or the brief you wrote."
 }
 </output_format>
 

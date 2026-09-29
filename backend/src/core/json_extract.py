@@ -10,6 +10,50 @@ import re
 from typing import Any
 
 
+def _close_truncated_json(text: str) -> str | None:
+    """Real, live-found failure (2026-09-30, palette_strategist): a verbose model response ran
+    past its token budget MID-STRING, cutting the response off before the JSON object's closing
+    quote/brace ever arrived — every candidate above requires a genuinely complete, balanced
+    structure, so a truncated-but-otherwise-real answer got discarded entirely instead of used.
+    This walks the text character-by-character (respecting escapes, so a `\\"` inside a string
+    never mistakenly counts as the string's end) and closes whatever was still open when the text
+    ran out: an unterminated string first, then any still-open `{`/`[` in reverse order. It never
+    invents content — only closes structure that's already there — so a genuinely malformed
+    response (mismatched brackets, garbage before any `{`) still correctly fails to parse and
+    falls through to the real error below, same as before this existed."""
+    if "{" not in text:
+        return None
+    repaired = text[text.index("{"):]
+
+    in_string = False
+    escape = False
+    stack: list[str] = []
+    for ch in repaired:
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]" and stack:
+            stack.pop()
+
+    if not in_string and not stack:
+        return None  # already balanced — nothing to repair, let the real candidates handle it
+
+    if in_string:
+        repaired += '"'
+    for opener in reversed(stack):
+        repaired += "}" if opener == "{" else "]"
+    return repaired
+
+
 def extract_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
@@ -29,6 +73,13 @@ def extract_json(text: str) -> dict[str, Any]:
     brace = re.search(r"\{[\s\S]*\}", text)
     if brace:
         candidates.append(brace.group(0))
+
+    # Last resort, tried only after every genuinely-complete candidate above has failed (checked
+    # further down) — repairing truncated structure is a real degrade, not the preferred path.
+    repair_source = fence.group(1).strip() if fence and fence.group(1).strip() else text
+    repaired = _close_truncated_json(repair_source)
+    if repaired:
+        candidates.append(repaired)
 
     last_error: Exception | None = None
     decoder = json.JSONDecoder()
