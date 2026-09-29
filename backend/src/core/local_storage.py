@@ -98,6 +98,25 @@ async def _get_metadata(storage_ref: str) -> AssetMetadataModel | None:
         return result.scalar_one_or_none()
 
 
+async def get_metadata_batch(storage_refs: list[str]) -> dict[str, AssetMetadataModel]:
+    """Real, live-found incident (2026-09-30): rendering a canvas with N elements used to call
+    `public_url()`/`_text_content()` for each one via `asyncio.gather` — N simultaneous DB
+    sessions, each checking out its own connection from Supabase's Session Pooler at once. A
+    canvas with more elements than the pooler's `pool_size` (15) genuinely exhausted it
+    (`InternalError: max clients reached in session mode`), a real 500 on a live deploy. One
+    query, one connection, for however many refs a caller actually needs — used by
+    `mappers/canvas_mapper.py` to resolve an entire canvas state's worth of urls/mime-types in a
+    single round trip instead of one per element."""
+    refs = [r for r in set(storage_refs) if r]
+    if not refs:
+        return {}
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(AssetMetadataModel).where(AssetMetadataModel.storage_ref.in_(refs))
+        )
+        return {row.storage_ref: row for row in result.scalars().all()}
+
+
 async def load_asset(storage_ref: str) -> tuple[bytes, str] | None:
     """Returns (bytes, mime_type) for a storage_ref, or None if it doesn't exist."""
     meta = await _get_metadata(storage_ref)
