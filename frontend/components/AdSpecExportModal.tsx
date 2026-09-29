@@ -43,7 +43,7 @@ export default function AdSpecExportModal({ elementId, isOpen, onClose }: AdSpec
       <div className="relative w-full max-w-2xl rounded-2xl border border-surface-700 bg-surface-900 p-6 shadow-2xl">
         <CloseButton onClose={onClose} />
         <div className="flex items-center border-b border-surface-800 pb-3 mb-4">
-          <h3 className="text-base font-semibold text-white">Export Platform Ad Spec Presets</h3>
+          <h3 className="text-base font-semibold text-surface-50">Export Platform Ad Spec Presets</h3>
         </div>
 
         {!exports ? (
@@ -73,14 +73,14 @@ export default function AdSpecExportModal({ elementId, isOpen, onClose }: AdSpec
               {Object.entries(exports).map(([key, item]) => (
                 <div key={key} className="rounded-xl border border-surface-700 bg-surface-800/80 p-3 flex flex-col justify-between">
                   <div>
-                    <span className="text-xs font-semibold text-white block">{item.spec_name}</span>
+                    <span className="text-xs font-semibold text-surface-50 block">{item.spec_name}</span>
                     <span className="text-[11px] text-surface-400 block">{item.width} x {item.height} px</span>
                   </div>
                   <a
                     href={`/api/v1/canvas/assets/${item.storage_ref}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="mt-3 block text-center rounded-lg bg-surface-700 hover:bg-surface-600 py-1.5 text-xs text-white transition-colors"
+                    className="mt-3 block text-center rounded-lg bg-surface-700 hover:bg-surface-600 py-1.5 text-xs text-surface-50 transition-colors"
                   >
                     Download Asset
                   </a>

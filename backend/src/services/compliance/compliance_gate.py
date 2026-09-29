@@ -18,7 +18,7 @@ feedback, never blind re-rolling, always capped" pattern already used elsewhere 
 from __future__ import annotations
 
 from ...core.exceptions import NotFoundError
-from ...core.local_storage import load_asset
+from ...core.local_storage import load_asset, public_url
 from ...core.middleware.logging import get_logger
 from ...models.base import async_session_factory
 from ...providers.observability.langsmith import trace, traceable
@@ -47,11 +47,19 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
 
     # Real vision for images (Memory.md, Phase 4) — video elements fall back to text-only
     # reasoning (no frame-extraction pass built yet; a real, disclosed scope boundary, not hidden).
-    image_bytes, mime_type = None, None
+    #
+    # Real, live-found latency win (2026-09-29, per an explicit user ask to reduce latency by
+    # passing URL-based images to the LLM wherever possible): when this asset already has a real
+    # Cloudinary url, pass THAT straight through to both checkers instead of downloading the bytes
+    # here via `load_asset()` — this used to unconditionally fetch the full image just to hand it
+    # to two separate vision calls that immediately re-encode it as base64 anyway.
+    image_bytes, mime_type, image_url = None, None, None
     if element_type == "image":
-        loaded = load_asset(storage_ref)
-        if loaded is not None:
-            image_bytes, mime_type = loaded
+        image_url = public_url(storage_ref)
+        if image_url is None:  # local-disk dev mode — no direct url, fall back to real bytes
+            loaded = load_asset(storage_ref)
+            if loaded is not None:
+                image_bytes, mime_type = loaded
 
     # We retrieve the original user_message from the turn history in the DB, but since the compliance
     # gate doesn't easily have it passed in, we can fetch it via the element's session ID if needed.
@@ -76,11 +84,11 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
 
     brand = await check_brand_consistency(
         generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
-        user_id=user_id,
+        image_url=image_url, user_id=user_id,
     )
     visual = await check_visual_fidelity(
         generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
-        user_id=user_id,
+        image_url=image_url, user_id=user_id,
     )
     format_qa = await check_format_technical(
         storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")

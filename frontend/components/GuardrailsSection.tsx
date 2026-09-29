@@ -163,12 +163,12 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
       {/* Header */}
       <div className="flex items-center justify-between border-b border-surface-700/50 p-4 pr-14 shrink-0">
         <div>
-          <h2 className="text-base font-semibold text-white">DNA & Guardrails</h2>
+          <h2 className="text-base font-semibold text-surface-50">DNA & Guardrails</h2>
           <p className="mt-0.5 text-xs text-surface-400">Strict rules the AI must follow when generating content.</p>
         </div>
         <button
           onClick={fetchGuardrails}
-          className="rounded-lg p-1.5 text-surface-400 transition-colors hover:bg-surface-800 hover:text-white"
+          className="rounded-lg p-1.5 text-surface-400 transition-colors hover:bg-surface-800 hover:text-surface-50"
           title="Reset / Refresh rules"
           aria-label="Reset / Refresh rules"
         >
@@ -184,7 +184,7 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
           enforcement. Ported from `poc/frontend/components/GuardrailsSection.tsx`. */}
       <div className="mx-4 mt-3 shrink-0 flex items-center justify-between rounded-lg border border-surface-700/50 bg-surface-800/30 px-3 py-2">
         <div>
-          <p className="text-xs font-medium text-white">Guardrails enforcement</p>
+          <p className="text-xs font-medium text-surface-50">Guardrails enforcement</p>
           <p className="text-[11px] text-surface-400">
             {guardrailsEnabled ? "Rules are enforced on every generation." : "Rules are OFF — nothing below is enforced right now."}
           </p>
@@ -257,7 +257,7 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
                           }
                         }}
                         rows={2}
-                        className="w-full resize-none rounded-lg border border-brand-500 bg-surface-900 px-2 py-1.5 text-xs text-white focus:outline-none"
+                        className="w-full resize-none rounded-lg border border-brand-500 bg-surface-900 px-2 py-1.5 text-xs text-surface-50 focus:outline-none"
                       />
                       <div className="flex gap-2">
                         <button
@@ -281,7 +281,7 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
                 </div>
                 {editingId !== r.id && (
                   <div className="flex flex-shrink-0 flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity pt-1">
-                    <button onClick={() => startEdit(r)} className="p-1 text-surface-400 hover:text-white" title="Edit">
+                    <button onClick={() => startEdit(r)} className="p-1 text-surface-400 hover:text-surface-50" title="Edit">
                       <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
                       </svg>
@@ -327,7 +327,7 @@ export default function GuardrailsSection({ sessionId }: GuardrailsSectionProps)
             placeholder="Add a new rule..."
             value={newRuleText}
             onChange={(e) => setNewRuleText(e.target.value)}
-            className="flex-1 rounded-lg border border-surface-700 bg-surface-800 px-3 py-1.5 text-xs text-white placeholder-surface-500 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            className="flex-1 rounded-lg border border-surface-700 bg-surface-800 px-3 py-1.5 text-xs text-surface-50 placeholder-surface-500 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
             onKeyDown={(e) => e.key === "Enter" && handleAdd()}
           />
           <button

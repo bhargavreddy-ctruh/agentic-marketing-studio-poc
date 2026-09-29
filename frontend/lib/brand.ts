@@ -11,6 +11,11 @@ export interface BrandProfile {
   guardrails: Record<string, unknown>;
   indexed: boolean;
   created_at: string;
+  logo_storage_ref: string | null;
+  font_storage_refs: Record<string, string>;
+  // Real, direct Cloudinary CDN url for the logo (2026-09-29, latency win) — null in local-disk
+  // dev mode or before a logo exists.
+  logo_url: string | null;
 }
 
 /** The current user's own onboarded brands (Tasks_Workflows.md #3) — the home page's Brand DNA

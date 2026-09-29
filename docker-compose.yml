@@ -8,7 +8,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend/poc.db:/app/poc.db
       - ./backend/var:/app/var
       # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
       # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
@@ -16,8 +15,13 @@ services:
       # volume still gets the caching benefit (fast on every restart AFTER the first) on whatever
       # machine this actually runs on, with zero dependency on host state.
       - hf_cache:/root/.cache/huggingface
+    # Real, live-found incident (2026-09-29): this used to point at `./backend/.env`, a SECOND
+    # env file separate from the one `${VAR}` substitution below always reads (Compose only ever
+    # auto-loads `.env` next to this file for substitution, never `backend/.env`) — a deploy that
+    # only filled in `backend/.env` silently ran with an empty DATABASE_URL and no error. One file
+    # now, read by both mechanisms: `.env.example` at the repo root, copied to `.env` here.
     env_file:
-      - ./backend/.env
+      - ./.env
     environment:
       # Real, live-found root cause (2026-09-26) of the sentence-transformers download hang (0%
       # CPU, no progress): HuggingFace's newer XET transfer backend never completed inside a
@@ -30,26 +34,64 @@ services:
       # LAN IP or a since-expired Cloudflare quick-tunnel URL). See `.env.example` at the repo
       # root. Defaults to localhost:3000 if unset, for a same-machine dev run.
       FRONTEND_ORIGINS: "${PUBLIC_FRONTEND_URL:-http://localhost:3000}"
-      # Free-tier deploy (2026-09-28): overridable via the root .env's DATABASE_URL, e.g. a
-      # Supabase Postgres DSN (`postgresql+asyncpg://...`) — defaults to the same local SQLite
-      # file this always used, so an existing deploy with nothing set keeps working unchanged.
-      DATABASE_URL: "${DATABASE_URL:-sqlite+aiosqlite:////app/poc.db}"
+      # Real, live-found incident (2026-09-29): the old SQLite fallback here
+      # (`${DATABASE_URL:-sqlite+aiosqlite:////app/poc.db}`) meant a deploy that forgot to set
+      # DATABASE_URL in the root `.env` silently started against a separate, empty local SQLite
+      # database instead of the real Supabase Postgres one — no error, no warning, just a backend
+      # that "worked" (login/register succeeded) against the wrong store, with canvas/session data
+      # invisible until the missing `.env` was found by hand. Postgres/Supabase is the only real
+      # supported store now (Rules.md section 6 — no silent fallback masking a real deploy
+      # mistake): `:?` makes Compose refuse to start at all with a clear error instead of quietly
+      # substituting SQLite, the same "deterministic beats a maybe" principle already used
+      # elsewhere in this app.
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required — set it in the root .env (see .env.example)}"
       # Same free-tier deploy — unset (default) keeps writing generated assets to the bind-mounted
-      # `./backend/var` below; set in the root .env to move asset storage to Cloudinary instead
-      # (see backend/.env.example's own CLOUDINARY_URL comment for the exact format).
+      # `./backend/var` below; set in .env to move asset storage to Cloudinary instead (see
+      # .env.example's own CLOUDINARY_URL comment for the exact format). Genuinely optional
+      # (unlike DATABASE_URL/OLLAMA_BASE_URL below) — local disk is a real, working fallback, not
+      # a silently-wrong one, so this one keeps its default.
       CLOUDINARY_URL: "${CLOUDINARY_URL:-}"
+      # Product/Brand crawler (2026-09-28) — Ollama revived, scoped ONLY to crawler extraction
+      # (services/knowledge/{brand,product}_dna_service.py's crawl_*_from_url methods). General
+      # LLM reasoning stays Groq->Replicate (router.py), untouched, so backend does NOT hard-depend
+      # on the `ollama` service below — OllamaProvider degrades gracefully to that fallback chain
+      # if Ollama is slow to pull its model on first start or briefly unavailable.
+      #
+      # Real, live-found instruction (2026-09-29, same incident/fix as DATABASE_URL above): no
+      # silent fallback here either — `.env` is the one and only place every value this backend
+      # needs (database, LangSmith, Ollama) comes from. `:?` makes a missing value fail loudly at
+      # `docker compose up` instead of quietly defaulting.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:?OLLAMA_BASE_URL is required — set it in .env (see .env.example)}"
     networks:
       - app-network
     restart: unless-stopped
 
+  # Product/Brand crawler's extraction model only (2026-09-28 revival) — NOT used for general
+  # reasoning, which remains entirely Groq->Replicate. See backend service's OLLAMA_BASE_URL above.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ams-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - app-network
+    restart: unless-stopped
+    # Pulls gemma2:2b on first start only (a no-op, fast, on every later start since it's already
+    # present in the ollama_data volume).
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 5 && ollama pull ${OLLAMA_MODEL:-gemma2:2b} && wait"]
+
   frontend:
     build:
-      # Switched (2026-09-26, explicit user correction) from ./frontend (poc/frontend, the OLDER
-      # snapshot missing this session's DNA-tab fix/guardrails-toggle/product-grouping work) to
-      # the sibling directory one level up — the one actually used and fixed throughout this
-      # session. Its own Dockerfile/.dockerignore/next.config.js "output: standalone" were added
-      # to match, mirroring poc/frontend's exactly.
-      context: ../frontend
+      # Real, live-found deploy blocker (2026-09-29): this pointed at `../frontend`, a sibling
+      # directory ONE LEVEL ABOVE this repo — confirmed not tracked by git at all, so a fresh
+      # `git clone`/`git reset --hard origin/main` on a real EC2 instance (exactly what this
+      # repo's own CI/CD does) would never have that directory, and the frontend build would fail
+      # outright. Pointed back at the repo's own tracked `./frontend` (poc/frontend) — 45 files,
+      # already has its own correct `Dockerfile`/`.dockerignore`/`next.config.js` ("output:
+      # standalone"), fully deploy-ready as-is. Any newer frontend work that only ever lived in
+      # that untracked sibling directory needs to be committed into THIS `frontend/` before it can
+      # reach a real deploy — it was never reachable from a fresh clone regardless of this setting.
+      context: ./frontend
       dockerfile: Dockerfile
       args:
         # Baked into the client JS bundle at build time (NEXT_PUBLIC_* vars run in the BROWSER,
@@ -82,3 +124,4 @@ networks:
 
 volumes:
   hf_cache:
+  ollama_data:

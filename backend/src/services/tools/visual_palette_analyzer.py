@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
-from ...core.local_storage import load_asset
+from ...core.local_storage import asset_mime_type, load_asset, public_url
 from ...providers.llm.vision import complete_with_vision
 from .base import Tool, ToolResult
 from .registry import register_tool
@@ -57,20 +57,33 @@ class VisualPaletteAnalyzerTool(Tool):
         if not storage_ref:
             return ToolResult(ok=False, data={}, error="storage_ref is required")
 
-        loaded = load_asset(storage_ref)
-        if loaded is None and context_ref and context_ref != storage_ref:
+        # Real, live-found latency win (2026-09-29): checking the metadata sidecar's mime_type
+        # (a plain local file read, `asset_mime_type()`) is enough to validate the ref and decide
+        # what to send the vision model — no need to download the actual bytes at all when a
+        # direct Cloudinary url exists (`public_url()`), which `load_asset()` would otherwise do
+        # unconditionally via its own `httpx.get`.
+        mime_type = asset_mime_type(storage_ref)
+        if mime_type is None and context_ref and context_ref != storage_ref:
             storage_ref = context_ref
-            loaded = load_asset(storage_ref)
-        if loaded is None:
+            mime_type = asset_mime_type(storage_ref)
+        if mime_type is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
-        image_bytes, mime_type = loaded
         if not mime_type.startswith("image/"):
             return ToolResult(ok=False, data={}, error=f"storage_ref {storage_ref} is not an image")
+
+        image_url = public_url(storage_ref)
+        image_bytes: bytes | None = None
+        if image_url is None:  # local-disk dev mode — no direct url, fall back to real bytes
+            loaded = load_asset(storage_ref)
+            if loaded is None:
+                return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
+            image_bytes, mime_type = loaded
 
         try:
             result = await complete_with_vision(
                 image_bytes=image_bytes,
                 mime_type=mime_type,
+                image_url=image_url,
                 system=_SYSTEM_PROMPT,
                 question="Describe the color palette, mood, and lighting of this image.",
                 max_tokens=300,

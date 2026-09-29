@@ -11,14 +11,68 @@ from __future__ import annotations
 
 import uuid
 
-from ...core.exceptions import Forbidden, NotFoundError
+import httpx
+
+from ...core.events import emit
+from ...core.exceptions import Forbidden, NotFoundError, ProviderUnavailable
+from ...core.json_extract import extract_json
+from ...core.local_storage import save_asset
 from ...core.middleware.logging import get_logger
+from ...core.mime_sniff import sniff_image_mime
 from ...models.brand_profile import BrandProfileModel
+from ...models.session import SessionModel
+from ...providers.crawlers.firecrawl_provider import scrape_url_via_firecrawl
+from ...providers.crawlers.playwright_scraper import scrape_url
+from ...providers.crawlers.types import ScrapedPage
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
+from ...providers.llm.base import ModelTier
+from ...providers.llm.ollama import get_ollama_provider
+from ...providers.llm.router import get_llm_provider
 from ...repositories.base import BrandRepository
 from .guardrail_synthesizer import synthesize_guardrails
 
 log = get_logger(__name__)
+
+_FONT_MIME_BY_EXT = {
+    "woff2": "font/woff2", "woff": "font/woff", "ttf": "font/ttf", "otf": "font/otf",
+}
+
+_CRAWL_SYSTEM_PROMPT = """You are the Brand DNA extractor, reading a scraped web page (a company's
+site, About page, or storefront). Extract what's actually present — never invent facts.
+
+Return ONLY JSON:
+{
+  "name": "the brand/company name, or empty string if unclear",
+  "mission": "one or two sentences, or empty string",
+  "tone_of_voice": ["short adjectives, e.g. Bold, Playful"],
+  "target_audience": "short phrase, or empty string",
+  "value_props": ["short phrases"]
+}
+"""
+
+
+async def _scrape_with_fallback(url: str) -> ScrapedPage:
+    try:
+        return await scrape_url(url)
+    except ProviderUnavailable as exc:
+        log.warning("crawler_playwright_failed_falling_back_to_firecrawl", extra={"_extra_url": url, "_extra_error": str(exc)})
+        return await scrape_url_via_firecrawl(url)
+
+
+async def _extract_brand_facts(page: ScrapedPage) -> dict:
+    context = f"Page title: {page.title}\nURL: {page.url}\nVisible text:\n{page.text_content}"
+    try:
+        result = await get_ollama_provider().complete(
+            tier=ModelTier.TIER_1, system=_CRAWL_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": context}], max_tokens=1024,
+        )
+    except ProviderUnavailable as exc:
+        log.warning("crawler_ollama_failed_falling_back_to_llm_router", extra={"_extra_error": str(exc)})
+        result = await get_llm_provider().complete(
+            tier=ModelTier.TIER_1, system=_CRAWL_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": context}], max_tokens=1024,
+        )
+    return extract_json(result.text)
 
 
 def _build_index_text(name: str, raw_facts: dict, guardrails: dict) -> str:
@@ -83,6 +137,82 @@ class BrandDnaService:
         )
         brand.indexed = True
         return await self._brands.add(brand)
+
+    async def crawl_brand_from_url(self, *, url: str, session: SessionModel) -> BrandProfileModel:
+        """Brand crawler section (2026-09-28) — scrapes `url` (Playwright, Firecrawl on failure),
+        extracts brand facts (Ollama gemma2:2b primary, Groq/Replicate fallback via
+        `get_llm_provider()`), then reuses `onboard_brand` exactly as the manual DNA-tab form does:
+        updates the session's ONE existing brand row in place if it already has one, never spawns a
+        second brand for the same session (same "one brand per session" rule the rest of this app
+        already enforces)."""
+        emit("crawler_started", session_id=session.id, url=url, url_type="brand")
+        try:
+            page = await _scrape_with_fallback(url)
+            facts = await _extract_brand_facts(page)
+            name = str(facts.get("name") or "Unnamed brand").strip()[:255] or "Unnamed brand"
+            raw_facts = {
+                "mission": facts.get("mission", ""),
+                "tone_of_voice": facts.get("tone_of_voice", []),
+                "target_audience": facts.get("target_audience", ""),
+                "value_props": facts.get("value_props", []),
+                "dominant_colors": page.dominant_colors,
+            }
+            brand = await self.onboard_brand(
+                user_id=session.user_id, name=name, raw_facts=raw_facts,
+                brand_id=session.brand_profile_id,
+            )
+            # Real, live-found gap (2026-09-28, explicit user report: "brand dna scraper is not
+            # scraping the brand logo") — onboard_brand only ever persists raw_facts text; nothing
+            # populated `logo_storage_ref` (the same field the manual "Brand Logo (PNG)" upload
+            # sets). Best-effort: a missing/unreachable logo never fails the whole crawl.
+            if page.logo_url:
+                try:
+                    async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                        resp = await client.get(page.logo_url)
+                        resp.raise_for_status()
+                        logo_bytes = resp.content
+                    mime_type = sniff_image_mime(logo_bytes)
+                    storage_ref = save_asset(
+                        logo_bytes, mime_type,
+                        metadata={"source": "brand_crawl", "brand_id": brand.id, "url": page.logo_url},
+                    )
+                    brand.logo_storage_ref = storage_ref
+                    brand = await self._brands.add(brand)
+                except Exception as exc:
+                    log.warning("crawler_logo_download_failed", extra={"_extra_url": page.logo_url, "_extra_error": str(exc)})
+
+            # Real, live-found gap (2026-09-28, explicit user report: "it should extract font
+            # also from the website") — same reasoning as the logo above: `font_storage_refs` is a
+            # real, existing field (set by the manual "Custom Font (TTF/OTF)" upload) that a crawl
+            # never populated. `page.fonts` is real @font-face rules the site itself declares, not
+            # a guess — cap at 2 so one page with a huge type system doesn't bloat storage.
+            if page.fonts:
+                font_refs = dict(brand.font_storage_refs or {})
+                for family, font_url in page.fonts[:2]:
+                    try:
+                        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                            resp = await client.get(font_url)
+                            resp.raise_for_status()
+                            font_bytes = resp.content
+                        content_type = resp.headers.get("content-type", "").split(";")[0].strip()
+                        if not content_type or content_type == "application/octet-stream":
+                            content_type = _FONT_MIME_BY_EXT.get(font_url.rsplit(".", 1)[-1].lower().split("?")[0], "font/ttf")
+                        storage_ref = save_asset(
+                            font_bytes, content_type,
+                            metadata={"source": "brand_crawl", "brand_id": brand.id, "url": font_url, "family": family},
+                        )
+                        font_refs[family] = storage_ref
+                    except Exception as exc:
+                        log.warning("crawler_font_download_failed", extra={"_extra_url": font_url, "_extra_error": str(exc)})
+                if font_refs != (brand.font_storage_refs or {}):
+                    brand.font_storage_refs = font_refs
+                    brand = await self._brands.add(brand)
+
+            emit("crawler_completed", session_id=session.id, url=url, url_type="brand", brand_profile_id=brand.id)
+            return brand
+        except Exception as exc:
+            emit("crawler_step", session_id=session.id, url=url, status="failed", error=str(exc))
+            raise
 
     async def get_brand(self, brand_id: str, *, user_id: str) -> BrandProfileModel:
         brand = await self._brands.get(brand_id)

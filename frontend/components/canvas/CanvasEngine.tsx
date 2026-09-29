@@ -803,7 +803,7 @@ export default function CanvasEngine({
               <span className="text-sm">
                 {activeSpecialist?.agent.avatar || (pendingGeneration.kind ? PENDING_ICON_BY_KIND[pendingGeneration.kind] : "✨")}
               </span>
-              <span className="text-xs font-medium text-white tracking-wide">
+              <span className="text-xs font-medium text-surface-50 tracking-wide">
                 {activeSpecialist ? activeSpecialist.agent.name : `Generating ${pendingGeneration.kind || "Asset"}`}
               </span>
               <span className="relative flex h-2 w-2">
@@ -984,7 +984,7 @@ export default function CanvasEngine({
             className={`flex items-center justify-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium transition-all ${
               mode === "pan"
                 ? "bg-brand-500 text-white shadow-[0_0_12px_rgba(99,102,241,0.5)]"
-                : "text-surface-400 hover:bg-surface-800/60 hover:text-white"
+                : "text-surface-400 hover:bg-surface-800/60 hover:text-surface-50"
             }`}
             title="Select & Pan"
           >
@@ -998,7 +998,7 @@ export default function CanvasEngine({
             className={`flex items-center justify-center gap-1.5 rounded-xl px-2 py-1.5 text-xs font-medium transition-all ${
               mode === "draw"
                 ? "bg-brand-500 text-white shadow-[0_0_12px_rgba(99,102,241,0.5)]"
-                : "text-surface-400 hover:bg-surface-800/60 hover:text-white"
+                : "text-surface-400 hover:bg-surface-800/60 hover:text-surface-50"
             }`}
             title="Freehand Draw"
           >
@@ -1103,7 +1103,7 @@ export default function CanvasEngine({
               className={`flex items-center justify-center gap-1.5 w-full rounded-xl px-2 py-1.5 text-xs font-medium transition-all ${
                 showGroups
                   ? "bg-brand-500 text-white shadow-[0_0_12px_rgba(99,102,241,0.5)]"
-                  : "text-surface-400 hover:bg-surface-800/60 hover:text-white"
+                  : "text-surface-400 hover:bg-surface-800/60 hover:text-surface-50"
               }`}
             >
               <span>Group by product</span>

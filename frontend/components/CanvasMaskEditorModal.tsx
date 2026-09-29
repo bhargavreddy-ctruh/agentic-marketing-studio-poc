@@ -110,7 +110,7 @@ export default function CanvasMaskEditorModal({
       <div className="relative w-full max-w-xl rounded-2xl border border-surface-700 bg-surface-900 p-6 shadow-2xl">
         <CloseButton onClose={onClose} />
         <div className="flex items-center border-b border-surface-800 pb-3 mb-4">
-          <h3 className="text-base font-semibold text-white">Brush-Mask Inpainting Editor</h3>
+          <h3 className="text-base font-semibold text-surface-50">Brush-Mask Inpainting Editor</h3>
         </div>
 
         <div className="space-y-4">
@@ -162,7 +162,7 @@ export default function CanvasMaskEditorModal({
               placeholder="e.g. Change the highlighted sneakers to bright red leather"
               value={instruction}
               onChange={(e) => setInstruction(e.target.value)}
-              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
+              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-50 focus:border-brand-500 focus:outline-none"
             />
           </div>
         </div>

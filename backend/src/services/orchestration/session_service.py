@@ -6,6 +6,7 @@ LangGraph graph. This is business logic — it belongs in services/, not in a ro
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 
 from ...core.approval import is_approval, is_cancel
@@ -44,6 +45,10 @@ from .graph import get_graph
 # variable holding it. Kept at module scope (not per-instance) since SessionService itself is
 # constructed fresh per request; the task must outlive that.
 _background_tasks: set[asyncio.Task] = set()
+
+# Product/Brand crawler turn auto-detection (2026-09-28) — a plain URL regex, not a full RFC 3986
+# parser: good enough to catch a pasted link in chat without pulling in a heavier dependency.
+_URL_RE = re.compile(r"https?://[^\s]+")
 _RUNNING_TURNS: dict[str, asyncio.Task] = {}
 log = get_logger(__name__)
 
@@ -238,6 +243,24 @@ class SessionService:
         session = await self._get_owned_session(session_id, user_id=user_id)
         if not picked_option_id and not free_text:
             raise ValidationFailed("Provide either picked_option_id or free_text")
+
+        # Product/Brand crawler turn auto-detection (2026-09-28) — a URL in the free text is a
+        # distinct, higher-priority signal than any of the gates below, but this is fire-and-forget
+        # (same dispatch pattern as the dedicated POST /{session_id}/crawl route): the crawl runs
+        # as a genuinely detached background task and the turn proceeds normally below, exactly as
+        # if no URL had been mentioned. Progress/results surface purely via SSE crawler_* events
+        # alongside the turn's own narration — never blocks this response.
+        if free_text:
+            url_match = _URL_RE.search(free_text)
+            if url_match:
+                url = url_match.group(0).rstrip(").,;\"'")
+                crawled_urls = set(session.brief.get("crawled_urls") or [])
+                if url not in crawled_urls:
+                    from ..crawlers.crawl_runner import run_crawl_and_ingest
+
+                    task = asyncio.create_task(run_crawl_and_ingest(session_id, url))
+                    _background_tasks.add(task)
+                    task.add_done_callback(_background_tasks.discard)
 
         # A real, chat-actionable resolution for a staged per-element direct edit (2026-09-22, see
         # the matching comment where `_pending_edit_approval_id` is set in `_run_turn_inner`) —
@@ -591,7 +614,7 @@ class SessionService:
                 if el.element_type == "audio":
                     description = await self._describe_uploaded_audio(el.storage_ref)
                 elif el.element_type == "image":
-                    description = await self._describe_uploaded_image(el.storage_ref)
+                    description = await self._describe_uploaded_image(el.storage_ref, el.product_name)
             
             ref_context.append({
                 "id": el.id,
@@ -1011,22 +1034,49 @@ class SessionService:
         return " — ".join(parts)
 
     @staticmethod
-    async def _describe_uploaded_image(storage_ref: str) -> str | None:
-        """Real, local vision inference for an image element this app did NOT itself generate, or 
-        that lost its prompt. Fails safely to None if the asset is missing or the provider fails."""
-        from ...core.local_storage import load_asset
+    async def _describe_uploaded_image(storage_ref: str, product_name: str | None = None) -> str | None:
+        """Real, local vision inference for an image element this app did NOT itself generate, or
+        that lost its prompt. Fails safely to None if the asset is missing or the provider fails.
+
+        `product_name` (2026-09-28, real, live-found bug: a "Nothing Phone (4b)" back-panel photo
+        — camera module + Glyph LED array, no screen/front face — got captioned as a "smartphone
+        case" by a small, free-tier vision model with a fully generic prompt and zero knowledge of
+        what product was expected, which then made `shot_planner` wrongly refuse a real request
+        against this session's own guardrails. Product Grouping already tags a canvas element with
+        its real product name (`CanvasElementModel.product_name`), so the caller passes it straight
+        through here — grounding the prompt costs nothing and gives the model real context instead
+        of guessing blind. `None` (an untagged upload) keeps today's fully generic prompt."""
+        from ...core.local_storage import asset_mime_type, load_asset, public_url
         from ...providers.llm.vision import complete_with_vision
 
-        loaded = load_asset(storage_ref)
-        if loaded is None:
-            return None
-        image_bytes, mime_type = loaded
+        # Real, live-found latency win (2026-09-29): skip downloading the bytes entirely when
+        # this asset already has a direct Cloudinary url — a plain local metadata read
+        # (`asset_mime_type`) is enough to confirm the ref is real and get its mime type.
+        image_url = public_url(storage_ref)
+        image_bytes: bytes | None = None
+        if image_url is not None:
+            mime_type = asset_mime_type(storage_ref)
+            if mime_type is None:
+                return None
+        else:
+            loaded = load_asset(storage_ref)
+            if loaded is None:
+                return None
+            image_bytes, mime_type = loaded
+        question = "Describe this image in detail, focusing on the main visual subjects, objects, colors, and setting."
+        if product_name:
+            question = (
+                f"This image is expected to show the product '{product_name}'. Describe what you "
+                f"actually see in detail — the main visual subjects, objects, colors, and setting — "
+                f"and note explicitly whether it does or doesn't look like '{product_name}'."
+            )
         try:
             result = await complete_with_vision(
                 image_bytes=image_bytes,
                 mime_type=mime_type,
+                image_url=image_url,
                 system="You are a meticulous visual analyzer for a marketing team.",
-                question="Describe this image in detail, focusing on the main visual subjects, objects, colors, and setting."
+                question=question,
             )
             return result.text
         except Exception as exc:

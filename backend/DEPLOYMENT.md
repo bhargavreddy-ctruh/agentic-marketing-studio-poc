@@ -24,14 +24,16 @@ bottom.
 
 ### 1. Provision the EC2 instance
 
-- **Size**: `t3.small`/`t3.medium` (1-2 vCPU / 2-4 GB RAM) is enough — local Ollama was removed
-  (2026-09-28), so nothing on this instance needs to load a full LLM into RAM anymore; all
-  reasoning goes to Groq/Replicate. Go larger if you expect concurrent generation requests (the
-  heavy Python ML deps — torch, sentence-transformers, faster-whisper — still have their own
-  footprint even without Ollama).
+- **Size**: `t3.large`/`t3.xlarge` (2 vCPU / 8 GB RAM). Local Ollama was removed for general
+  reasoning on 2026-09-28, then revived on 2026-09-28 scoped ONLY to the Product/Brand crawler's
+  extraction step (`gemma2:2b`, a lightweight 2B model) — all other reasoning (specialists,
+  orchestrator, ideation) still goes to Groq/Replicate (`router.py`), untouched. `t3.small`/
+  `t3.medium` is enough if you disable the crawler entirely; go straight to real measured usage
+  before treating either number as final.
 - **AMI**: Amazon Linux 2023 or Ubuntu 22.04+, either works.
-- **Storage**: 15 GB+ EBS volume. Docker images and generated assets (`backend/var/`, if not
-  using Cloudinary) live on this disk — no Ollama model weights to account for anymore.
+- **Storage**: 15 GB+ EBS volume. Docker images, generated assets (`backend/var/`, if not using
+  Cloudinary), and the crawler's `gemma2:2b` weights (a few GB, in the named `ollama_data` volume)
+  live on this disk.
 - **Security group**: open port 22 (SSH, ideally restricted to a known IP range or a bastion —
   not `0.0.0.0/0`) and port 8000 (the backend API).
 - **Elastic IP**: attach one, so the instance's address doesn't change on stop/restart — CI's
@@ -60,31 +62,42 @@ cd ~/agentic-marketing-studio/poc
 (Use a GitHub deploy key or a fine-grained PAT with read-only access if the repo is private —
 the EC2 instance only ever needs to pull, never push.)
 
-### 4. Create the real env files (never committed — see `.gitignore`)
+### 4. Create the real env file (never committed — see `.gitignore`)
+
+There is exactly **one** env file, at the `poc/` root, next to `docker-compose.yml` — it's the
+only file Compose reads, for both `env_file:` and `${VAR}` substitution (2026-09-29, after a real
+incident where a second `backend/.env` file caused a deploy to silently run with a missing
+`DATABASE_URL` — see `docker-compose.yml`'s own comment on the `backend` service).
 
 ```bash
-cp backend/.env.example backend/.env
 cp .env.example .env
 ```
 
-Edit `backend/.env` — fill in the real API keys (`GROQ_API_KEY`, `OPENROUTER_API_KEY`,
-`REPLICATE_API_TOKEN`, etc.). Leave `LOCAL_LLM_BASE_URL`, `FRONTEND_ORIGINS`, and `DATABASE_URL`
-unset here — `docker-compose.yml` sets those itself for the container network.
-
-Edit `.env` (compose-level, at the `poc/` root) — set:
+Edit `.env` — set:
 ```
 PUBLIC_FRONTEND_URL=https://your-actual-frontend-domain.com
 PUBLIC_BACKEND_URL=https://your-actual-backend-domain.com
-OLLAMA_MODEL=llama3.1:8b
+DATABASE_URL=postgresql+asyncpg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
+OLLAMA_MODEL=gemma2:2b
 ```
+`DATABASE_URL` is **required** — `docker compose up` refuses to start at all without it, on
+purpose, rather than silently falling back to a local SQLite database no one is looking at.
+`OLLAMA_MODEL` only affects the crawler's extraction step — it has no effect on general chat/
+generation, which always uses Groq/Replicate regardless of this value.
 `PUBLIC_FRONTEND_URL` must match wherever the frontend is actually served from, or the backend
 will reject its requests via CORS.
+
+Real API keys (Groq, Replicate, HuggingFace, Cloudflare, Cloudinary, LangSmith, Firecrawl) are
+**not** set in this file at all — they're DB-managed via Supabase's `app_settings` table
+(`.env.example`'s bottom section has the exact key list + an INSERT template), applied live within
+`SETTINGS_POLL_INTERVAL_SECONDS` with no restart needed.
 
 ### 5. First manual start (confirms everything works before wiring up CI)
 
 ```bash
-docker compose up -d --build backend
+docker compose up -d --build backend ollama
 docker compose logs -f backend   # watch it come up; Ctrl-C to stop tailing
+docker compose logs -f ollama    # confirm gemma2:2b pulls successfully on first start
 curl http://localhost:8000/health
 ```
 
@@ -130,14 +143,14 @@ docker compose up -d --build backend ollama
 | Task | Command |
 |---|---|
 | Tail backend logs | `docker compose logs -f backend` |
-| Tail Ollama logs | `docker compose logs -f ollama` |
+| Tail crawler's Ollama logs | `docker compose logs -f ollama` |
 | Check container health | `docker compose ps` |
 | Restart without a rebuild | `docker compose restart backend` |
 | Free disk space (old images) | `docker image prune -f` |
 
 Data survives restarts and redeploys: the SQLite DB (`backend/poc.db`) and generated assets
-(`backend/var/`) are bind-mounted from the instance's own disk; the Ollama model weights live in
-the named `ollama_data` volume. Back up `backend/poc.db` and `backend/var/` periodically —
+(`backend/var/`) are bind-mounted from the instance's own disk; the crawler's `gemma2:2b` weights
+live in the named `ollama_data` volume. Back up `backend/poc.db` and `backend/var/` periodically —
 nothing here does that automatically.
 
 All required models are downloaded automatically — no manual step, ever:
@@ -149,7 +162,9 @@ All required models are downloaded automatically — no manual step, ever:
   added, it stays empty of the pre-baked models until first use (falls back to the old lazy
   download) — run `docker volume rm poc_hf_cache` (after stopping the stack) to force it to be
   reseeded from the image on the next `up`.
-- The Ollama LLM model auto-pulls on every container start (a no-op, fast, if already present).
+- The crawler's Ollama model (`gemma2:2b`) auto-pulls on every container start (a no-op, fast, if
+  already present) — used only by the Product/Brand crawler's extraction step; every other LLM
+  call in this app never touches Ollama.
 
 ## About the frontend
 

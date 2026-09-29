@@ -55,7 +55,7 @@ export default function StyleLockModal({ sessionId, isOpen, onClose }: StyleLock
       <div className="relative w-full max-w-md rounded-2xl border border-surface-700 bg-surface-900 p-6 shadow-2xl">
         <CloseButton onClose={onClose} />
         <div className="flex items-center border-b border-surface-800 pb-3 mb-4">
-          <h3 className="text-base font-semibold text-white">Campaign Style Lock</h3>
+          <h3 className="text-base font-semibold text-surface-50">Campaign Style Lock</h3>
         </div>
 
         {msg && (
@@ -72,7 +72,7 @@ export default function StyleLockModal({ sessionId, isOpen, onClose }: StyleLock
               placeholder="e.g., asset_abc123"
               value={styleRef}
               onChange={(e) => setStyleRef(e.target.value)}
-              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
+              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-50 focus:border-brand-500 focus:outline-none"
             />
             <p className="mt-1 text-[11px] text-surface-400">Lock aesthetic features from a previous tile across all new generations.</p>
           </div>
@@ -84,7 +84,7 @@ export default function StyleLockModal({ sessionId, isOpen, onClose }: StyleLock
               placeholder="e.g., 42"
               value={styleSeed}
               onChange={(e) => setStyleSeed(e.target.value ? Number(e.target.value) : "")}
-              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-white focus:border-brand-500 focus:outline-none"
+              className="w-full rounded-xl border border-surface-700 bg-surface-800 px-3 py-2 text-sm text-surface-50 focus:border-brand-500 focus:outline-none"
             />
             <p className="mt-1 text-[11px] text-surface-400">Fixed seed for identical composition grounding.</p>
           </div>

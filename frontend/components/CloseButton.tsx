@@ -8,7 +8,7 @@ export function CloseButton({ onClose }: { onClose: () => void }) {
   return (
     <button
       onClick={onClose}
-      className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-surface-400 transition-colors hover:bg-surface-800 hover:text-white"
+      className="absolute right-4 top-4 z-10 rounded-full p-1.5 text-surface-400 transition-colors hover:bg-surface-800 hover:text-surface-50"
       aria-label="Close"
     >
       <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">

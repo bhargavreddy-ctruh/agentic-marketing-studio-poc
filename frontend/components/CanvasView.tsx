@@ -52,7 +52,7 @@ function toTiles(elements: CanvasElement[], versionInfo: Map<string, VersionInfo
     .map((el) => ({
       id: el.id,
       kind: elementKind(el.element_type),
-      url: el.storage_ref ? assetUrl(el.storage_ref) : "",
+      url: el.storage_ref ? assetUrl(el.storage_ref, el.url) : "",
       content: el.text_content ?? undefined,
       hasComment: Boolean(el.last_comment),
       version: el.version,
@@ -106,7 +106,7 @@ function Accordion({
     <div className="rounded-xl border border-surface-700/50 bg-surface-800/20">
       <button
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-surface-300 hover:text-white transition-colors"
+        className="flex w-full items-center justify-between px-3 py-2 text-xs font-semibold text-surface-300 hover:text-surface-50 transition-colors"
       >
         <span>{open ? "▾" : "▸"} {title} ({count})</span>
       </button>
@@ -364,7 +364,7 @@ export default function CanvasView({
         .map(el => ({
           id: el.id,
           kind: elementKind(el.element_type),
-          url: el.storage_ref ? assetUrl(el.storage_ref) : "",
+          url: el.storage_ref ? assetUrl(el.storage_ref, el.url) : "",
           description: el.description,
           productId: el.product_id,
           productName: el.product_name,
@@ -382,7 +382,7 @@ export default function CanvasView({
       .map(e => ({
         id: e.id,
         kind: elementKind(e.element_type),
-        url: e.storage_ref ? assetUrl(e.storage_ref) : "",
+        url: e.storage_ref ? assetUrl(e.storage_ref, e.url) : "",
         description: e.description,
         productId: e.product_id,
         productName: e.product_name,
@@ -391,7 +391,7 @@ export default function CanvasView({
     onReferenceElements?.([...currentlyReferenced, {
       id: el.id,
       kind: elementKind(el.element_type),
-      url: el.storage_ref ? assetUrl(el.storage_ref) : "",
+      url: el.storage_ref ? assetUrl(el.storage_ref, el.url) : "",
       description: el.description,
       productId: el.product_id,
       productName: el.product_name,
@@ -626,14 +626,14 @@ export default function CanvasView({
                     <button
                       onClick={() => handleRegenerate(el)}
                       disabled={busyId === el.id}
-                      className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-white disabled:opacity-50"
+                      className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-surface-50 disabled:opacity-50"
                     >
                       Regenerate
                     </button>
                     <button
                       onClick={() => handleComment(el)}
                       disabled={busyId === el.id}
-                      className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-white disabled:opacity-50"
+                      className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-surface-50 disabled:opacity-50"
                     >
                       Comment
                     </button>
@@ -641,7 +641,7 @@ export default function CanvasView({
                       <button
                         onClick={() => handleDirectEditClick(el)}
                         disabled={busyId === el.id}
-                        className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-white disabled:opacity-50"
+                        className="rounded-lg border border-surface-600/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-700/50 hover:text-surface-50 disabled:opacity-50"
                       >
                         Edit
                       </button>

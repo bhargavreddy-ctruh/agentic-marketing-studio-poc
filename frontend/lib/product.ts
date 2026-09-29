@@ -12,7 +12,7 @@
  * one by id. This is a real, working list for the browser that onboarded them — not a account-wide
  * list, since the backend genuinely has no way to produce one.
  */
-import { request } from "./http";
+import { API_BASE_URL, ApiError, request } from "./http";
 
 export interface ProductAttributes {
   summary: string;
@@ -74,6 +74,34 @@ export async function onboardProduct(
 
 export async function getProduct(productId: string): Promise<ProductProfile> {
   return request<ProductProfile>(`/api/v1/products/${productId}`);
+}
+
+/** Edit/delete a Product DNA profile (2026-09-28) — patch semantics: only the fields actually
+ * given are changed. Lets the user fix a wrongly-crawled or outdated product from the UI. */
+export async function updateProduct(
+  productId: string,
+  patch: { name?: string; attributes_patch?: Record<string, unknown> },
+): Promise<ProductProfile> {
+  return request<ProductProfile>(`/api/v1/products/${productId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteProduct(productId: string): Promise<void> {
+  // `request()` always calls `.json()` on the response — a real 204 No Content has no body to
+  // parse, so this calls fetch directly rather than reusing it (same reasoning as the raw
+  // `fetch(...)` calls elsewhere in this file's DNASection.tsx caller for file uploads).
+  const res = await fetch(`${API_BASE_URL}/api/v1/products/${productId}`, {
+    method: "DELETE",
+    credentials: "include",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    throw new ApiError(res.statusText, res.status);
+  }
+  saveOnboardedIds(loadOnboardedIds().filter((id) => id !== productId));
 }
 
 /** See the file-level note above — a real, working, browser-scoped list, not an account-wide one.

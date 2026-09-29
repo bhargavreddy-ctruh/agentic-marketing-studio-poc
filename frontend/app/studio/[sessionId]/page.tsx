@@ -213,7 +213,7 @@ export default function StudioPage() {
         <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
           <button
             onClick={() => router.push("/")}
-            className="pointer-events-auto flex items-center gap-1 sm:gap-1.5 rounded-full border border-surface-700/50 bg-surface-900/40 px-2.5 sm:px-3 py-1 sm:py-1.5 text-xs font-medium text-surface-200 shadow-xl backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:bg-surface-800/60 hover:text-white"
+            className="pointer-events-auto flex items-center gap-1 sm:gap-1.5 rounded-full border border-surface-700/50 bg-surface-900/40 px-2.5 sm:px-3 py-1 sm:py-1.5 text-xs font-medium text-surface-200 shadow-xl backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:bg-surface-800/60 hover:text-surface-50"
           >
             <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
@@ -227,7 +227,7 @@ export default function StudioPage() {
               className={`rounded-full px-2.5 sm:px-3 py-1 transition-all duration-300 ${
                 outputMode === "canvas"
                   ? "bg-brand-500 text-white shadow-[0_0_15px_rgba(99,102,241,0.5)]"
-                  : "text-surface-300 hover:text-white"
+                  : "text-surface-300 hover:text-surface-50"
               }`}
             >
               Canvas
@@ -237,7 +237,7 @@ export default function StudioPage() {
               className={`rounded-full px-2.5 sm:px-3 py-1 transition-all duration-300 ${
                 outputMode === "node"
                   ? "bg-brand-500 text-white shadow-[0_0_15px_rgba(99,102,241,0.5)]"
-                  : "text-surface-300 hover:text-white"
+                  : "text-surface-300 hover:text-surface-50"
               }`}
             >
               Node
@@ -262,7 +262,7 @@ export default function StudioPage() {
               className={`pointer-events-auto flex items-center gap-1 rounded-full border border-surface-700/50 px-2.5 py-1 text-xs font-medium shadow-xl backdrop-blur-xl transition-all ${
                 showElementsDrawer
                   ? "bg-brand-500 text-white shadow-[0_0_15px_rgba(99,102,241,0.5)]"
-                  : "bg-surface-900/40 text-surface-300 hover:bg-surface-800 hover:text-white"
+                  : "bg-surface-900/40 text-surface-300 hover:bg-surface-800 hover:text-surface-50"
               }`}
             >
               <span>Elements</span>
@@ -281,19 +281,19 @@ export default function StudioPage() {
           <div className="pointer-events-auto flex items-center gap-0.5 rounded-full border border-surface-700/50 bg-surface-900/40 p-0.5 text-xs font-medium shadow-xl backdrop-blur-xl">
             <button
               onClick={() => setShowGuardrails(true)}
-              className="rounded-full px-2 sm:px-2.5 py-1 text-xs text-surface-300 transition-all hover:bg-surface-800 hover:text-white"
+              className="rounded-full px-2 sm:px-2.5 py-1 text-xs text-surface-300 transition-all hover:bg-surface-800 hover:text-surface-50"
             >
               Guardrails
             </button>
             <button
               onClick={() => setShowDna(true)}
-              className="rounded-full px-1.5 sm:px-2 py-1 text-xs text-surface-300 transition-all hover:bg-surface-800 hover:text-white"
+              className="rounded-full px-1.5 sm:px-2 py-1 text-xs text-surface-300 transition-all hover:bg-surface-800 hover:text-surface-50"
             >
               DNA
             </button>
             <button
               onClick={() => setShowStyleLock(true)}
-              className="flex items-center gap-1 rounded-full px-1.5 sm:px-2 py-1 text-xs text-brand-300 transition-all hover:bg-surface-800 hover:text-white"
+              className="flex items-center gap-1 rounded-full px-1.5 sm:px-2 py-1 text-xs text-brand-300 transition-all hover:bg-surface-800 hover:text-surface-50"
             >
               <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
