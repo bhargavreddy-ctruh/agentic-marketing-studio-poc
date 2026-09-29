@@ -14,6 +14,6 @@ If a required tool fails or you cannot fulfill the request, ignore the schema be
 
 {
   "has_script": true,
-  "script_line": "the written script, or empty string if none"
+  "script_line": "the written script, under ~500 characters, or empty string if none"
 }
 </output_format>

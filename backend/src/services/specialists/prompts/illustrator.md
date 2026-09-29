@@ -20,6 +20,6 @@ If a required tool fails or you cannot fulfill the request, ignore the schema be
 {
   "image_prompt": "the prompt you actually used to generate the image",
   "aspect_ratio": "the actual aspect_ratio you passed to the tool, e.g. 1:1 or 9:16 — never a fixed default",
-  "brand_facts_used": "a short note on which real brand/product facts you incorporated, or empty string if none were configured"
+  "brand_facts_used": "a short note (1-2 sentences, under ~300 characters) on which real brand/product facts you incorporated, or empty string if none were configured"
 }
 </output_format>

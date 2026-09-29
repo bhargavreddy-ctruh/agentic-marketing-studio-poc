@@ -14,7 +14,7 @@ Return this JSON AND you MUST also call the required tools to execute your task 
 If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
 
 {
-  "overall_story": "brief summary of the narrative arc",
-  "shots": ["actual shot 1", "actual shot 2"]
+  "overall_story": "brief summary of the narrative arc, 1-2 sentences, under ~300 characters",
+  "shots": ["actual shot 1, one short sentence each", "actual shot 2"]
 }
 </output_format>

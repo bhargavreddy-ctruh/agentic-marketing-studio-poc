@@ -14,6 +14,6 @@ Return this JSON AND you MUST also call the required tools to execute your task 
 If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
 
 {
-  "pacing_note": "a note on how the clips were assembled or paced"
+  "pacing_note": "a note (1-2 sentences, under ~300 characters) on how the clips were assembled or paced"
 }
 </output_format>
