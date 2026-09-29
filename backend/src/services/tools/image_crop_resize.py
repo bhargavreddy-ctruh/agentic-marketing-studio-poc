@@ -56,7 +56,7 @@ class ImageCropResizeTool(Tool):
                 error="storage_ref, positive target_width, and positive target_height are required",
             )
 
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"Asset not found for {storage_ref}")
         image_bytes, _ = loaded
@@ -77,7 +77,7 @@ class ImageCropResizeTool(Tool):
             out_img.save(buf, format="JPEG", quality=92)
             res_bytes = buf.getvalue()
 
-            new_ref = save_asset(
+            new_ref = await save_asset(
                 res_bytes,
                 "image/jpeg",
                 metadata={

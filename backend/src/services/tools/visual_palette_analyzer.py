@@ -62,19 +62,19 @@ class VisualPaletteAnalyzerTool(Tool):
         # what to send the vision model — no need to download the actual bytes at all when a
         # direct Cloudinary url exists (`public_url()`), which `load_asset()` would otherwise do
         # unconditionally via its own `httpx.get`.
-        mime_type = asset_mime_type(storage_ref)
+        mime_type = await asset_mime_type(storage_ref)
         if mime_type is None and context_ref and context_ref != storage_ref:
             storage_ref = context_ref
-            mime_type = asset_mime_type(storage_ref)
+            mime_type = await asset_mime_type(storage_ref)
         if mime_type is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         if not mime_type.startswith("image/"):
             return ToolResult(ok=False, data={}, error=f"storage_ref {storage_ref} is not an image")
 
-        image_url = public_url(storage_ref)
+        image_url = await public_url(storage_ref)
         image_bytes: bytes | None = None
         if image_url is None:  # local-disk dev mode — no direct url, fall back to real bytes
-            loaded = load_asset(storage_ref)
+            loaded = await load_asset(storage_ref)
             if loaded is None:
                 return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
             image_bytes, mime_type = loaded

@@ -94,7 +94,7 @@ class BaseImageGeneratorTool(Tool):
         ):
             if not candidate:
                 continue
-            loaded_ref = load_asset(candidate)
+            loaded_ref = await load_asset(candidate)
             if loaded_ref is not None and loaded_ref[1] and loaded_ref[1].startswith("image/"):
                 reference_storage_ref = candidate
                 reference_image_bytes, reference_mime_type = loaded_ref
@@ -113,7 +113,7 @@ class BaseImageGeneratorTool(Tool):
             or str(ctx.get("style_ref_storage_ref") or "").strip()
         )
         if style_ref_storage:
-            loaded_style = load_asset(style_ref_storage)
+            loaded_style = await load_asset(style_ref_storage)
             if loaded_style is not None:
                 if loaded_style[1] and loaded_style[1].startswith("image/"):
                     style_reference_bytes, style_reference_mime_type = loaded_style
@@ -162,7 +162,7 @@ class BaseImageGeneratorTool(Tool):
         except ProviderUnavailable as exc:
             return ToolResult(ok=False, data={}, error=exc.message)
 
-        storage_ref = save_asset(
+        storage_ref = await save_asset(
             result.image_bytes,
             result.mime_type,
             metadata={"prompt": prompt, "provider": result.provider_name},

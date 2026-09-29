@@ -8,7 +8,7 @@ from ..schemas.brand.responses import BrandProfileResponse
 
 class BrandMapper:
     @staticmethod
-    def to_response(entity: BrandProfileModel) -> BrandProfileResponse:
+    async def to_response(entity: BrandProfileModel) -> BrandProfileResponse:
         return BrandProfileResponse(
             id=entity.id,
             name=entity.name,
@@ -18,5 +18,5 @@ class BrandMapper:
             created_at=entity.created_at,
             logo_storage_ref=entity.logo_storage_ref,
             font_storage_refs=entity.font_storage_refs or {},
-            logo_url=public_url(entity.logo_storage_ref),
+            logo_url=await public_url(entity.logo_storage_ref),
         )

@@ -48,10 +48,10 @@ class AudioVideoMuxerTool(Tool):
         if not video_ref or not audio_ref:
             return ToolResult(ok=False, data={}, error="video_storage_ref and audio_storage_ref are required")
 
-        video_loaded = load_asset(video_ref)
+        video_loaded = await load_asset(video_ref)
         if video_loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {video_ref}")
-        audio_loaded = load_asset(audio_ref)
+        audio_loaded = await load_asset(audio_ref)
         if audio_loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {audio_ref}")
 
@@ -93,7 +93,7 @@ class AudioVideoMuxerTool(Tool):
 
             muxed_bytes = output_path.read_bytes()
 
-        storage_ref = save_asset(
+        storage_ref = await save_asset(
             muxed_bytes, "video/mp4", metadata={"muxed_video_from": video_ref, "muxed_audio_from": audio_ref}
         )
         return ToolResult(ok=True, data={"storage_ref": storage_ref, "mime_type": "video/mp4"})

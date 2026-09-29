@@ -1218,7 +1218,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             "text": "The following existing generated elements are available to reference or fix:",
         })
         for i, el in enumerate(referenced_elements, 1):
-            blocks = build_element_context_blocks(el)
+            blocks = await build_element_context_blocks(el)
             blocks[0]["text"] = f"Element {i}: {blocks[0]['text']}\n(Note: If generating a new visual base from this, pass this storage_ref as 'reference_storage_ref' to base_image_generator)"
             current_context.append(blocks[0])
             current_context.extend(blocks[1:])

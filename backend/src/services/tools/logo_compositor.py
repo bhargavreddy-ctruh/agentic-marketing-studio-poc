@@ -72,12 +72,12 @@ class LogoCompositorTool(Tool):
         if not image_ref or not logo_ref:
             return ToolResult(ok=False, data={}, error="image_storage_ref and logo_storage_ref are required")
 
-        img_loaded = load_asset(image_ref)
+        img_loaded = await load_asset(image_ref)
         if img_loaded is None:
             return ToolResult(ok=False, data={}, error=f"Target image asset not found for {image_ref}")
         img_bytes, _ = img_loaded
 
-        logo_loaded = load_asset(logo_ref)
+        logo_loaded = await load_asset(logo_ref)
         if logo_loaded is None:
             return ToolResult(ok=False, data={}, error=f"Logo asset not found for {logo_ref}")
         logo_bytes, _ = logo_loaded
@@ -111,7 +111,7 @@ class LogoCompositorTool(Tool):
             final_img.save(buf, format="JPEG", quality=92)
             res_bytes = buf.getvalue()
 
-            new_ref = save_asset(
+            new_ref = await save_asset(
                 res_bytes,
                 "image/jpeg",
                 metadata={

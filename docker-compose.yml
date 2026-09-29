@@ -8,7 +8,6 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./backend/var:/app/var
       # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
       # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
       # any other machine, silently reintroducing the exact hang this was meant to fix. A named
@@ -45,11 +44,15 @@ services:
       # substituting SQLite, the same "deterministic beats a maybe" principle already used
       # elsewhere in this app.
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required — set it in the root .env (see .env.example)}"
-      # Same free-tier deploy — unset (default) keeps writing generated assets to the bind-mounted
-      # `./backend/var` below; set in .env to move asset storage to Cloudinary instead (see
-      # .env.example's own CLOUDINARY_URL comment for the exact format). Genuinely optional
-      # (unlike DATABASE_URL/OLLAMA_BASE_URL below) — local disk is a real, working fallback, not
-      # a silently-wrong one, so this one keeps its default.
+      # Real, live-found architecture change (2026-09-30): local disk is no longer a storage
+      # backend at all (`core/local_storage.py`'s metadata sidecar — a local file — couldn't be
+      # resolved cross-machine, e.g. a session created on one deploy 404ing its own images on a
+      # different one; Supabase's `asset_metadata` table + Cloudinary are now the only store, no
+      # fallback). This var stays optional here (empty default, no `:?`) deliberately — unlike
+      # DATABASE_URL/OLLAMA_BASE_URL above, Cloudinary stays DB-managed via Supabase's
+      # `app_settings` table (same pattern as every other API key/secret in this app), changeable
+      # live with no redeploy. The container boots fine without it set yet; any actual asset save
+      # fails loudly (a real, logged error — never silently wrong) until it's configured.
       CLOUDINARY_URL: "${CLOUDINARY_URL:-}"
       # Product/Brand crawler (2026-09-28) — Ollama revived, scoped ONLY to crawler extraction
       # (services/knowledge/{brand,product}_dna_service.py's crawl_*_from_url methods). General

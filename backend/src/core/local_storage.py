@@ -1,49 +1,40 @@
 """
-Asset storage — Architecture.md's "generated file storage" choice, same pattern as the existing
-agentic_flow codebase's clip_store.py (files + a small metadata sidecar, referenced by id). This is
-the ONE place that touches asset storage anywhere in the app; every other module only ever calls
-`save_asset`/`load_asset` (never a filesystem path or a vendor SDK directly), so the storage backend
-itself can be swapped here without touching any of those call sites.
+Asset storage — Cloudinary for bytes, Supabase Postgres for metadata. This is the ONE place that
+touches asset storage anywhere in the app; every other module only ever calls
+`save_asset`/`load_asset`/`public_url`/`asset_mime_type` (never a filesystem path or a vendor SDK
+directly), so the storage backend itself can be swapped here without touching any of those call
+sites.
 
-Free-tier deploy (2026-09-28): the actual media bytes move to Cloudinary when `CLOUDINARY_URL` is
-set, but `storage_ref` stays the exact same opaque asset-id string it always was — a Cloudinary
-secure_url can't be used as-is (it contains "/", which breaks the `/assets/{storage_ref}` route's
-path matching, and the DB columns that store it are `VARCHAR(255)`, not built for a full URL). The
-metadata sidecar (already written locally for every asset, always has been) now also carries the
-Cloudinary secure_url instead of the raw bytes ever touching disk on this backend. Falls back to
-writing bytes straight to disk when `CLOUDINARY_URL` is unset, so local dev needs no Cloudinary
-account at all.
+Real, live-found incident (2026-09-30): this used to keep the storage_ref -> Cloudinary-url
+mapping as a LOCAL JSON sidecar file (`var/assets/{storage_ref}.json`) — fine on one machine, but
+a session created on one deploy and viewed from another (e.g. a laptop, then a fresh EC2 instance)
+could never resolve its own assets: the bytes were safely on Cloudinary, but the mapping to find
+them only existed as a file on the machine that created it. Per explicit instruction ("there is no
+local storage anymore so supabase is one and only"), local disk is no longer a storage backend at
+all — Cloudinary (bytes) + Supabase's `asset_metadata` table (the mapping) are the only store,
+resolvable from any machine. `CLOUDINARY_URL` is therefore REQUIRED now, same "no silent fallback"
+principle already applied to `DATABASE_URL`/`OLLAMA_BASE_URL` in docker-compose.yml.
+
+Every function here is now async (a real Postgres round-trip, not a local file read) — every
+caller across the app is already inside an `async def` (every `Tool.run()`, every service method),
+so this is `await` added at each call site, not an event-loop change.
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import os
 import uuid
 from io import BytesIO
-from pathlib import Path
 
 import httpx
+from sqlalchemy import select
 
-_STORAGE_DIR = Path(__file__).resolve().parent.parent.parent / "var" / "assets"
+from ..models.asset_metadata import AssetMetadataModel
+from ..models.base import async_session_factory
+from .exceptions import ProviderUnavailable
+from .middleware.logging import get_logger
 
-_EXT_BY_MIME = {
-    "image/png": "png",
-    "image/jpeg": "jpg",
-    "image/webp": "webp",
-    "image/gif": "gif",
-    "video/mp4": "mp4",
-    "video/webm": "webm",
-    "video/quicktime": "mov",
-    "audio/wav": "wav",
-    "audio/mpeg": "mp3",
-    "audio/ogg": "ogg",
-    "audio/webm": "weba",
-    "text/plain": "txt",
-}
-
-
-def _cloudinary_enabled() -> bool:
-    return bool(os.environ.get("CLOUDINARY_URL"))
+log = get_logger(__name__)
 
 
 def _resource_type_for(mime_type: str) -> str:
@@ -56,78 +47,102 @@ def _resource_type_for(mime_type: str) -> str:
     return "raw"
 
 
-def save_asset(data: bytes, mime_type: str, *, metadata: dict | None = None) -> str:
-    """Writes bytes + a metadata sidecar, returns an opaque storage_ref (an id) — unchanged
-    contract regardless of which backend actually holds the bytes."""
-    _STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-    asset_id = uuid.uuid4().hex
-    meta_path = _STORAGE_DIR / f"{asset_id}.json"
-    meta: dict = {"mime_type": mime_type, **(metadata or {})}
+def _upload_to_cloudinary(data: bytes, asset_id: str, resource_type: str) -> dict:
+    """Cloudinary's SDK is synchronous (blocking network I/O) — always called via
+    `asyncio.to_thread` below, never directly, so one upload never blocks the event loop (and
+    every other concurrent request) while it's in flight."""
+    import cloudinary.uploader
 
-    if _cloudinary_enabled():
-        import cloudinary.uploader
+    return cloudinary.uploader.upload(
+        BytesIO(data), public_id=asset_id, resource_type=resource_type, overwrite=True
+    )
 
-        resource_type = _resource_type_for(mime_type)
-        result = cloudinary.uploader.upload(
-            BytesIO(data),
-            public_id=asset_id,
-            resource_type=resource_type,
-            overwrite=True,
+
+async def save_asset(data: bytes, mime_type: str, *, metadata: dict | None = None) -> str:
+    """Uploads bytes to Cloudinary and records the mapping in Supabase, returns an opaque
+    storage_ref (an id) — unchanged contract from the pre-async version, just awaited now.
+    `CLOUDINARY_URL` (DB-managed via Supabase's app_settings, applied to os.environ by
+    settings_service.py) is required — no local-disk fallback."""
+    if not os.environ.get("CLOUDINARY_URL"):
+        raise ProviderUnavailable(
+            "local_storage",
+            "CLOUDINARY_URL is not configured — set it in Supabase's app_settings table "
+            "(key: cloudinary_url). Local disk is no longer a supported asset store.",
         )
-        meta["cloudinary_url"] = result["secure_url"]
-        meta["cloudinary_resource_type"] = resource_type
-    else:
-        ext = _EXT_BY_MIME.get(mime_type, "bin")
-        (_STORAGE_DIR / f"{asset_id}.{ext}").write_bytes(data)
 
-    meta_path.write_text(json.dumps(meta, default=str), encoding="utf-8")
+    asset_id = uuid.uuid4().hex
+    resource_type = _resource_type_for(mime_type)
+    result = await asyncio.to_thread(_upload_to_cloudinary, data, asset_id, resource_type)
+    cloudinary_url = result["secure_url"]
+
+    async with async_session_factory() as db:
+        db.add(
+            AssetMetadataModel(
+                storage_ref=asset_id,
+                mime_type=mime_type,
+                cloudinary_url=cloudinary_url,
+                cloudinary_resource_type=resource_type,
+                extra_json=metadata or {},
+            )
+        )
+        await db.commit()
+
     return asset_id
 
 
-def load_asset(storage_ref: str) -> tuple[bytes, str] | None:
+async def _get_metadata(storage_ref: str) -> AssetMetadataModel | None:
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(AssetMetadataModel).where(AssetMetadataModel.storage_ref == storage_ref)
+        )
+        return result.scalar_one_or_none()
+
+
+async def get_metadata_batch(storage_refs: list[str]) -> dict[str, AssetMetadataModel]:
+    """Real, live-found incident (2026-09-30): rendering a canvas with N elements used to call
+    `public_url()`/`_text_content()` for each one via `asyncio.gather` — N simultaneous DB
+    sessions, each checking out its own connection from Supabase's Session Pooler at once. A
+    canvas with more elements than the pooler's `pool_size` (15) genuinely exhausted it
+    (`InternalError: max clients reached in session mode`), a real 500 on a live deploy. One
+    query, one connection, for however many refs a caller actually needs — used by
+    `mappers/canvas_mapper.py` to resolve an entire canvas state's worth of urls/mime-types in a
+    single round trip instead of one per element."""
+    refs = [r for r in set(storage_refs) if r]
+    if not refs:
+        return {}
+    async with async_session_factory() as db:
+        result = await db.execute(
+            select(AssetMetadataModel).where(AssetMetadataModel.storage_ref.in_(refs))
+        )
+        return {row.storage_ref: row for row in result.scalars().all()}
+
+
+async def load_asset(storage_ref: str) -> tuple[bytes, str] | None:
     """Returns (bytes, mime_type) for a storage_ref, or None if it doesn't exist."""
-    meta_candidates = list(_STORAGE_DIR.glob(f"{storage_ref}.json"))
-    if not meta_candidates:
+    meta = await _get_metadata(storage_ref)
+    if meta is None or not meta.cloudinary_url:
         return None
-    meta = json.loads(meta_candidates[0].read_text(encoding="utf-8"))
-    mime_type = meta.get("mime_type", "application/octet-stream")
-
-    cloudinary_url = meta.get("cloudinary_url")
-    if cloudinary_url:
-        response = httpx.get(cloudinary_url, timeout=30.0)
-        if response.status_code != 200:
-            return None
-        return response.content, mime_type
-
-    ext = _EXT_BY_MIME.get(mime_type, "bin")
-    data_path = _STORAGE_DIR / f"{storage_ref}.{ext}"
-    if not data_path.exists():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(meta.cloudinary_url)
+    if response.status_code != 200:
         return None
-    return data_path.read_bytes(), mime_type
+    return response.content, meta.mime_type
 
 
-def asset_mime_type(storage_ref: str) -> str | None:
-    """The mime_type recorded in a storage_ref's metadata sidecar — a plain local file read, no
-    network call, unlike `load_asset()`. Lets a caller that only needs to know WHETHER an asset is
-    an image (not its bytes) skip downloading a Cloudinary-hosted asset entirely."""
-    meta_candidates = list(_STORAGE_DIR.glob(f"{storage_ref}.json"))
-    if not meta_candidates:
-        return None
-    meta = json.loads(meta_candidates[0].read_text(encoding="utf-8"))
-    return meta.get("mime_type")
+async def asset_mime_type(storage_ref: str) -> str | None:
+    """The mime_type recorded for a storage_ref — a plain metadata lookup, no bytes downloaded,
+    unlike `load_asset()`. Lets a caller that only needs to know WHETHER an asset is an image
+    (not its bytes) skip downloading a Cloudinary-hosted asset entirely."""
+    meta = await _get_metadata(storage_ref)
+    return meta.mime_type if meta is not None else None
 
 
-def public_url(storage_ref: str | None) -> str | None:
+async def public_url(storage_ref: str | None) -> str | None:
     """The real Cloudinary URL behind a storage_ref, when one exists — lets callers (canvas
     responses, the vision LLM path) hand a browser/model provider a direct CDN link instead of
     round-tripping bytes through this backend a second time. Returns None for a bare/unknown
-    storage_ref OR when running in local-disk mode (no CLOUDINARY_URL configured) — callers fall
-    back to the existing `/api/v1/canvas/assets/{storage_ref}` proxy route in either case, so
-    nothing regresses in dev."""
+    storage_ref."""
     if not storage_ref:
         return None
-    meta_candidates = list(_STORAGE_DIR.glob(f"{storage_ref}.json"))
-    if not meta_candidates:
-        return None
-    meta = json.loads(meta_candidates[0].read_text(encoding="utf-8"))
-    return meta.get("cloudinary_url")
+    meta = await _get_metadata(storage_ref)
+    return meta.cloudinary_url if meta is not None else None

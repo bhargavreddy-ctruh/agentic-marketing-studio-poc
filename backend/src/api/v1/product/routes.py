@@ -72,7 +72,7 @@ async def upload_product_photo(
     product = await svc.get_product(product_id)
     data = await file.read()
     mime = sniff_image_mime(data, file.content_type)
-    storage_ref = save_asset(data, mime, metadata={"product_id": product_id, "type": "product_photo"})
+    storage_ref = await save_asset(data, mime, metadata={"product_id": product_id, "type": "product_photo"})
     
     product.photo_storage_ref = storage_ref
     await repo.add(product)

@@ -37,7 +37,7 @@ class TextToSpeechTool(Tool):
         provider = get_audio_provider()
         result = await provider.synthesize(text=text, voice=voice)
 
-        new_ref = save_asset(
+        new_ref = await save_asset(
             result.audio_bytes,
             result.mime_type,
             metadata={"tts_text": text, "provider": result.provider_name},

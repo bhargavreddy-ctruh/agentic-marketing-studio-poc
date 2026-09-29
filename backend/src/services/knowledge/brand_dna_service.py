@@ -172,7 +172,7 @@ class BrandDnaService:
                         resp.raise_for_status()
                         logo_bytes = resp.content
                     mime_type = sniff_image_mime(logo_bytes)
-                    storage_ref = save_asset(
+                    storage_ref = await save_asset(
                         logo_bytes, mime_type,
                         metadata={"source": "brand_crawl", "brand_id": brand.id, "url": page.logo_url},
                     )
@@ -197,7 +197,7 @@ class BrandDnaService:
                         content_type = resp.headers.get("content-type", "").split(";")[0].strip()
                         if not content_type or content_type == "application/octet-stream":
                             content_type = _FONT_MIME_BY_EXT.get(font_url.rsplit(".", 1)[-1].lower().split("?")[0], "font/ttf")
-                        storage_ref = save_asset(
+                        storage_ref = await save_asset(
                             font_bytes, content_type,
                             metadata={"source": "brand_crawl", "brand_id": brand.id, "url": font_url, "family": family},
                         )

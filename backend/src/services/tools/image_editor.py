@@ -70,7 +70,7 @@ class ImageEditorTool(Tool):
         if not storage_ref or not instruction:
             return ToolResult(ok=False, data={}, error="storage_ref and instruction are required")
 
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         image_bytes, mime_type = loaded
@@ -97,7 +97,7 @@ class ImageEditorTool(Tool):
         except ProviderUnavailable as exc:
             return ToolResult(ok=False, data={}, error=f"{exc.message}")
 
-        new_ref = save_asset(
+        new_ref = await save_asset(
             result.image_bytes,
             result.mime_type,
             metadata={"instruction": instruction, "provider": result.provider_name, "edited_from": storage_ref},

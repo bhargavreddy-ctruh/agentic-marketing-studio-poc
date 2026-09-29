@@ -42,10 +42,10 @@ class ColorPaletteExtractorTool(Tool):
         # Try the explicit value first, fall back to context only if it fails to resolve.
         storage_ref = explicit_ref or context_ref
         num_colors = int(args.get("num_colors") or 5)
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None and context_ref and context_ref != storage_ref:
             storage_ref = context_ref
-            loaded = load_asset(storage_ref)
+            loaded = await load_asset(storage_ref)
         if loaded is None:
             return ToolResult(ok=False, data={}, error=f"no asset found for storage_ref {storage_ref}")
         image_bytes, _mime = loaded

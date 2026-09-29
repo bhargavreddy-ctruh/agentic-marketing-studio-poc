@@ -21,8 +21,6 @@ RUN pip install --no-cache-dir -e .
 # its deps) with no way around it for a Playwright-based scraper.
 RUN playwright install --with-deps chromium
 
-RUN mkdir -p var/assets
-
 # Model pre-fetch TEMPORARILY DISABLED (2026-09-26, real live incident): this build step itself
 # started hanging at 0% CPU for 35+ minutes — the exact same network-stalled-download symptom
 # `HF_HUB_DISABLE_XET=1` was meant to fix, but apparently not covering all three downloads here

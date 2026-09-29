@@ -209,7 +209,7 @@ class SessionService:
             from ...mappers.canvas_mapper import CanvasMapper
             for e in existing_elements:
                 if e.id in referenced_ids:
-                    resp = CanvasMapper.to_response(e)
+                    resp = await CanvasMapper.to_response(e)
                     kind = "video" if resp.element_type == "video" else "audio" if resp.element_type == "audio" else "text" if resp.element_type == "text" else "image"
                     url = f"/api/v1/canvas/assets/{resp.storage_ref}" if resp.storage_ref else ""
                     referenced_elements[e.id] = {
@@ -1015,7 +1015,7 @@ class SessionService:
         from ...core.local_storage import load_asset
         from ...providers.audio.local_whisper import get_transcription_provider
 
-        loaded = load_asset(storage_ref)
+        loaded = await load_asset(storage_ref)
         if loaded is None:
             return None
         audio_bytes, mime_type = loaded
@@ -1052,14 +1052,14 @@ class SessionService:
         # Real, live-found latency win (2026-09-29): skip downloading the bytes entirely when
         # this asset already has a direct Cloudinary url — a plain local metadata read
         # (`asset_mime_type`) is enough to confirm the ref is real and get its mime type.
-        image_url = public_url(storage_ref)
+        image_url = await public_url(storage_ref)
         image_bytes: bytes | None = None
         if image_url is not None:
-            mime_type = asset_mime_type(storage_ref)
+            mime_type = await asset_mime_type(storage_ref)
             if mime_type is None:
                 return None
         else:
-            loaded = load_asset(storage_ref)
+            loaded = await load_asset(storage_ref)
             if loaded is None:
                 return None
             image_bytes, mime_type = loaded
