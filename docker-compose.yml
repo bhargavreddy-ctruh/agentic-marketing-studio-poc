@@ -15,8 +15,13 @@ services:
       # volume still gets the caching benefit (fast on every restart AFTER the first) on whatever
       # machine this actually runs on, with zero dependency on host state.
       - hf_cache:/root/.cache/huggingface
+    # Real, live-found incident (2026-09-29): this used to point at `./backend/.env`, a SECOND
+    # env file separate from the one `${VAR}` substitution below always reads (Compose only ever
+    # auto-loads `.env` next to this file for substitution, never `backend/.env`) — a deploy that
+    # only filled in `backend/.env` silently ran with an empty DATABASE_URL and no error. One file
+    # now, read by both mechanisms: `.env.example` at the repo root, copied to `.env` here.
     env_file:
-      - ./backend/.env
+      - ./.env
     environment:
       # Real, live-found root cause (2026-09-26) of the sentence-transformers download hang (0%
       # CPU, no progress): HuggingFace's newer XET transfer backend never completed inside a
@@ -41,15 +46,22 @@ services:
       # elsewhere in this app.
       DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required — set it in the root .env (see .env.example)}"
       # Same free-tier deploy — unset (default) keeps writing generated assets to the bind-mounted
-      # `./backend/var` below; set in the root .env to move asset storage to Cloudinary instead
-      # (see backend/.env.example's own CLOUDINARY_URL comment for the exact format).
+      # `./backend/var` below; set in .env to move asset storage to Cloudinary instead (see
+      # .env.example's own CLOUDINARY_URL comment for the exact format). Genuinely optional
+      # (unlike DATABASE_URL/OLLAMA_BASE_URL below) — local disk is a real, working fallback, not
+      # a silently-wrong one, so this one keeps its default.
       CLOUDINARY_URL: "${CLOUDINARY_URL:-}"
       # Product/Brand crawler (2026-09-28) — Ollama revived, scoped ONLY to crawler extraction
       # (services/knowledge/{brand,product}_dna_service.py's crawl_*_from_url methods). General
       # LLM reasoning stays Groq->Replicate (router.py), untouched, so backend does NOT hard-depend
       # on the `ollama` service below — OllamaProvider degrades gracefully to that fallback chain
       # if Ollama is slow to pull its model on first start or briefly unavailable.
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434/v1}"
+      #
+      # Real, live-found instruction (2026-09-29, same incident/fix as DATABASE_URL above): no
+      # silent fallback here either — `.env` is the one and only place every value this backend
+      # needs (database, LangSmith, Ollama) comes from. `:?` makes a missing value fail loudly at
+      # `docker compose up` instead of quietly defaulting.
+      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:?OLLAMA_BASE_URL is required — set it in .env (see .env.example)}"
     networks:
       - app-network
     restart: unless-stopped

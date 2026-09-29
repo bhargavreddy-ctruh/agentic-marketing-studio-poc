@@ -62,29 +62,35 @@ cd ~/agentic-marketing-studio/poc
 (Use a GitHub deploy key or a fine-grained PAT with read-only access if the repo is private —
 the EC2 instance only ever needs to pull, never push.)
 
-### 4. Create the real env files (never committed — see `.gitignore`)
+### 4. Create the real env file (never committed — see `.gitignore`)
+
+There is exactly **one** env file, at the `poc/` root, next to `docker-compose.yml` — it's the
+only file Compose reads, for both `env_file:` and `${VAR}` substitution (2026-09-29, after a real
+incident where a second `backend/.env` file caused a deploy to silently run with a missing
+`DATABASE_URL` — see `docker-compose.yml`'s own comment on the `backend` service).
 
 ```bash
-cp backend/.env.example backend/.env
 cp .env.example .env
 ```
 
-Edit `backend/.env` — fill in the real API keys (`GROQ_API_KEY`, `OPENROUTER_API_KEY`,
-`REPLICATE_API_TOKEN`, etc.; `FIRECRAWL_API_KEY` if you want the crawler's Firecrawl fallback
-enabled — optional, the crawler still works via Playwright alone without it). Leave
-`OLLAMA_BASE_URL`, `FRONTEND_ORIGINS`, and `DATABASE_URL` unset here — `docker-compose.yml` sets
-those itself for the container network.
-
-Edit `.env` (compose-level, at the `poc/` root) — set:
+Edit `.env` — set:
 ```
 PUBLIC_FRONTEND_URL=https://your-actual-frontend-domain.com
 PUBLIC_BACKEND_URL=https://your-actual-backend-domain.com
+DATABASE_URL=postgresql+asyncpg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres
 OLLAMA_MODEL=gemma2:2b
 ```
+`DATABASE_URL` is **required** — `docker compose up` refuses to start at all without it, on
+purpose, rather than silently falling back to a local SQLite database no one is looking at.
 `OLLAMA_MODEL` only affects the crawler's extraction step — it has no effect on general chat/
 generation, which always uses Groq/Replicate regardless of this value.
 `PUBLIC_FRONTEND_URL` must match wherever the frontend is actually served from, or the backend
 will reject its requests via CORS.
+
+Real API keys (Groq, Replicate, HuggingFace, Cloudflare, Cloudinary, LangSmith, Firecrawl) are
+**not** set in this file at all — they're DB-managed via Supabase's `app_settings` table
+(`.env.example`'s bottom section has the exact key list + an INSERT template), applied live within
+`SETTINGS_POLL_INTERVAL_SECONDS` with no restart needed.
 
 ### 5. First manual start (confirms everything works before wiring up CI)
 
