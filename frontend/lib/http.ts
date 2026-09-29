@@ -4,7 +4,15 @@
  * block (the exact kind of duplication a real DRY audit already flagged once this session).
  */
 
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// Real, live-found deploy blocker (2026-09-29): defaulting to "http://localhost:8000" meant a
+// production deploy (Vercel) with NEXT_PUBLIC_API_BASE_URL simply left unset silently called
+// localhost from every visitor's own browser instead of the real backend — and Vercel's own env
+// var UI refuses to save a truly empty value, so "set it to empty string" wasn't even achievable
+// there. Defaulting to "" (relative paths, proxied by next.config.js's rewrite in production)
+// instead means the RIGHT thing now happens when the var is simply omitted — local dev still
+// gets the real default via frontend/.env.local, which explicitly sets this to
+// "http://localhost:8000" and is unaffected by this change.
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
 
 export class ApiError extends Error {
   constructor(

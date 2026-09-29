@@ -19,6 +19,20 @@ log = get_logger(__name__)
 
 _PROMPTS_DIR = Path(__file__).parent / "prompts"
 
+# Real, live-found gap (2026-09-29, adding the Copy Lead specialists): every tool named here is a
+# pure lookup/analysis/calculator that never returns a `storage_ref` (confirmed by reading each
+# tool file's own return shape) — a specialist whose ENTIRE `allowed_tools` is a subset of this set
+# can genuinely never produce an asset, no matter what it does. `SpecialistSpec.is_lookup_only`
+# uses this to tell "produced no asset because it declined an edit" (composition_artist,
+# overlay_artist, ...) apart from "produced no asset because its real answer IS the JSON itself"
+# (caption_writer, headline_writer, tone_calibrator, copy_claims_checker, and — a pre-existing,
+# previously-unexercised instance of the same gap — reference_curator/palette_strategist).
+_LOOKUP_ONLY_TOOLS = frozenset({
+    "brand_kit_lookup", "product_lookup", "discount_claims_calculator", "discount_math_calculator",
+    "web_trend_search", "asset_mood_board_search", "color_palette_extractor",
+    "visual_palette_analyzer", "audio_transcriber",
+})
+
 
 @dataclass(frozen=True)
 class SpecialistSpec:
@@ -57,6 +71,32 @@ class SpecialistSpec:
             raise SpecialistNotFound(f"{self.name} (missing prompt file {path.name})")
         boundary = (_PROMPTS_DIR / "_security_boundary.md").read_text(encoding="utf-8")
         return f"{path.read_text(encoding='utf-8')}\n\n{boundary}"
+
+    @property
+    def is_lookup_only(self) -> bool:
+        """True for a specialist whose ENTIRE tool set is read-only lookups/calculators — it can
+        never produce a storage_ref no matter what it does, so a "no asset produced" result from
+        it is a genuine complete answer, not a declined edit. Used by `graph.py`'s
+        `_direct_fix_node` to tell those two cases apart without hardcoding specialist names."""
+        return bool(self.allowed_tools) and set(self.allowed_tools) <= _LOOKUP_ONLY_TOOLS
+
+    def format_result_as_text(self, data: dict) -> str:
+        """A readable rendering of this specialist's own validated JSON result (already guaranteed
+        by `runner.py`'s `required_output_fields` check to have every declared key present) — used
+        when a lookup-only specialist's real answer has to be shown as a chat message instead of
+        becoming a canvas asset. Generic across every current and future lookup-only specialist;
+        no per-specialist-name branching."""
+        def _render(value: object) -> str:
+            if isinstance(value, list):
+                return ", ".join(str(v) for v in value)
+            if isinstance(value, dict):
+                return "; ".join(f"{k}: {v}" for k, v in value.items())
+            return str(value)
+
+        return "\n\n".join(
+            f"{field.replace('_', ' ').title()}: {_render(data.get(field))}"
+            for field in self.required_output_fields
+        )
 
 
 # Phase 0 scope: empty on purpose. Phase 1 adds the Visual Design Lead's four specs
@@ -190,6 +230,43 @@ def load_all_specialists() -> None:
         tier=ModelTier.TIER_1,
         description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio).",
         required_output_fields=("has_script", "script_line"),
+    ))
+    # Copy Lead group (2026-09-29, Architecture.md's Copy Lead table) — all four are pure-JSON,
+    # lookup-only specialists (see `is_lookup_only`/`_LOOKUP_ONLY_TOOLS` above), standalone-reachable
+    # via direct_fix per the architecture doc's own examples ("just give me 5 headline options",
+    # "write the caption, I already have the image", "make this copy more minimal/more playful",
+    # "double-check the discount math before this goes out").
+    register_specialist(SpecialistSpec(
+        name="headline_writer",
+        prompt_file="headline_writer.md",
+        allowed_tools=("brand_kit_lookup",),
+        tier=ModelTier.TIER_1,
+        description="Writes short, high-impact headlines/lead lines and alternatives for a campaign. Text only, produces no image/video/audio asset itself.",
+        required_output_fields=("primary_headline", "alternative_headlines", "hook_strategy"),
+    ))
+    register_specialist(SpecialistSpec(
+        name="caption_writer",
+        prompt_file="caption_writer.md",
+        allowed_tools=("brand_kit_lookup", "product_lookup"),
+        tier=ModelTier.TIER_1,
+        description="Writes the full social caption — body copy, call-to-action, and hashtags — for an already-approved headline/concept. Text only, produces no image/video/audio asset itself.",
+        required_output_fields=("caption_body", "call_to_action", "hashtags"),
+    ))
+    register_specialist(SpecialistSpec(
+        name="tone_calibrator",
+        prompt_file="tone_calibrator.md",
+        allowed_tools=("brand_kit_lookup",),
+        tier=ModelTier.TIER_1,
+        description="Calibrates brand voice up/down for a specific audience segment (e.g. 'make this more minimal/more playful') — text only, produces no asset itself.",
+        required_output_fields=("target_segment", "tone_profile", "voice_guidelines"),
+    ))
+    register_specialist(SpecialistSpec(
+        name="copy_claims_checker",
+        prompt_file="copy_claims_checker.md",
+        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup"),
+        tier=ModelTier.TIER_1,
+        description="Verifies prices, discounts, specs, and claims stated in marketing copy against real product facts — flags each as verified/invalid/unconfirmed with a correction. Text only, produces no asset itself.",
+        required_output_fields=("verified", "flagged_claims", "verification_notes"),
     ))
     register_specialist(SpecialistSpec(
         # Deliberately NOT given brand_kit_lookup, unlike every other specialist — the reference

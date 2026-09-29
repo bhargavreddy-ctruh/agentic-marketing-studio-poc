@@ -51,6 +51,7 @@ from ..leads.motion_lead import run_motion_lead
 from ..leads.narrative_lead import run_narrative_lead
 from ..leads.scene_lead import run_scene_lead
 from ..leads.visual_design_lead import run_visual_design_lead
+from ..specialists.registry import get_specialist
 from ..specialists.runner import run_concurrent_specialists, run_specialist_with_review
 from .orchestrator import route, route_condition
 from .state import GraphState
@@ -1091,6 +1092,23 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
     produced_ref, produced_tool = _produced_ref(step)
 
     if not produced_ref:
+        # Real, live-found gap (2026-09-29, adding the Copy Lead specialists): a lookup-only
+        # specialist (caption_writer, headline_writer, tone_calibrator, copy_claims_checker, and —
+        # a pre-existing, previously-unexercised instance of the same gap — reference_curator/
+        # palette_strategist) can NEVER produce a storage_ref no matter how successfully it ran —
+        # its real answer IS the JSON itself. Without this check, a genuinely complete result fell
+        # through to the "wasn't confident enough" branch below, discarding it. Gated on
+        # `is_lookup_only` (SpecialistSpec.allowed_tools all in the explicit lookup allowlist) so
+        # this can never change behavior for a specialist with a real asset-producing tool
+        # (composition_artist/overlay_artist/etc. declining an edit still hits the branch below,
+        # unchanged) — `runner.py` already guarantees every `required_output_fields` key is present
+        # by the time a result reaches here, re-checked directly rather than assumed.
+        spec = get_specialist(target)
+        if spec.is_lookup_only and all(f in step.data for f in spec.required_output_fields):
+            state["result"] = {"message": spec.format_result_as_text(step.data), "specialist_notes": step.data}
+            emit("lead_completed", lead="direct_fix", no_op=False)
+            return state
+
         # The specialist ran and reasoned, but genuinely made no tool call that produced a new
         # asset — an honest non-result, not an error (Rules.md section 2: no fabricated success).
         # A real, live-found gap (2026-09-22, per an explicit user ask: "don't assume, make the
