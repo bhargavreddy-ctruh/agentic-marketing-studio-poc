@@ -14,7 +14,7 @@ Return this JSON AND you MUST also call the required tools to execute your task 
 If a required tool fails or you cannot fulfill the request, ignore the schema below and return ONLY {"error": "explanation"}.
 
 {
-  "audio_recommendation": "voiceover" or "silent",
+  "audio_recommendation": "voiceover | silent",
   "voiceover_line": "the exact spoken text, or empty string",
   "should_mux": true,
   "notes": "any additional audio context, 1-2 sentences, under ~300 characters"
