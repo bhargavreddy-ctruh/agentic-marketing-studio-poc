@@ -2,8 +2,8 @@
 The declarative base + the async engine/session factory.
 
 Rules.md section 2: models/ never imports from services/ or schemas/ — persistence schema only.
-SQLAlchemy is used specifically (over raw sqlite3) so switching database_url to a Postgres/Supabase
-DSN later is a config change, not a rewrite — see Architecture.md section 4 (portability).
+`database_url` (core/config.py) is Postgres/Supabase only — this app's one real connection
+(2026-09-30, no fallback, per an explicit user ask).
 """
 from __future__ import annotations
 
@@ -39,8 +39,10 @@ async def init_models() -> None:
     """Create tables if they don't exist. Fine for a POC; a real migration tool comes later."""
     async with _engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        
-        # Lightweight column migrations for SQLite
+
+        # Lightweight column migrations — Postgres (Supabase) only; this app's only real
+        # connection (2026-09-30, per an explicit user ask to drop dead SQLite-only code paths
+        # now that no deployment ever runs against SQLite).
         migrations = [
             ("product_profiles", "user_id", "VARCHAR(36)"),
             ("product_profiles", "photo_storage_ref", "VARCHAR(255)"),
@@ -66,8 +68,7 @@ async def init_models() -> None:
             ("canvas_elements", "safe_zone_pct", "FLOAT"),
             # campaign_id/campaign_name (2026-09-25) discarded same-day per explicit user
             # correction — a workflow IS one campaign; grouping is by real product instead (see
-            # `models/canvas_element.py`). Those two columns are left as harmless dead columns in
-            # any DB that already ran the earlier migration (SQLite can't cheaply drop a column);
+            # `models/canvas_element.py`). Those two columns are left as harmless dead columns;
             # nothing reads them any more.
             ("canvas_elements", "product_id", "VARCHAR(36)"),
             ("canvas_elements", "product_name", "VARCHAR(255)"),
@@ -76,32 +77,11 @@ async def init_models() -> None:
         ]
         from sqlalchemy import text
 
-        from ..core.middleware.logging import get_logger
-
-        log = get_logger(__name__)
-        # Postgres (Supabase) supports `ADD COLUMN IF NOT EXISTS` natively — cleaner and race-free,
-        # unlike the try/except-swallow below. SQLite's ALTER TABLE ADD COLUMN has no IF NOT EXISTS
-        # clause at all, so it still needs the try/except path. Branching on dialect here (rather
-        # than picking one syntax) keeps both a local SQLite dev run and a Supabase deploy working
-        # off the exact same migrations list.
-        is_postgres = conn.dialect.name == "postgresql"
+        # Postgres's `ADD COLUMN IF NOT EXISTS` — cleaner and race-free than a try/except-swallow.
         for table, col, col_type in migrations:
-            if is_postgres:
-                await conn.execute(
-                    text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
-                )
-            else:
-                try:
-                    await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
-                except Exception as exc:  # expected/normal once the column already exists
-                    log.debug(
-                        "add_column_skipped",
-                        extra={
-                            "_extra_table": table,
-                            "_extra_column": col,
-                            "_extra_error": str(exc),
-                        },
-                    )
+            await conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}")
+            )
 
 
 def get_engine():

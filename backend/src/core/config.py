@@ -154,7 +154,12 @@ class Settings(BaseSettings):
     firecrawl_api_key: str | None = None
 
     # --- Persistence ---
-    database_url: str = "sqlite+aiosqlite:///./poc.db"
+    # No default (2026-09-30, per an explicit user ask: "no database fallback, only .env" — this
+    # app's only real connection is Postgres/Supabase; a silent local-SQLite default here
+    # contradicted that same rule already applied to storage/settings elsewhere). Missing
+    # DATABASE_URL now fails loudly with a clear pydantic ValidationError at process startup,
+    # never a silent switch to a different database.
+    database_url: str
 
     # --- Runtime settings overrides (services/settings/settings_service.py, 2026-09-28) — how
     # often the background poll loop re-reads the `app_settings` table for hand-edited rows (the
