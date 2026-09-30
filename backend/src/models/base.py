@@ -31,8 +31,36 @@ class TimestampMixin:
     )
 
 
-_engine = create_async_engine(settings.database_url, echo=False)
+_engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    # Real, live-found incident (2026-09-30): Supabase's Session Pooler caps a project at 15 total
+    # connections project-wide — SQLAlchemy's own defaults (pool_size=5 + max_overflow=10 = 15)
+    # meant this ONE backend process could alone consume the project's ENTIRE budget, and a leak
+    # (a redeploy whose old container's connections weren't cleanly released) pegged it there for
+    # 15+ hours, breaking every real request (`canvas`/`sessions` routes) with a raw
+    # `asyncpg.exceptions.InternalServerError: max clients reached`.
+    pool_size=3,
+    max_overflow=2,
+    # Detects a stale/dead connection (the far end silently closed it) before handing it to a
+    # request, transparently reconnecting instead of the app holding a broken connection open
+    # indefinitely — a real contributor to how connections accumulated unused for hours.
+    pool_pre_ping=True,
+    # Forces every pooled connection to be recycled after 5 minutes, regardless of use — a hard
+    # ceiling on how long any single connection can sit in the pool, so a future leak of this same
+    # shape can no longer hold a slot for 15+ hours the way this incident's did.
+    pool_recycle=300,
+)
 async_session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+
+async def dispose_engine() -> None:
+    """Real, live-found gap alongside the incident above: a graceful shutdown never closed this
+    engine's pool at all — `main.py`'s `lifespan()` only ever cancelled the settings poll task,
+    relying entirely on the OS closing sockets when the process exits. That's normally enough, but
+    is not a substitute for an explicit, deterministic close — call this from `lifespan()`'s
+    shutdown path so a graceful restart always releases every pooled connection immediately."""
+    await _engine.dispose()
 
 
 async def init_models() -> None:

@@ -21,7 +21,7 @@ from .core.config import settings
 from .core.middleware.correlation import CorrelationIdMiddleware
 from .core.middleware.error_handler import register_error_handlers
 from .core.middleware.logging import configure_logging, get_logger
-from .models.base import async_session_factory, init_models
+from .models.base import async_session_factory, dispose_engine, init_models
 from .providers.observability.langsmith import configure_langsmith
 from .repositories.sqlite.sqlite_app_setting_repository import SqliteAppSettingRepository
 from .repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
@@ -74,6 +74,7 @@ async def lifespan(app: FastAPI):
     log.info("app_started", extra={"_extra_project": settings.langsmith_project})
     yield
     settings_poll_task.cancel()
+    await dispose_engine()
     log.info("app_shutdown")
 
 
