@@ -18,6 +18,9 @@ export interface ProductAttributes {
   summary: string;
   price: number | null;
   discount_percent: number | null;
+  // The product's real, physical color (2026-09-30) — a genuine product fact, distinct from any
+  // brand color guideline. See backend/src/core/guardrails.py's _product_rules "color" handling.
+  color: string;
   must_show: string[];
   never_show: string[];
   claims_allowed: string[];
@@ -57,6 +60,7 @@ export async function onboardProduct(
   description: string,
   price?: number,
   discountPercent?: number,
+  color?: string,
 ): Promise<ProductProfile> {
   const product = await request<ProductProfile>("/api/v1/products", {
     method: "POST",
@@ -66,6 +70,7 @@ export async function onboardProduct(
       description,
       price: price ?? null,
       discount_percent: discountPercent ?? null,
+      color: color?.trim() || null,
     }),
   });
   saveOnboardedIds([...loadOnboardedIds().filter((id) => id !== product.id), product.id]);

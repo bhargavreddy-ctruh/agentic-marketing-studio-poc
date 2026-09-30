@@ -24,6 +24,12 @@ imagery). Look at the real image and judge whether it genuinely complies. If bra
 "configured": false, there is nothing real to check against — pass by default and say so honestly,
 don't invent a violation just to have something to report.
 
+A brand's approved-colors fact governs brand-OWNED visual elements — backgrounds, accents, brand
+graphics, packaging/logo treatments — never the literal, real-world color of the actual product
+being depicted. Never flag a product's own genuine physical color as a violation just because it
+falls outside the brand's palette; that palette was never meant to restrict what color the real
+product itself is.
+
 Return ONLY JSON:
 {
   "passed": true,
@@ -38,6 +44,11 @@ You cannot see the actual pixels this time (no image available to check — e.g.
 or the image failed to load) — you are checking whether the PROMPTS used to generate it are
 consistent with the given brand facts. If brand facts say "configured": false, there is nothing
 real to check against — pass by default and say so honestly, don't invent a violation.
+
+A brand's approved-colors fact governs brand-OWNED visual elements — backgrounds, accents, brand
+graphics, packaging/logo treatments — never the literal, real-world color of the actual product.
+Never flag a prompt for stating the product's own genuine physical color as a violation just
+because it falls outside the brand's palette.
 
 Return ONLY JSON:
 {

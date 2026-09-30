@@ -11,6 +11,11 @@ class OnboardProductRequest(BaseModel):
     description: str = Field(..., min_length=1, max_length=4000)
     price: float | None = None
     discount_percent: float | None = None
+    # The product's real, physical color (2026-09-30, real requirement: a genuine product fact,
+    # distinct from any brand color guideline — see core/guardrails.py's _product_rules "color"
+    # handling, the actual fix for a real bug where the app refused a red product as a brand-color
+    # guardrail violation).
+    color: str | None = Field(default=None, max_length=100)
 
 
 class UpdateProductRequest(BaseModel):

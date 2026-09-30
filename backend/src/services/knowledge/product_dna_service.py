@@ -51,6 +51,7 @@ Return ONLY JSON:
   "summary": "one or two sentences describing the product for generation purposes",
   "price": number or null,
   "discount_percent": number or null,
+  "color": "the product's real, physical color if actually stated/shown (e.g. 'red'), empty string if unclear — this is a genuine product fact, distinct from any brand color guideline",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
@@ -88,6 +89,7 @@ def _build_index_text(name: str, attributes: dict) -> str:
     return (
         f"Product: {name}\nSummary: {attributes.get('summary', '')}\n"
         f"Price: {attributes.get('price')}\nDiscount: {attributes.get('discount_percent')}%\n"
+        f"Color: {attributes.get('color', '')}\n"
         f"Must show: {attributes.get('must_show', [])}\nNever show: {attributes.get('never_show', [])}\n"
         f"Claims allowed: {attributes.get('claims_allowed', [])}\n"
         f"Claims disallowed: {attributes.get('claims_disallowed', [])}"
@@ -100,9 +102,14 @@ specialists must bind exact facts from rather than free-generating: what must al
 what must never be shown, which claims are allowed, which are disallowed, and label visibility
 requirements. Only state a price or discount if one was actually given — never invent a number.
 
+Also extract the product's real, physical COLOR if the description states or clearly implies one
+(2026-09-30, real requirement: a product's own genuine color is a real fact distinct from any
+brand color guideline — never invent one if it isn't actually stated).
+
 Return ONLY JSON:
 {
   "summary": "one or two sentences describing the product for generation purposes",
+  "color": "the product's real, physical color if actually stated, empty string if unclear",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
@@ -130,8 +137,10 @@ and a new chat message. Decide:
    genuinely NEW, DIFFERENT product this session hasn't seen before? Only treat it as the same
    product if it's clearly the same subject — a different name, category or use-case means it's new.
 3. Extract the full Product DNA from this message: what must always be shown, what must never be
-   shown, which claims are allowed/disallowed, label visibility, price/discount if actually stated.
-   Never invent a price, discount, or any fact not actually in the message.
+   shown, which claims are allowed/disallowed, label visibility, price/discount if actually stated,
+   and the product's real, physical COLOR if the message states or clearly implies one (e.g. "the
+   red sneaker") — a genuine product fact, distinct from any brand color guideline. Never invent a
+   price, discount, color, or any fact not actually in the message.
 
 Return ONLY JSON:
 {
@@ -141,6 +150,7 @@ Return ONLY JSON:
   "summary": "one or two sentences describing the product for generation purposes",
   "price": number or null,
   "discount_percent": number or null,
+  "color": "the product's real, physical color if actually stated, empty string if unclear",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
@@ -166,8 +176,11 @@ and the uploaded image. Decide:
    leave every other field empty/null — do not guess a product into existence.
 2. If it IS a product photo: does it show one of the ALREADY-KNOWN products, or a genuinely NEW,
    DIFFERENT one this session hasn't seen before?
-3. Extract Product DNA ONLY from what's actually visible in the image — visible colors, materials,
-   design details go in "must_show". Never invent a price, discount, or a claim you can't see.
+3. Extract Product DNA ONLY from what's actually visible in the image — visible materials, design
+   details go in "must_show". Also extract the product's real, DOMINANT physical color as its own
+   "color" field (2026-09-30, real requirement: a real vision-grounded product fact, distinct from
+   any brand color guideline — a red product is genuinely red, never a brand-identity violation).
+   Never invent a price, discount, or a claim you can't see.
 
 Return ONLY JSON:
 {
@@ -175,6 +188,7 @@ Return ONLY JSON:
   "matched_product_id": "the id of the already-known product this shows, or null if new",
   "name": "the product's name — required when is_product_photo is true and matched_product_id is null",
   "summary": "one or two sentences describing the product for generation purposes",
+  "color": "the product's real, dominant physical color as actually seen, empty string if unclear",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
@@ -194,17 +208,23 @@ def _str_list(value: Any) -> list[str]:
 
 def _build_attributes(
     parsed: dict, *, price: float | None, discount_percent: float | None,
-    description_fallback: str, existing: dict | None = None,
+    description_fallback: str, existing: dict | None = None, color: str | None = None,
 ) -> dict:
     """Shared attribute-dict shape for both `onboard_product` (fresh, no `existing`) and
     `upsert_product_from_chat` (refining a known product's DNA, `existing` = its current
     attributes) — a field the model didn't mention this round falls back to what was already known
-    rather than being wiped."""
+    rather than being wiped.
+
+    `color` (2026-09-30, real requirement: the product's own real, physical color needs to be a
+    stored fact `core/guardrails.py`'s `_product_rules` can turn into an authoritative rule — see
+    the "red sneaker" bug this closes) — an explicit caller-given value (the onboarding form) wins;
+    otherwise falls back to whatever the extraction itself found, then to what was already known."""
     existing = existing or {}
     return {
         "summary": str(parsed.get("summary") or existing.get("summary") or description_fallback[:400]),
         "price": price if price is not None else existing.get("price"),
         "discount_percent": discount_percent if discount_percent is not None else existing.get("discount_percent"),
+        "color": str(color or parsed.get("color") or existing.get("color", "")),
         "must_show": _str_list(parsed.get("must_show")) or existing.get("must_show", []),
         "never_show": _str_list(parsed.get("never_show")) or existing.get("never_show", []),
         "claims_allowed": _str_list(parsed.get("claims_allowed")) or existing.get("claims_allowed", []),
@@ -220,7 +240,7 @@ class ProductDnaService:
     @traceable(name="product_dna_service")
     async def onboard_product(
         self, *, user_id: str, name: str, description: str, price: float | None, discount_percent: float | None,
-        product_id: str | None = None,
+        product_id: str | None = None, color: str | None = None,
     ) -> ProductProfileModel:
         """`product_id` (2026-09-25, real requirement: connect the "DNA" tab's manual Product DNA
         form to real, session-scoped Product DNA instead of the old loose-rule-text mechanism) —
@@ -248,7 +268,7 @@ class ProductDnaService:
         existing = await self._products.get(product_id) if product_id else None
         attributes = _build_attributes(
             parsed, price=price, discount_percent=discount_percent, description_fallback=description,
-            existing=existing.attributes if existing else None,
+            existing=existing.attributes if existing else None, color=color,
         )
 
         if existing:
