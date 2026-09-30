@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter
-from starlette.responses import StreamingResponse
+from fastapi import APIRouter, status
+from starlette.responses import Response, StreamingResponse
 
 from ....core.events import stream_events
 from ....core.middleware.logging import get_logger
@@ -22,6 +22,7 @@ from ....schemas.sessions.requests import (
     UpdateApprovalModeRequest,
     UpdateDnaRequest,
     UpdateGuardrailsEnabledRequest,
+    UpdateTitleRequest,
 )
 from ....schemas.sessions.responses import ChatTurnResponse, SessionResponse
 from ...dependencies import CurrentUserDep, SessionServiceDep
@@ -73,6 +74,26 @@ async def update_guardrails_enabled(
     return await svc.update_guardrails_enabled(
         session_id, user_id=current_user.id, guardrails_enabled=body.guardrails_enabled
     )
+
+
+@router.put("/{session_id}/title", response_model=SessionResponse)
+async def update_title(
+    session_id: str, body: UpdateTitleRequest, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> SessionResponse:
+    """Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on
+    workflows") — same shape as `update_approval_mode` above."""
+    return await svc.update_title(session_id, user_id=current_user.id, title=body.title)
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
+) -> Response:
+    """Permanently deletes a workflow and everything on it (2026-09-30, explicit user ask) —
+    ownership-checked like every other session route (`svc.delete_session` raises
+    Forbidden/NotFoundError before deleting anything)."""
+    await svc.delete_session(session_id, user_id=current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.put("/{session_id}/dna", response_model=SessionResponse)

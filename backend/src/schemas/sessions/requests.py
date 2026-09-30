@@ -32,6 +32,12 @@ class UpdateGuardrailsEnabledRequest(BaseModel):
     guardrails_enabled: bool
 
 
+class UpdateTitleRequest(BaseModel):
+    # Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on workflows")
+    # — same max_length as CreateSessionRequest.title above.
+    title: str = Field(min_length=1, max_length=200)
+
+
 class PostTurnRequest(BaseModel):
     # Exactly one of these should be set — a card pick, or free text (Architecture.md section 1d).
     picked_option_id: str | None = None

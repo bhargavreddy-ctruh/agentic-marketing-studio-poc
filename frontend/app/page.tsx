@@ -3,7 +3,14 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ApiError, User, logout, me } from "@/lib/auth";
-import { SessionResponse, createSession, crawlUrl, listSessions } from "@/lib/api";
+import {
+  SessionResponse,
+  createSession,
+  crawlUrl,
+  deleteSession,
+  listSessions,
+  updateSessionTitle,
+} from "@/lib/api";
 import { BrandProfile, listBrands, onboardBrand } from "@/lib/brand";
 import { ProductProfile, listOnboardedProducts, onboardProduct } from "@/lib/product";
 import { MoodBoardAsset, listMoodBoardAssets, moodBoardAssetUrl, uploadMoodBoardAsset } from "@/lib/moodboard";
@@ -33,6 +40,12 @@ export default function HomePage() {
   const [newCompanyUrl, setNewCompanyUrl] = useState("");
   const [newProductUrl, setNewProductUrl] = useState("");
   const [creating, setCreating] = useState(false);
+
+  // Edit/delete a workflow (2026-09-30, explicit user ask: "add a delete/edit button on
+  // workflows") — `editingId` tracks which row is showing its inline rename input, if any.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const [rowBusyId, setRowBusyId] = useState<string | null>(null);
 
   const [showSettings, setShowSettings] = useState(false);
   const [settingsTab, setSettingsTab] = useState<"brand" | "product" | "moodboard">("brand");
@@ -113,6 +126,44 @@ export default function HomePage() {
     } catch (err) {
       setWorkflowsError(err instanceof ApiError ? err.message : "Could not create a new workflow.");
       setCreating(false);
+    }
+  }
+
+  function startEditingWorkflow(w: SessionResponse) {
+    setEditingId(w.id);
+    setEditingTitle(w.title);
+  }
+
+  async function handleSaveTitle(sessionId: string) {
+    const trimmed = editingTitle.trim();
+    if (!trimmed) {
+      setEditingId(null);
+      return;
+    }
+    setRowBusyId(sessionId);
+    try {
+      await updateSessionTitle(sessionId, trimmed);
+      setEditingId(null);
+      await refreshWorkflows();
+    } catch (err) {
+      setWorkflowsError(err instanceof ApiError ? err.message : "Could not rename this workflow.");
+    } finally {
+      setRowBusyId(null);
+    }
+  }
+
+  async function handleDeleteWorkflow(w: SessionResponse) {
+    if (!window.confirm(`Delete "${w.title}"? This permanently removes it and everything on its canvas — this cannot be undone.`)) {
+      return;
+    }
+    setRowBusyId(w.id);
+    try {
+      await deleteSession(w.id);
+      await refreshWorkflows();
+    } catch (err) {
+      setWorkflowsError(err instanceof ApiError ? err.message : "Could not delete this workflow.");
+    } finally {
+      setRowBusyId(null);
     }
   }
 
@@ -355,25 +406,84 @@ export default function HomePage() {
               </p>
             )}
             {workflows.map((w) => (
-              <button
+              <div
                 key={w.id}
-                onClick={() => router.push(`/studio/${w.id}`)}
-                className="group flex items-center justify-between rounded-xl border border-surface-700/50 bg-surface-900/60 p-4 text-left shadow-sm backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-surface-600/60 hover:bg-surface-800/60 hover:shadow-md"
+                className="group flex items-center justify-between rounded-xl border border-surface-700/50 bg-surface-900/60 p-4 shadow-sm backdrop-blur-sm transition-all hover:-translate-y-0.5 hover:border-surface-600/60 hover:bg-surface-800/60 hover:shadow-md"
               >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate font-medium text-surface-50">{w.title}</p>
-                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                    <WorkflowStatusBadge status={w.status} />
-                    <ApprovalBadge mode={w.approval_mode} />
-                    <span className="text-xs text-surface-500">
-                      · updated {new Date(w.updated_at).toLocaleString()}
-                    </span>
+                {editingId === w.id ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <input
+                      autoFocus
+                      value={editingTitle}
+                      onChange={(e) => setEditingTitle(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSaveTitle(w.id);
+                        if (e.key === "Escape") setEditingId(null);
+                      }}
+                      className="min-w-0 flex-1 rounded-lg border border-brand-500/50 bg-surface-800 px-2.5 py-1.5 text-sm text-surface-50 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                    <button
+                      onClick={() => handleSaveTitle(w.id)}
+                      disabled={rowBusyId === w.id}
+                      className="rounded-lg bg-brand-500 px-2.5 py-1.5 text-xs font-medium text-white transition-colors hover:bg-brand-600 disabled:opacity-50"
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={() => setEditingId(null)}
+                      className="rounded-lg border border-surface-700/50 px-2.5 py-1.5 text-xs text-surface-300 transition-colors hover:bg-surface-800/60"
+                    >
+                      Cancel
+                    </button>
                   </div>
-                </div>
-                <svg className="ml-3 h-4 w-4 shrink-0 text-surface-500 transition-transform group-hover:translate-x-0.5 group-hover:text-surface-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                </svg>
-              </button>
+                ) : (
+                  <button
+                    onClick={() => router.push(`/studio/${w.id}`)}
+                    className="flex min-w-0 flex-1 items-center justify-between text-left"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-medium text-surface-50">{w.title}</p>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                        <WorkflowStatusBadge status={w.status} />
+                        <ApprovalBadge mode={w.approval_mode} />
+                        <span className="text-xs text-surface-500">
+                          · updated {new Date(w.updated_at).toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+                    <svg className="ml-3 h-4 w-4 shrink-0 text-surface-500 transition-transform group-hover:translate-x-0.5 group-hover:text-surface-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                )}
+
+                {editingId !== w.id && (
+                  <div className="ml-2 flex shrink-0 items-center gap-1">
+                    <button
+                      onClick={() => startEditingWorkflow(w)}
+                      disabled={rowBusyId === w.id}
+                      title="Rename"
+                      className="rounded-lg p-1.5 text-surface-500 opacity-0 transition-all hover:bg-surface-800 hover:text-surface-200 disabled:opacity-50 group-hover:opacity-100"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                    </button>
+                    <button
+                      onClick={() => handleDeleteWorkflow(w)}
+                      disabled={rowBusyId === w.id}
+                      title="Delete"
+                      className="rounded-lg p-1.5 text-surface-500 opacity-0 transition-all hover:bg-red-900/40 hover:text-red-400 disabled:opacity-50 group-hover:opacity-100"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </section>

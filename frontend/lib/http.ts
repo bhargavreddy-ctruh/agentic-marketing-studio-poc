@@ -49,6 +49,24 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** Same shared fetch/error-handling as `request` above, for an endpoint that returns 204 No
+ * Content on success (2026-09-30, the new `DELETE /sessions/{id}`) — `request`'s own unconditional
+ * `res.json()` throws a SyntaxError against an empty body, so a no-content caller needs this
+ * instead rather than working around that in every individual call site. */
+export async function requestNoContent(path: string, init?: RequestInit): Promise<void> {
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include", cache: "no-store" });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail ?? body.message ?? detail;
+    } catch {
+      // body wasn't JSON — keep statusText
+    }
+    throw new ApiError(detail, res.status);
+  }
+}
+
 /** The real URL for the bytes behind a storage_ref (`GET /api/v1/canvas/assets/{storage_ref}`,
  * Phase 4b) — every other canvas endpoint returns metadata only.
  *
