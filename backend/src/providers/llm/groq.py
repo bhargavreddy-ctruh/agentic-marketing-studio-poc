@@ -21,6 +21,7 @@ from ...core.config import settings
 from ...core.exceptions import ProviderUnavailable
 from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMProvider, LLMResult, ModelTier
+from .key_cooldown import is_cooling_down, mark_rate_limited
 
 _TIER_TO_MODELS: dict[ModelTier, str | None] = {
     ModelTier.TIER_1: settings.groq_model_tier_1,
@@ -64,7 +65,11 @@ class GroqProvider(LLMProvider):
 
         last_error: Exception | None = None
         for model in models:
-            for key in keys:
+            # Try keys not currently cooling down from a recent 429 first (stable sort: False
+            # before True) — still falls through to a cooling-down key if every key is, so a
+            # too-long cooldown window never fully blocks a call.
+            ordered_keys = sorted(keys, key=is_cooling_down)
+            for key in ordered_keys:
                 try:
                     return await call_openai_compatible_chat(
                         provider_name="groq",
@@ -82,6 +87,8 @@ class GroqProvider(LLMProvider):
                     last_error = exc
                     # If it's a rate limit, the API key is exhausted. We can try the next key.
                     # But if we exhaust all keys, it raises last_error quickly without internal backoff loops.
+                    if "rate limited" in exc.message:
+                        mark_rate_limited(key)
                     continue
 
         raise last_error or ProviderUnavailable("groq", "all models and keys failed")

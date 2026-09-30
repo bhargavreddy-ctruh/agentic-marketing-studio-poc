@@ -32,6 +32,7 @@ from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMResult, ModelTier
+from .key_cooldown import is_cooling_down, mark_rate_limited
 from .replicate_llm import get_replicate_llm_provider
 
 log = get_logger(__name__)
@@ -114,8 +115,11 @@ async def complete_with_vision(
     # once (retries=0), fall through to the next on a rate limit, and only fall back to Replicate
     # once every key has failed.
     keys = [k.strip() for k in (settings.groq_api_key or "").split(",") if k.strip()]
+    # Same cooldown-ordering hint as groq.py — try keys not currently cooling down from a recent
+    # 429 first, still falling through to a cooling-down key if every key is.
+    ordered_keys = sorted(keys, key=is_cooling_down)
     last_error: ProviderUnavailable | None = None
-    for key in keys:
+    for key in ordered_keys:
         try:
             return await call_openai_compatible_chat(
                 provider_name="groq",
@@ -129,6 +133,8 @@ async def complete_with_vision(
             )
         except ProviderUnavailable as exc:
             last_error = exc
+            if "rate limited" in exc.message:
+                mark_rate_limited(key)
             continue
 
     if last_error is not None:
