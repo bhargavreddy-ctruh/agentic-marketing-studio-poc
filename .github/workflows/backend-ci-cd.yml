@@ -17,6 +17,31 @@ jobs:
   test:
     name: Lint & test backend
     runs-on: ubuntu-latest
+
+    # Real, live-found CI break (2026-09-30): `database_url` (backend/src/core/config.py) is a
+    # required field with no default as of the "no silent SQLite fallback" fix — every test run
+    # since then failed at collection with `pydantic_core.ValidationError: database_url Field
+    # required`, since CI has no real DATABASE_URL and must never be handed the real production
+    # Supabase one anyway. An ephemeral, disposable Postgres service container gives Settings()
+    # something real to construct against, fully isolated from production.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
+
     steps:
       - uses: actions/checkout@v4
 
