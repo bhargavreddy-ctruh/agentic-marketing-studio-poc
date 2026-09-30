@@ -31,6 +31,7 @@ from langgraph.graph import END, StateGraph
 
 from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
+from ...core.element_context import get_verified_image_description
 from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import emit
 from ...core.exceptions import SpecialistFailed, SpecialistNotFound
@@ -1045,7 +1046,13 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
         for i, el in enumerate(referenced_elements, 1):
             ref = el.get("storage_ref")
             kind = el.get("element_type", "unknown")
-            desc = el.get("description") or NO_DESCRIPTION_SENTINEL
+            # Real, live-found gap (2026-09-30): the recorded `description` is a generation
+            # prompt — what was ASKED for, not necessarily what was actually delivered. A real
+            # vision call (Replicate's Gemini 2.5 Flash) grounds this in what's ACTUALLY in the
+            # image whenever one's available; falls back to the recorded description on any
+            # vision failure, same as before this existed.
+            verified_desc = await get_verified_image_description(el)
+            desc = verified_desc or el.get("description") or NO_DESCRIPTION_SENTINEL
             context_parts.append(
                 f"Element {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}"
             )
@@ -1209,19 +1216,31 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
-        # Fix 8 (2026-09-26): real image + real JSON together, never JSON alone — shared with
-        # `_direct_fix_node` and `orchestrator.py`'s classifier so all three places that reason
-        # about "what is this element" see the same real image+metadata pairing.
-        from ...core.element_context import build_element_context_blocks
+        # Real, live-found gap (2026-09-30): this used to call `build_element_context_blocks`
+        # (Fix 8, 2026-09-26) to attach a real `image_url` content block alongside text — but
+        # EVERY real specialist call routes through `groq.py`, which passes `strip_images=True`
+        # unconditionally, so that image block was always silently discarded before the request
+        # ever reached the model. Dead weight since it shipped: real base64 payload/tokens built
+        # and sent for nothing. Replaced with `get_verified_image_description` — a real vision
+        # call (Replicate's Gemini 2.5 Flash) made ONCE, grounding the TEXT description in what's
+        # actually in the image, the same pattern `_direct_fix_node` now uses too.
         current_context.append({
             "type": "text",
             "text": "The following existing generated elements are available to reference or fix:",
         })
         for i, el in enumerate(referenced_elements, 1):
-            blocks = await build_element_context_blocks(el)
-            blocks[0]["text"] = f"Element {i}: {blocks[0]['text']}\n(Note: If generating a new visual base from this, pass this storage_ref as 'reference_storage_ref' to base_image_generator)"
-            current_context.append(blocks[0])
-            current_context.extend(blocks[1:])
+            ref = el.get("storage_ref")
+            kind = el.get("element_type", "unknown")
+            verified_desc = await get_verified_image_description(el)
+            desc = verified_desc or el.get("description") or NO_DESCRIPTION_SENTINEL
+            current_context.append({
+                "type": "text",
+                "text": (
+                    f"Element {i} (storage_ref: {ref}, type: {kind}) depicts:\n{desc}\n"
+                    "(Note: If generating a new visual base from this, pass this storage_ref as "
+                    "'reference_storage_ref' to base_image_generator)"
+                ),
+            })
 
     # Deterministic aspect-ratio backstop (2026-09-25) — same shared helper `visual_design_lead.py`
     # uses for the `full_image` route; this is the OTHER call site (Task plan item 4), since a
