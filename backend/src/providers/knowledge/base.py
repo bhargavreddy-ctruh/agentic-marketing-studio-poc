@@ -25,3 +25,7 @@ class KnowledgeProvider(Protocol):
     async def query_top_k(
         self, *, collection: str, question: str, top_k: int = 3
     ) -> list[RetrievedDocument]: ...
+
+    async def query_document(
+        self, *, collection: str, doc_id: str, question: str
+    ) -> str: ...

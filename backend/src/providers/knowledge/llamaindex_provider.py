@@ -130,6 +130,30 @@ class LlamaIndexKnowledgeProvider(KnowledgeProvider):
             for n in nodes
         ]
 
+    async def query_document(self, *, collection: str, doc_id: str, question: str) -> str:
+        """Real, live-found bug (2026-09-30): `query()` searches the WHOLE collection — for
+        Product DNA, that means a question like "must-show facts" is guaranteed to surface
+        whichever product's document happens to score highest, not necessarily the one actually
+        relevant to this turn (a session with several linked products got the wrong one's facts
+        back every time). Filters `query_top_k`'s real per-node `doc_id` down to the one document
+        the caller actually wants, joining its chunks the same way `query()` joins its own.
+        Falls back to plain `query()` (logged) when filtering yields nothing — a stale/mismatched
+        `doc_id` must never produce a silent empty answer when the collection genuinely has
+        relevant content elsewhere."""
+        index = self._load_or_create(collection)
+        retriever = index.as_retriever(similarity_top_k=6)  # larger than query()'s 3 to tolerate
+        # chunking splitting one document across several nodes, none of which alone might be the
+        # top-3 highest-scoring across the whole collection.
+        nodes = retriever.retrieve(question)
+        matching = [n for n in nodes if (n.node.ref_doc_id or n.node.node_id) == doc_id]
+        if not matching:
+            log.warning(
+                "knowledge_query_document_no_match_falling_back",
+                extra={"_extra_collection": collection, "_extra_doc_id": doc_id},
+            )
+            return await self.query(collection=collection, question=question)
+        return "\n\n".join(n.get_content() for n in matching)
+
 
 _singleton: LlamaIndexKnowledgeProvider | None = None
 

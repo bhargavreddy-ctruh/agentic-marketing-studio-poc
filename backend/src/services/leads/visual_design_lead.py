@@ -114,6 +114,25 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
             "product is naturally composited INTO the generated scene in a single pass. "
             "Write the prompt to describe the full scene (background + product placement), not the product alone."
         )
+    # Real, live-found bug (2026-09-30): a collab campaign image rendered literal placeholder
+    # text ("NOTHING LOGO") instead of the brand's real uploaded logo — illustrator's own prompt
+    # already knows to combine 2+ real assets via collab_image_generator when both exist, but
+    # never had the real logo storage_ref to pass, only prose brand facts, so it could only ever
+    # describe/hallucinate a logo in words. Same explicit text-injection pattern as the product
+    # photo above — collab_image_generator requires the ref as a literal arg, not a ctx fallback.
+    brand_logo_ref = brief.get("brand_logo_storage_ref")
+    if brand_logo_ref:
+        illustrator_context += (
+            f"\n\nBRAND LOGO AVAILABLE — storage_ref: {brand_logo_ref}\n"
+            "This is the brand's REAL, actual uploaded logo image — not a description. Whenever this "
+            "generation is already image-to-image/collab (a product photo or other real reference is "
+            "already involved), OR the request explicitly asks for the real logo/brand asset to be "
+            "used, you MUST use collab_image_generator with this storage_ref included in "
+            "reference_storage_refs (alongside the product photo ref above, when both apply) — never "
+            "merely describe the logo in words in that case. A pure text-to-image generation with no "
+            "other real reference involved may still describe the logo stylistically if collab isn't "
+            "otherwise warranted."
+        )
     # Real, live-found failure mode (2026-09-21): a smaller model — specifically router.py's local
     # last-resort fallback, confirmed live at roughly a 1-in-3 rate even after tightening
     # illustrator.md's own wording — sometimes stops after its two lookup tool calls without ever

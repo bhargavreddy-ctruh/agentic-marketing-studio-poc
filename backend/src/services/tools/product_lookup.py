@@ -31,8 +31,21 @@ class ProductLookupTool(Tool):
             return ToolResult(ok=True, data={"facts": "", "configured": False})
 
         question = str(args.get("question") or "").strip()
+        # Real, live-found bug (2026-09-30): an unscoped semantic search over the user's WHOLE
+        # product collection is guaranteed to surface whichever product a fact happened to be
+        # indexed under, not necessarily the one actually relevant this turn — a session with
+        # several linked products got a DIFFERENT product's facts back. Scopes to the turn's
+        # resolved product when one is known (threaded through by session_service.py/runner.py);
+        # falls back to the prior unscoped behavior when none resolved, unchanged.
+        product_id = context.get("product_id") if context else None
         try:
-            answer = await get_knowledge_provider().query(collection=f"product_{user_id}", question=question)
+            knowledge = get_knowledge_provider()
+            if product_id:
+                answer = await knowledge.query_document(
+                    collection=f"product_{user_id}", doc_id=product_id, question=question
+                )
+            else:
+                answer = await knowledge.query(collection=f"product_{user_id}", question=question)
         except ProviderUnavailable:
             return ToolResult(ok=True, data={"facts": "", "configured": False})
         return ToolResult(ok=True, data={"facts": answer, "configured": True})
