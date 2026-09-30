@@ -51,7 +51,7 @@ from ..leads.motion_lead import run_motion_lead
 from ..leads.narrative_lead import run_narrative_lead
 from ..leads.scene_lead import run_scene_lead
 from ..leads.visual_design_lead import run_visual_design_lead
-from ..specialists.registry import get_specialist
+from ..specialists.registry import SPECIALIST_REGISTRY, get_specialist
 from ..specialists.runner import run_concurrent_specialists, run_specialist_with_review
 from .orchestrator import route, route_condition
 from .state import GraphState
@@ -1455,8 +1455,34 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             if isinstance(meta, dict) and meta.get("error"):
                 specialist_error = meta["error"]
                 break
+
+        # Real, live-found gap (2026-09-30, same root cause `_direct_fix_node` was already fixed
+        # for): a dynamic plan made entirely of lookup-only specialists (caption_writer,
+        # headline_writer, tone_calibrator, copy_claims_checker — no asset-producing tool, by
+        # design) can never set `latest_storage_ref`, so their genuinely complete result used to
+        # fall into this same "did not produce any visible assets" message as an outright failure
+        # — discarding a real caption/headline the plan actually wrote. Mirrors
+        # `_direct_fix_node`'s `is_lookup_only`/`format_result_as_text` fix: if every step that ran
+        # was lookup-only and none reported an error, render their real results as the message
+        # instead of a fabricated "nothing happened".
+        lookup_only_text = None
+        if specialist_error is None:
+            rendered: list[str] = []
+            all_lookup_only = True
+            for key, meta in all_metadata.items():
+                if key == "partial_failure" or not isinstance(meta, dict):
+                    continue
+                specialist_name = key.split("_", 2)[-1] if key.count("_") >= 2 else None
+                spec = SPECIALIST_REGISTRY.get(specialist_name) if specialist_name else None
+                if spec is None or not spec.is_lookup_only:
+                    all_lookup_only = False
+                    break
+                rendered.append(spec.format_result_as_text(meta))
+            if all_lookup_only and rendered:
+                lookup_only_text = "\n\n".join(rendered)
+
         state["result"] = {
-            "message": specialist_error or "The plan executed but did not produce any visible assets.",
+            "message": specialist_error or lookup_only_text or "The plan executed but did not produce any visible assets.",
             "specialist_notes": all_metadata,
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
