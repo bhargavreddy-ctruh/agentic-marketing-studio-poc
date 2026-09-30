@@ -322,6 +322,35 @@ def derive_guardrails(
     return GuardrailSet(version=GUARDRAIL_VERSION, rules=rules)
 
 
+def scope_to_product(guardrail_set: GuardrailSet, product_id: str | None) -> GuardrailSet:
+    """Real, live-found bug (2026-09-30): a session that has ever linked several distinct products
+    (e.g. three different phones over its lifetime) merges ALL of their `product.<id>.*` identity
+    rules into one shared set, rendered as a single XML block appended to EVERY specialist's system
+    prompt for EVERY turn — with nothing marking which product's "Name: X" rule actually applies to
+    THIS turn's referenced element. A specialist facing several conflicting "must show this exact
+    product" instructions at once has no way to know which one is real for this turn, and silently
+    anchors on whichever one its underlying LLM call happens to notice first.
+
+    Filters OUT every OTHER product's namespaced rules (`_product_rules`'s `product.<key>.*` id
+    prefix) from the per-turn XML a specialist actually sees, keeping only the resolved product's
+    own rules plus every non-product rule (brand/project) untouched. Deliberately does NOT touch
+    the persisted, UI-editable `GuardrailSet` itself (`session.brief["guardrails"]`) — only the
+    per-turn copy rendered into the XML ContextVar should ever be scoped; the full set must stay
+    intact for the Guardrails UI and for deriving future turns' rules.
+
+    `product_id=None` (nothing resolved this turn — a plain creative-direction turn with no
+    specific product in play) returns the set completely unchanged: a deliberate no-op, not a
+    guess at scoping something when there's genuinely nothing to scope to."""
+    if product_id is None:
+        return guardrail_set
+    own_prefix = f"product.{product_id}."
+    scoped = [
+        rule for rule in guardrail_set.rules
+        if not rule.id.startswith("product.") or rule.id.startswith(own_prefix)
+    ]
+    return GuardrailSet(version=guardrail_set.version, rules=scoped)
+
+
 def coerce_rule(raw: Any, *, fallback_id: str = "") -> GuardrailRule | None:
     if isinstance(raw, GuardrailRule):
         return raw

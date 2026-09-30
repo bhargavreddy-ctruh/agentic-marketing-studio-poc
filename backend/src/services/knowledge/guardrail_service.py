@@ -83,6 +83,24 @@ class GuardrailService:
                 products_json.append({**product.attributes, "name": product.name, "id": product.id})
         return brand_json, products_json
 
+    async def get_brand_logo_storage_ref(self, session: SessionModel) -> str | None:
+        """Same explicit-link-else-first-user-brand resolution as `_load_brand_and_products_json`
+        above, exposing the one additional field guardrail derivation itself doesn't need — the
+        brand's own real uploaded logo asset. Real, live-found bug (2026-09-30): a collab campaign
+        image rendered literal placeholder text ("NOTHING LOGO") instead of the real logo, because
+        nothing anywhere ever surfaced `BrandProfileModel.logo_storage_ref` to a specialist — only
+        prose brand facts (colors/voice) reached them via `brand_kit_lookup`."""
+        async with async_session_factory() as db:
+            brand_repo = SqliteBrandRepository(db)
+            brand = None
+            if session.brand_profile_id:
+                brand = await brand_repo.get(session.brand_profile_id)
+            elif session.user_id:
+                user_brands = await brand_repo.list_for_user(session.user_id)
+                if user_brands:
+                    brand = user_brands[0]
+            return brand.logo_storage_ref if brand else None
+
     async def get_or_derive_for_session(self, session_id: str) -> GuardrailSet:
         """Gets guardrails for a session, always ensuring brand and product rules are up-to-date.
 

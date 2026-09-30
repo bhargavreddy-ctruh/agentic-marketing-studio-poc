@@ -136,6 +136,13 @@ and a new chat message. Decide:
 2. If it IS product-related: does it describe/refine one of the ALREADY-KNOWN products, or a
    genuinely NEW, DIFFERENT product this session hasn't seen before? Only treat it as the same
    product if it's clearly the same subject — a different name, category or use-case means it's new.
+   Pay special attention to model numbers, generation numbers, or variant suffixes in the name
+   (e.g. "2a" vs "4a", "Pro" vs "Pro Max", "Neo 3" vs "Neo 4") — a different suffix/number is
+   ALWAYS a different, new product, even if the base name/brand/category are otherwise identical.
+   Never match across a model-number difference unless the message explicitly says it's an update
+   or correction to the exact same physical unit already known (2026-09-30, real, live-found bug:
+   a "Nothing Phone 4a" message got matched to an existing "Nothing Phone (2a)" row, silently
+   folding 4a facts into the 2a row and losing the distinction entirely).
 3. Extract the full Product DNA from this message: what must always be shown, what must never be
    shown, which claims are allowed/disallowed, label visibility, price/discount if actually stated,
    and the product's real, physical COLOR if the message states or clearly implies one (e.g. "the
@@ -175,7 +182,11 @@ and the uploaded image. Decide:
    background or texture, an unrelated or unreadable image), set "is_product_photo": false and
    leave every other field empty/null — do not guess a product into existence.
 2. If it IS a product photo: does it show one of the ALREADY-KNOWN products, or a genuinely NEW,
-   DIFFERENT one this session hasn't seen before?
+   DIFFERENT one this session hasn't seen before? Pay special attention to model numbers,
+   generation numbers, or variant suffixes (e.g. "2a" vs "4a", "Pro" vs "Pro Max") — a different
+   suffix/number shown or stated is ALWAYS a different, new product, even if the base name/brand/
+   category look otherwise identical. Never match across a model-number difference unless it's
+   clearly the exact same physical unit already known.
 3. Extract Product DNA ONLY from what's actually visible in the image — visible materials, design
    details go in "must_show". Also extract the product's real, DOMINANT physical color as its own
    "color" field (2026-09-30, real requirement: a real vision-grounded product fact, distinct from
@@ -345,6 +356,13 @@ class ProductDnaService:
         )
 
         if matched:
+            # Real, live-found bug (2026-09-30): this used to only refresh `.attributes`, never
+            # `.name` — unlike `onboard_product`'s own update path, which already renames on
+            # update. A refinement message restating the product's name (e.g. correcting "2a" to
+            # "4a") silently left the OLD name permanently glued to the newly-refined facts. Falls
+            # back to the existing name only when this message genuinely didn't restate one (a
+            # short refinement often doesn't repeat the full product name).
+            matched.name = str(parsed.get("name") or matched.name).strip()[:255]
             matched.attributes = attributes
             product = await self._products.add(matched)
         else:
@@ -409,6 +427,9 @@ class ProductDnaService:
         )
 
         if matched:
+            # Same rename-on-match fix as upsert_product_from_chat above — a vision-grounded
+            # name correction from a fresh product photo must not leave the old name behind.
+            matched.name = str(parsed.get("name") or matched.name).strip()[:255]
             matched.attributes = attributes
             matched.photo_storage_ref = storage_ref
             product = await self._products.add(matched)

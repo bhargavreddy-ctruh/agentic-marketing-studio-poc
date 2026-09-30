@@ -354,6 +354,18 @@ async def run_specialist_agentic(
                                     tool_context = {
                                         k: v for k, v in {
                                             "user_id": brief.get("user_id"),
+                                            # Scopes product_lookup's own semantic search to THIS
+                                            # turn's resolved product only (2026-09-30, real bug:
+                                            # an unscoped search across a user's whole product
+                                            # collection surfaced whichever product a fact
+                                            # happened to be indexed under, not necessarily the
+                                            # one actually relevant this turn).
+                                            "product_id": brief.get("resolved_product_id"),
+                                            # The brand's real, uploaded logo asset (2026-09-30,
+                                            # real bug: illustrator had no way to reach the real
+                                            # logo file, only prose brand facts, so it could only
+                                            # ever hallucinate a logo from text).
+                                            "brand_logo_storage_ref": brief.get("brand_logo_storage_ref"),
                                             # product_photo_storage_ref is the safety-net fallback:
                                             # base_image_generator checks ctx first if the LLM
                                             # didn't explicitly pass reference_storage_ref as an arg.

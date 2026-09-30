@@ -711,6 +711,13 @@ class SessionService:
         # previous turn's product's rules.)
         guardrail_set = await guardrail_svc.get_or_derive_for_session(session.id)
         brief_for_graph["guardrails"] = guardrail_set.model_dump()
+        # Real, live-found bug (2026-09-30): the brand's real uploaded logo never reached
+        # generation at all — only prose brand facts did, via brand_kit_lookup — so illustrator
+        # could only ever hallucinate a logo from a text description. Injected into the brief the
+        # same way product_photo_storage_ref already is, just below.
+        brand_logo_storage_ref = await guardrail_svc.get_brand_logo_storage_ref(session)
+        if brand_logo_storage_ref:
+            brief_for_graph["brand_logo_storage_ref"] = brand_logo_storage_ref
 
         # Inject product photo storage ref into the brief so base_image_generator can
         # auto-use it as image-to-image reference when no explicit reference_storage_ref is given.
@@ -743,12 +750,24 @@ class SessionService:
                         resolved_product_id = product.id
                         resolved_product_name = product.name
 
+        # `runner.py`'s tool-context choke point only has access to `brief`, not to this
+        # function's local `resolved_product_id` — thread it through so `product_lookup`'s own
+        # scoping (services/tools/product_lookup.py) can reach it. Set AFTER the last-resort
+        # grouping fallback above, which can still resolve this from `None`.
+        brief_for_graph["resolved_product_id"] = resolved_product_id
+
         from ...core.events import set_current_guardrails_xml
+        from ...core.guardrails import scope_to_product
         # Per-session toggle (2026-09-25) — when off, every specialist's system prompt this turn
         # gets an empty guardrails block instead of the real rules (runner.py reads this same
         # ContextVar). `brief_for_graph["guardrails"]` above is left untouched either way so the
         # Guardrails UI can still show/edit the underlying rules while they're switched off.
-        set_current_guardrails_xml(guardrail_set.render() if session.guardrails_enabled else "")
+        # `scope_to_product` (2026-09-30, real bug: a session with 3 linked products handed every
+        # specialist 3 conflicting "must show this exact product" rules at once) — only the XML
+        # ContextVar every specialist actually reads gets scoped to THIS turn's resolved product;
+        # the full, persisted, UI-editable set above is untouched.
+        turn_guardrails = scope_to_product(guardrail_set, resolved_product_id)
+        set_current_guardrails_xml(turn_guardrails.render() if session.guardrails_enabled else "")
 
         graph = get_graph()
         result_state = await graph.ainvoke(
