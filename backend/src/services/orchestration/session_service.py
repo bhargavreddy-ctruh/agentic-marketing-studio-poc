@@ -37,7 +37,8 @@ from ...schemas.sessions.responses import (
 )
 from ..canvas.versioning_service import CanvasVersioningService
 from ..compliance.compliance_gate import run_compliance_gate
-from .graph import get_graph
+from .graph import _direct_fix_node, _dynamic_executor_node, get_graph
+from .state import GraphState
 
 # Real, live-found asyncio gotcha (2026-09-21): a bare `asyncio.create_task(...)` with no
 # reference held anywhere can be garbage-collected mid-run, silently killing the background QA
@@ -769,15 +770,40 @@ class SessionService:
         turn_guardrails = scope_to_product(guardrail_set, resolved_product_id)
         set_current_guardrails_xml(turn_guardrails.render() if session.guardrails_enabled else "")
 
-        graph = get_graph()
-        result_state = await graph.ainvoke(
-            {
-                "session_id": session.id,
-                "user_id": session.user_id,
-                "user_message": user_message,
-                "brief": brief_for_graph,
+        # Resuming a paused clarification question (2026-09-30, explicit user ask: "multi step
+        # plans can also stop and ask, doesn't have to be restart") — invokes the SAME paused node
+        # directly, bypassing the compiled graph's ideation->orchestrator entry routing entirely
+        # for this one turn, so already-completed steps' real results are reused rather than the
+        # whole plan restarting from step 1. `session.brief["paused_plan"]` was set the turn the
+        # question was asked (below, mirroring `state.get("paused_plan")`) and is only ever cleared
+        # once this resume actually completes or fails outright (see below) — a fresh pause on a
+        # NEW question overwrites it instead, so a chain of clarifications resumes correctly too.
+        paused_plan = session.brief.get("paused_plan")
+        if paused_plan:
+            resume_brief = {**brief_for_graph, "clarification_answer": user_message}
+            resume_state: GraphState = {
+                "session_id": session.id, "user_id": session.user_id,
+                "user_message": user_message, "brief": resume_brief,
             }
-        )
+            if paused_plan.get("route") == "direct_fix":
+                resume_state["target_specialist"] = paused_plan.get("specialist_name")
+                resume_brief["_resume_direct_fix_context"] = paused_plan.get("context")
+                result_state = await _direct_fix_node(resume_state)
+            else:
+                resume_state["dynamic_plan"] = paused_plan.get("plan")
+                resume_brief["_resume_next_step_index"] = paused_plan.get("next_step_index")
+                resume_brief["_resume_completed_results"] = paused_plan.get("completed_results")
+                result_state = await _dynamic_executor_node(resume_state)
+        else:
+            graph = get_graph()
+            result_state = await graph.ainvoke(
+                {
+                    "session_id": session.id,
+                    "user_id": session.user_id,
+                    "user_message": user_message,
+                    "brief": brief_for_graph,
+                }
+            )
 
         # Only the fields ideation/orchestrator actually mutate belong in the persisted brief —
         # the latest-element scratch fields above are graph-input-only, not part of the session's
@@ -795,8 +821,27 @@ class SessionService:
             # `orchestrator.py`'s `route()` for THIS turn only; left in `session.brief` it would
             # force-route every later, unrelated turn in the session to the same specialist forever.
             "_laya_approved_specialist",
+            # Resume-only scratch (2026-09-30) — graph-input-only for a paused-plan resume, same
+            # reasoning as the other scratch keys above; never part of the session's own
+            # accumulated state (`resolved_product_id`/`brand_logo_storage_ref` are recomputed
+            # fresh every turn anyway, same as `approval_mode`).
+            "resolved_product_id", "brand_logo_storage_ref", "clarification_answer",
+            "_resume_direct_fix_context", "_resume_next_step_index", "_resume_completed_results",
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}
+
+        # `paused_plan` is a top-level GraphState field (not nested in `brief`), set by
+        # `_direct_fix_node`/`_dynamic_executor_node` when a step raises
+        # `SpecialistNeedsClarification` — persisted here so the SAME plan can resume next turn
+        # instead of restarting. Always overwritten/cleared based on THIS turn's real outcome: a
+        # fresh pause replaces any prior one (a chain of clarifications resumes correctly), and a
+        # turn that completes/fails outright (no new pause) clears it rather than leaving a stale
+        # resume point a later, unrelated turn would incorrectly try to resume into.
+        new_paused_plan = result_state.get("paused_plan")
+        if new_paused_plan:
+            session.brief = {**session.brief, "paused_plan": new_paused_plan}
+        elif "paused_plan" in session.brief:
+            session.brief = {k: v for k, v in session.brief.items() if k != "paused_plan"}
         
         # Append any new guardrails extracted during the turn (e.g. from Ideation, 2026-09-24) —
         # brand/custom rules only now; product facts are handled separately below, unconditionally,

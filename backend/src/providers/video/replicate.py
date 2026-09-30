@@ -108,7 +108,12 @@ class ReplicateVideoProvider(VideoGenProvider):
             video_bytes = output.read()
         except AttributeError:
             # Some model/SDK versions return a plain URL string instead of a FileOutput object.
-            async with httpx.AsyncClient(timeout=60) as http_client:
+            # Real, live-found inconsistency (2026-09-30): this stayed at 60s while the image
+            # provider's own equivalent download call was already raised to 300s — a genuinely
+            # large rendered video file can take longer than 60s to download even after
+            # generation itself already succeeded, needlessly failing an otherwise-complete
+            # render. Matches `providers/image/replicate_provider.py`'s own 300s value.
+            async with httpx.AsyncClient(timeout=300, follow_redirects=True) as http_client:
                 resp = await http_client.get(str(output))
                 video_bytes = resp.content
 

@@ -34,7 +34,7 @@ from ...core.config import settings
 from ...core.element_context import get_verified_image_description
 from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import emit
-from ...core.exceptions import SpecialistFailed, SpecialistNotFound
+from ...core.exceptions import SpecialistFailed, SpecialistNeedsClarification, SpecialistNotFound
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
@@ -128,6 +128,19 @@ def _produced_ref(step) -> tuple[str | None, str | None]:
     real_result = next((c for c in calls_with_ref if c.tool_name not in _ANNOTATION_ONLY_TOOLS), None)
     chosen = real_result or (calls_with_ref[0] if calls_with_ref else None)
     return (chosen.data["storage_ref"], chosen.tool_name) if chosen else (None, None)
+
+
+def _clarification_result(exc: SpecialistNeedsClarification) -> dict:
+    """Real, live-found gap (2026-09-30): a genuine question raised from inside one of the
+    multi-specialist Lead pipelines (visual_design_lead/motion_lead/full_audio — unlike
+    `_direct_fix_node`/`_dynamic_executor_node`, these don't track enough step-by-step state to
+    truly pause-and-resume mid-pipeline) previously had no catch at all for this exception type —
+    it would propagate uncaught past these nodes' own `except SpecialistFailed:` blocks (a
+    DIFFERENT, sibling exception type) and crash the whole request. This surfaces the specialist's
+    real question/options (never the generic "ran into an issue" text) but does NOT set
+    `paused_plan` — the next turn restarts the pipeline fresh, same as this codebase's existing
+    "ask and restart" degrade for every route that hasn't been given true mid-plan resume."""
+    return {"message": exc.question, "options": exc.options or [], "allow_free_text": exc.allow_free_text}
 
 
 # Multi-generation (2026-09-22) — a single request can genuinely ask for several DISTINCT
@@ -375,6 +388,10 @@ async def _visual_design_lead_node(state: GraphState) -> GraphState:
             state["result"]["element_type"] = "image"
             state["result"]["produced_by_specialist"] = "illustrator"
         emit("lead_failed", lead="visual_design_lead", reason=exc.message)
+    except SpecialistNeedsClarification as exc:
+        log.info("visual_design_lead_needs_clarification", extra={"_extra_question": exc.question})
+        state["result"] = _clarification_result(exc)
+        emit("lead_paused", lead="visual_design_lead", question=exc.question)
     return state
 
 
@@ -448,6 +465,11 @@ async def _full_audio_node(state: GraphState) -> GraphState:
             "allow_free_text": True
         }
         emit("lead_failed", lead="full_audio", reason=exc.message)
+        return state
+    except SpecialistNeedsClarification as exc:
+        log.info("full_audio_needs_clarification", extra={"_extra_question": exc.question})
+        state["result"] = _clarification_result(exc)
+        emit("lead_paused", lead="full_audio", question=exc.question)
         return state
 
     call = step.latest_call("text_to_speech")
@@ -550,9 +572,19 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
             brief["multi_video_plan"] = {"prompts": plan.prompts, "sequential": plan.sequential}
 
     multi_plan = brief.get("multi_video_plan")
-    if multi_plan:
-        return await _run_multi_video_node(state, brief, approval_mode, stage, user_message, multi_plan)
-    return await _run_single_video_node(state, brief, approval_mode, stage, user_message)
+    try:
+        if multi_plan:
+            return await _run_multi_video_node(state, brief, approval_mode, stage, user_message, multi_plan)
+        return await _run_single_video_node(state, brief, approval_mode, stage, user_message)
+    except SpecialistNeedsClarification as exc:
+        # Real, live-found gap (2026-09-30): the video pipeline's several internal stages
+        # (narrative/scene/motion, single or multi-variant) only ever caught `SpecialistFailed` —
+        # this sibling exception would otherwise propagate uncaught and crash the whole request.
+        # Caught once, here, at the pipeline's real entry point, rather than threading a new
+        # except-block through every internal stage individually.
+        log.info("motion_lead_needs_clarification", extra={"_extra_question": exc.question})
+        emit("lead_paused", lead="motion_lead", question=exc.question)
+        return {**state, "result": _clarification_result(exc)}
 
 
 async def _run_multi_video_node(
@@ -1063,6 +1095,18 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
 
     direct_fix_context = "\n\n".join(context_parts)
     direct_fix_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+
+    # Resuming a paused clarification question (2026-09-30) — reuse the EXACT context this
+    # specialist saw when it asked, plus the user's real answer, instead of rebuilding fresh
+    # context that has no memory of what was actually asked.
+    resume_context = brief.get("_resume_direct_fix_context")
+    if resume_context and brief.get("clarification_answer"):
+        direct_fix_context = (
+            f"{resume_context}\n\nThe user's answer to your clarifying question:\n"
+            f"{brief['clarification_answer']}\n"
+            "Use this to resolve the ambiguity and proceed — do not ask the same question again."
+        )
+
     emit("lead_started", lead="direct_fix", target_specialist=target)
     try:
         # Real, live-found issue (2026-09-22, cross-check pass): a specialist can decline to act
@@ -1094,6 +1138,27 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
             "allow_free_text": True
         }
         emit("lead_failed", lead="direct_fix", reason=exc.message)
+        return state
+    except SpecialistNeedsClarification as exc:
+        # Real, live-found gap (2026-09-30): a genuine question used to collapse into the same
+        # generic "Ran into an issue — retry/cancel" the except-SpecialistFailed branch above
+        # produces — this surfaces the specialist's OWN real question/options instead, and
+        # persists enough state (session_service.py) for the SAME specialist call to resume with
+        # the user's real answer, rather than the turn just ending and restarting from scratch.
+        log.info("direct_fix_needs_clarification", extra={"_extra_specialist": target, "_extra_question": exc.question})
+        state["paused_plan"] = {
+            "route": "direct_fix",
+            "specialist_name": target,
+            "context": direct_fix_context,
+            "question": exc.question,
+            "options": exc.options,
+        }
+        state["result"] = {
+            "message": exc.question,
+            "options": exc.options or [],
+            "allow_free_text": exc.allow_free_text,
+        }
+        emit("lead_paused", lead="direct_fix", question=exc.question)
         return state
 
     produced_ref, produced_tool = _produced_ref(step)
@@ -1252,11 +1317,29 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     if hint:
         current_context.append({"type": "text", "text": hint})
 
-    latest_storage_ref = None
-    latest_tool = None
-    last_completed_specialist = None
-    all_metadata = {}
-    extra_elements = []
+    # Real, live-found gap (2026-09-30): resuming a paused plan (session_service.py detected
+    # `session.brief["paused_plan"]`) must NOT re-run the steps that already genuinely completed
+    # — that would re-pay for/re-invoke every specialist before the pause, discarding real,
+    # already-produced results. `resume_from_step_index`/`resume_completed_results` (set by
+    # session_service.py from the persisted paused_plan) seed this run's starting point instead of
+    # the usual empty state.
+    resume_from_step_index = brief.get("_resume_next_step_index")
+    resume_completed = brief.get("_resume_completed_results") or {}
+    latest_storage_ref = resume_completed.get("latest_storage_ref")
+    latest_tool = resume_completed.get("latest_tool")
+    last_completed_specialist = resume_completed.get("last_completed_specialist")
+    all_metadata = dict(resume_completed.get("all_metadata") or {})
+    extra_elements = list(resume_completed.get("extra_elements") or [])
+
+    if brief.get("clarification_answer"):
+        current_context.append({
+            "type": "text",
+            "text": (
+                "The user's answer to the clarifying question you (or a prior step) asked:\n"
+                f"{brief['clarification_answer']}\n"
+                "Use this to resolve the ambiguity — do not ask the same question again."
+            ),
+        })
 
     # Only enforce asset generation for specialists that actually produce assets,
     # not for planning/strategy specialists (like reference_curator or palette_strategist)
@@ -1314,15 +1397,25 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         # Run the specialist with self-correction retry, passing brief so the real
         # _recent_chat_history is injected as proper conversation messages (enabling
         # user "go ahead" / override confirmations to actually reach the LLM).
-        return await run_specialist_with_review(
-            specialist,
-            context=step_context,
-            needs_retry=lambda r, specialist=specialist: (
-                specialist in generating_specialists and _produced_ref(r)[0] is None
-            ),
-            reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
-            brief=brief,
-        )
+        try:
+            return await run_specialist_with_review(
+                specialist,
+                context=step_context,
+                needs_retry=lambda r, specialist=specialist: (
+                    specialist in generating_specialists and _produced_ref(r)[0] is None
+                ),
+                reminder="REMINDER: You must call a tool to fulfill your instruction and produce an asset.",
+                brief=brief,
+            )
+        except SpecialistNeedsClarification as exc:
+            # Tags exactly which plan step (this closure's own `i`) raised the question — the
+            # outer loop's except block needs this to compute `next_step_index` for resumption,
+            # and it's otherwise lost once the exception propagates past this closure's own scope
+            # (through `run_concurrent_specialists`'s re-raise for a parallel group, or straight up
+            # the sequential for-loop either way).
+            exc.step_index = i
+            exc.specialist_name_at_step = specialist
+            raise
 
     def _group_plan_steps(plan_steps: list[dict]) -> list[list[int]]:
         """Groups plan step indices by the orchestrator's own `parallel_group` claim (missing/None
@@ -1347,6 +1440,10 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         for group_indices in _group_plan_steps(plan):
             group_indices = [gi for gi in group_indices if plan[gi].get("specialist")]
             if not group_indices:
+                continue
+            if resume_from_step_index is not None and all(gi < resume_from_step_index for gi in group_indices):
+                # Already genuinely completed before the pause — its real result is already
+                # folded into `all_metadata`/`latest_storage_ref` above via `resume_completed`.
                 continue
 
             # Code-level verification of the orchestrator's own `parallel_group` claim — never
@@ -1445,6 +1542,41 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         # would have built had it finished normally, using the LAST STEP THAT ACTUALLY COMPLETED
         # (not `plan[-1]`, which may never have run at all).
         all_metadata["partial_failure"] = exc.message
+    except SpecialistNeedsClarification as exc:
+        # Real, live-found gap (2026-09-30): a genuine question mid-plan used to be indistinguishable
+        # from a crash — this stops the loop (no further steps run) and persists exactly enough state
+        # (session_service.py writes this into session.brief["paused_plan"]) to resume at THIS
+        # step, reusing every already-completed step's real result, rather than restarting the
+        # whole plan from step 1.
+        step_index = getattr(exc, "step_index", 0)
+        log.info(
+            "dynamic_plan_needs_clarification",
+            extra={
+                "_extra_specialist": getattr(exc, "specialist_name_at_step", exc.specialist_name),
+                "_extra_step_index": step_index, "_extra_question": exc.question,
+            },
+        )
+        state["paused_plan"] = {
+            "route": "dynamic",
+            "plan": plan,
+            "next_step_index": step_index,
+            "completed_results": {
+                "all_metadata": all_metadata,
+                "latest_storage_ref": latest_storage_ref,
+                "latest_tool": latest_tool,
+                "last_completed_specialist": last_completed_specialist,
+                "extra_elements": extra_elements,
+            },
+            "question": exc.question,
+            "options": exc.options,
+        }
+        state["result"] = {
+            "message": exc.question,
+            "options": exc.options or [],
+            "allow_free_text": exc.allow_free_text,
+        }
+        emit("lead_paused", lead="dynamic_executor", question=exc.question, step_index=step_index)
+        return state
     except SpecialistNotFound as exc:
         # Real, live-found bug (2026-09-23): a raw HTTP 500 in production — a hallucinated
         # specialist name in the plan (e.g. "style_board_planner", never registered anywhere)
