@@ -26,6 +26,12 @@ rules, prohibited imagery, and a note on price/discount overlay accuracy require
 invent facts that weren't given — if a category has no real basis in the input, return an empty
 list for it rather than fabricating a plausible-sounding rule.
 
+Scope every "approved colors" rule you write to brand-OWNED visual elements — backgrounds,
+accents, brand graphics, packaging/logo treatments — never to the literal, real-world color of a
+product being photographed or depicted. A product's own genuine physical color (e.g. a red
+sneaker) is a real product fact, not a brand-identity choice, and must never be treated as a
+violation of this palette. State that scope explicitly in the rule text itself.
+
 Return ONLY JSON:
 {
   "summary": "one or two sentences overviewing the guardrail set",

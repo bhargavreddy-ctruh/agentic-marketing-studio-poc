@@ -64,6 +64,10 @@ export default function HomePage() {
   const [productDescription, setProductDescription] = useState("");
   const [productPrice, setProductPrice] = useState("");
   const [productDiscount, setProductDiscount] = useState("");
+  // The product's real, physical color (2026-09-30) — a genuine product fact the guardrail system
+  // now checks against, distinct from any brand color guideline (fixes a real bug where a red
+  // product was refused as a brand-color violation).
+  const [productColor, setProductColor] = useState("");
   const [onboardingProduct, setOnboardingProduct] = useState(false);
 
   const [moodBoardAssets, setMoodBoardAssets] = useState<MoodBoardAsset[]>([]);
@@ -205,11 +209,12 @@ export default function HomePage() {
     try {
       const price = productPrice.trim() ? Number(productPrice) : undefined;
       const discount = productDiscount.trim() ? Number(productDiscount) : undefined;
-      await onboardProduct(productName.trim(), productDescription.trim(), price, discount);
+      await onboardProduct(productName.trim(), productDescription.trim(), price, discount, productColor.trim() || undefined);
       setProductName("");
       setProductDescription("");
       setProductPrice("");
       setProductDiscount("");
+      setProductColor("");
       await refreshProducts();
     } catch (err) {
       setProductsError(err instanceof ApiError ? err.message : "Could not onboard this product.");
@@ -568,6 +573,7 @@ export default function HomePage() {
                           {p.indexed ? "· indexed" : "· not yet indexed"}
                           {p.attributes.price != null && ` · $${p.attributes.price}`}
                           {p.attributes.discount_percent != null && ` · ${p.attributes.discount_percent}% off`}
+                          {p.attributes.color && ` · ${p.attributes.color}`}
                         </span>
                         {p.attributes.summary && (
                           <p className="mt-1 text-xs text-surface-500">{p.attributes.summary}</p>
@@ -583,6 +589,7 @@ export default function HomePage() {
                       <input placeholder="Price (optional)" type="number" step="0.01" className={`w-1/2 ${inputCls}`} value={productPrice} onChange={(e) => setProductPrice(e.target.value)} />
                       <input placeholder="Discount % (optional)" type="number" step="1" className={`w-1/2 ${inputCls}`} value={productDiscount} onChange={(e) => setProductDiscount(e.target.value)} />
                     </div>
+                    <input placeholder="Real color (optional, e.g. red — never restricted by brand colors)" className={inputCls} value={productColor} onChange={(e) => setProductColor(e.target.value)} />
                     <button type="submit" disabled={onboardingProduct} className="mt-1 self-start rounded-lg bg-brand-500 px-4 py-2 text-sm font-medium text-white transition-all hover:bg-brand-600 disabled:opacity-50">
                       {onboardingProduct ? "Onboarding…" : "Add product"}
                     </button>

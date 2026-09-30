@@ -194,12 +194,28 @@ def _product_rules(product: dict, key: str = "") -> list[GuardrailRule]:
     if product.get("label_visibility"):
         add("label_visibility", f"Label visibility requirement: {product['label_visibility']}.")
 
+    if product.get("color"):
+        # Real, live-found bug (2026-09-30, explicit user report: a "red sneaker" request got
+        # refused as a BRAND-color guardrail violation, with the app offering to change the
+        # brand's approved palette to allow red) — the product's own real, physical color was
+        # never a stated fact anywhere a specialist could check, so a brand color rule (meant to
+        # govern brand-owned visual elements) got misapplied to the product itself. This rule is
+        # the actual, authoritative fact: the product genuinely IS this color, and depicting it as
+        # such is never a guardrail violation, brand palette notwithstanding.
+        add("color", (
+            f"This product's real, physical color is {product['color']} — always depict the "
+            "product itself in this color. This is a real product fact, not a stylistic choice: "
+            "it is NEVER a brand-guardrail violation to show the product in its own true color, "
+            "even if that color isn't in the brand's approved visual-elements palette (which "
+            "governs backgrounds/accents/brand graphics, not the product itself)."
+        ))
+
     # All other arbitrary attributes in the JSON mapping
     # "id" (2026-09-25): the product's own row id, added by `_load_brand_and_products_json` purely
     # to namespace this product's rule ids (see `key` above) — a real, live-found bug caught by
     # testing: without exclusion here it fell into the generic-attribute loop below and produced a
     # nonsense rule ("The id is 94a79fab...").
-    handled_keys = {"id", "name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility"}
+    handled_keys = {"id", "name", "category", "description", "price", "discount", "summary", "discount_percent", "must_show", "never_show", "claims_allowed", "claims_disallowed", "label_visibility", "color"}
     for attr_key, value in product.items():
         if attr_key in handled_keys:
             continue
@@ -238,6 +254,22 @@ def _rules_from_synthesized_brand(brand: dict) -> list[GuardrailRule]:
             rule_text = _clean(item.get("rule"), limit=1200)
             if not rule_text:
                 continue
+            if category == "visual":
+                # Real, live-found bug (2026-09-30, explicit user report: a plain "red sneaker"
+                # request got refused as a brand-color guardrail violation, with the app offering
+                # to change the brand's own approved palette to allow red). This rule already
+                # existed at brand-onboarding time, before this scoping clause was added — fixing
+                # it here (rather than only in guardrail_synthesizer.py's synthesis prompt, which
+                # only affects BRANDS ONBOARDED FROM NOW ON) makes the fix apply retroactively to
+                # every already-onboarded brand too, since every rule passes through here on every
+                # derivation.
+                rule_text += (
+                    " (Scope: this governs brand-owned visual elements — backgrounds, accents, "
+                    "brand graphics, packaging/logo treatments — never the literal, real-world "
+                    "color or appearance of a product being depicted. A product's own genuine "
+                    "physical attributes, e.g. a real Product DNA color fact, are never a "
+                    "brand-guardrail violation regardless of this palette.)"
+                )
             raw_id = _clean(item.get("id")) or f"{category}_{i + 1}"
             rule = GuardrailRule(
                 id=f"brand.{_slug(raw_id)}",

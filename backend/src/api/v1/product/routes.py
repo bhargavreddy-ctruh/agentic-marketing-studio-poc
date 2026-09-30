@@ -25,6 +25,7 @@ async def onboard_product(
         description=body.description,
         price=body.price,
         discount_percent=body.discount_percent,
+        color=body.color,
     )
     return ProductMapper.to_response(product)
 
