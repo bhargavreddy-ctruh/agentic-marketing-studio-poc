@@ -25,7 +25,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...core.events import emit
-from ...core.exceptions import ProviderUnavailable, SpecialistFailed, ToolNotFound
+from ...core.exceptions import (
+    ProviderUnavailable,
+    SpecialistFailed,
+    SpecialistNeedsClarification,
+    ToolNotFound,
+)
 from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...core.redaction import redact_args
@@ -238,7 +243,17 @@ async def run_specialist_agentic(
         "asked, not a request to be asked the same clarifying question a second time), "
         "the user's instruction TAKES PRECEDENCE for this run. Do NOT fail again for the same conflict in that case, "
         "but follow the user's instruction, ignoring the conflicting guardrail. "
-        "To handle ambiguity, ask a clarifying question to the user (e.g., \"Could you specify the product or model you want?\") and wait for their response. Then retry the specialist with the new information. Do NOT return a JSON error or abort execution.\n"
+        "CRITICAL RULE 5 — Genuine ambiguity: if, after applying rules 1-4, a request is genuinely "
+        "ambiguous in a way that would make you guess at something you shouldn't (which of several "
+        "real, DIFFERENT linked products this is about; whether to use a real uploaded asset or "
+        "invent one; any choice where guessing wrong produces a materially wrong result) — do NOT "
+        "silently guess, and do NOT return {\"error\": \"...\"} (that reports a FAILURE, not a "
+        "question, and gets shown to the user as a generic 'something went wrong' rather than your "
+        "real question). Instead return ONLY this JSON: "
+        "{\"question\": \"your specific, real question\", \"options\": [{\"id\": \"...\", \"label\": \"...\", \"description\": \"...\"}, ...]} "
+        "— `options` is optional (omit it entirely for a free-text question with no natural pickable "
+        "choices). This pauses the turn, shows your real question to the user, and resumes you with "
+        "their real answer once they reply — never invent an answer yourself when this applies.\n"
         "</MASTER_DIRECTIVE>"
     )
     llm = get_llm_provider()
@@ -506,6 +521,21 @@ async def run_specialist_agentic(
                 exc.partial_result = partial
                 raise exc
 
+            # Real, live-found gap (2026-09-30): the MASTER_DIRECTIVE already told specialists to
+            # "ask a clarifying question... wait for a response" but nothing downstream recognized
+            # that as anything but a crash — only the single-key {"error": ...} shape above was
+            # ever recognized, so a genuine question got treated identically to a real provider
+            # outage (a generic "Ran into an issue — retry/cancel", discarding the actual
+            # question). This is the real, working alternative shape: a distinct signal, not an
+            # error, carrying the specialist's own real question and (optionally) real options.
+            if "question" in parsed and set(parsed.keys()) <= {"question", "options"}:
+                options = parsed.get("options")
+                raise SpecialistNeedsClarification(
+                    specialist_name,
+                    str(parsed["question"]),
+                    options=options if isinstance(options, list) else None,
+                )
+
             # Code-enforced output contract: every specialist's real schema is either ALL of its
             # declared keys (even if a value is legitimately "" or false) OR the `error` escape
             # hatch above — verified by reading every specialist's own <output_format> block
@@ -638,7 +668,11 @@ async def run_concurrent_specialists(
     out: dict[str, AgenticStepResult] = {}
     for name, result in zip(names, results):
         if isinstance(result, BaseException):
-            if name in critical:
+            # A genuine question (2026-09-30) is never a "this one branch failed, degrade
+            # gracefully" situation — silently swallowing it into an empty result would discard
+            # the specialist's real question entirely, worse than surfacing nothing at all.
+            # Always re-raised regardless of `critical`, so the whole plan genuinely pauses.
+            if isinstance(result, SpecialistNeedsClarification) or name in critical:
                 raise result
             log.warning(
                 "concurrent_specialist_degraded",

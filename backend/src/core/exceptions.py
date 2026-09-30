@@ -47,6 +47,31 @@ class SpecialistFailed(AppError):
         self.specialist_name = specialist_name
 
 
+class SpecialistNeedsClarification(AppError):
+    """Real, live-found gap (2026-09-30, explicit user ask: "don't just assume, make agents ask
+    questions when there's genuine doubt"): a specialist facing genuine ambiguity (which of several
+    linked products? use the real logo or a stylized one?) previously had no way to surface a real
+    question distinct from a crash — the only recognized structured signal was `{"error": ...}`,
+    routed through `SpecialistFailed`, indistinguishable from a real provider outage. This is a
+    deliberate SIBLING to `SpecialistFailed`, not a subclass — every `except SpecialistFailed:` site
+    needs its own explicit new branch to propagate this instead of silently swallowing it into
+    generic failure handling, rather than this being accidentally caught by an existing broad
+    catch. Carries the specialist's own real, specific question and (optionally) real pickable
+    options — surfaced to the user via the same `next_prompt`/`awaiting_approval` machinery
+    already proven for ideation's own pauses, never the generic "Ran into an issue — retry/cancel"
+    wrapper `SpecialistFailed` produces."""
+
+    def __init__(
+        self, specialist_name: str, question: str,
+        options: list[dict] | None = None, allow_free_text: bool = True,
+    ):
+        super().__init__(f"Specialist '{specialist_name}' needs clarification: {question}", status_code=422)
+        self.specialist_name = specialist_name
+        self.question = question
+        self.options = options
+        self.allow_free_text = allow_free_text
+
+
 class ComplianceCheckFailed(AppError):
     """A compliance checker rejected an asset and no escalation resolved it."""
 

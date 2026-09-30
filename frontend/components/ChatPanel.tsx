@@ -215,6 +215,22 @@ function ChatPanel(
   // new one (see `isContinuationOfPrompt` below).
   const lastReferencedIdsRef = useRef<string[] | undefined>(undefined);
 
+  // Real, live-found gap (2026-09-30): a long generation's `postTurn()` call sometimes fails with
+  // a 502 even though the backend is still genuinely working — confirmed live, the generation
+  // completes moments later and only reloading the page ever surfaced it. Root cause: Vercel's
+  // rewrite proxy to the EC2 backend has its own timeout for an external origin's response,
+  // materially shorter than this app's own generous backend-side timeouts, and independent of them
+  // — the backend was never told to stop, only the proxy gave up relaying its eventual response.
+  // `isUnmountedRef` lets the reconnect fallback below (which reuses `pollUntilResolved`, the same
+  // mechanism `loadHistory` already uses for the identical "still generating, catch me up" case on
+  // a page refresh) safely stop updating state if this panel unmounts mid-poll.
+  const isUnmountedRef = useRef(false);
+  useEffect(() => {
+    return () => {
+      isUnmountedRef.current = true;
+    };
+  }, []);
+
   // Phase 1 gap-close (2026-09-28, combined grouping plan) — the one real ChatPanel gap:
   // referencing an element always silently inherited its product, with no way to say "generate
   // something new instead" while still referencing an asset for context. Defaults false (today's
@@ -325,6 +341,15 @@ function ChatPanel(
     setMessages((m) => [...m, { id: newId(), role: "error", text }]);
   }
 
+  /** Real, live-found gap (2026-09-30) — see `isUnmountedRef`'s own comment above for the full
+   * root cause. A 502/503/504 on the turn's own POST is exactly the shape of "a proxy in the
+   * middle gave up on us," never a real backend crash (a genuine failure returns 500 with a real
+   * error body, still handled by the normal `appendError` path below) — those three, and only
+   * those three, are worth automatically falling back to reconnect-and-poll for. */
+  function looksLikeGatewayTimeout(err: unknown): boolean {
+    return err instanceof ApiError && [502, 503, 504].includes(err.status);
+  }
+
   async function handleSend(freeTextOverride?: string) {
     const text = freeTextOverride ?? input.trim();
     if (!text || loading) return;
@@ -336,11 +361,14 @@ function ChatPanel(
     stripOptionsFromLastMessage();
     appendUser(text, referencedElements && referencedElements.length > 0 ? referencedElements : undefined);
     setLoading(true);
+    // Hoisted above the try (2026-09-30) so the catch block below can still reach the real
+    // session id for the gateway-timeout reconnect fallback — a `let` declared inside `try` isn't
+    // visible in its own `catch`.
+    let sid: string | null = sessionId;
     try {
       // Turn 1 streams exactly like every later turn now: create the (empty) session first so
       // the SSE stream can open against a real id, THEN send the message as a normal turn —
       // fixes live "thinking"/Node Mode being empty for a session's very first message.
-      let sid = sessionId;
       if (!sid) {
         const created = await createSession(approvalMode);
         sid = created.id;
@@ -361,11 +389,18 @@ function ChatPanel(
       setStartNewProduct(false);
 
       const { result: res, thinking, seconds } = await withNarration(sid, () =>
-        postTurn(sid, { freeText: text, referencedElementIds: idsToSend, startNewProduct: useStartNewProduct }),
+        postTurn(sid!, { freeText: text, referencedElementIds: idsToSend, startNewProduct: useStartNewProduct }),
       );
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();
     } catch (err) {
+      if (sid && looksLikeGatewayTimeout(err)) {
+        // The backend is very likely still working (see isUnmountedRef's comment above) — the
+        // same reconnect-and-poll path `loadHistory` already uses for a page refresh mid-generation.
+        setMessages((m) => [...m, { id: newId(), role: "assistant", text: "Still working — reconnecting…" }]);
+        await pollUntilResolved(sid, () => isUnmountedRef.current);
+        return;
+      }
       appendError(err);
     } finally {
       setLoading(false);
@@ -404,6 +439,11 @@ function ChatPanel(
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();
     } catch (err) {
+      if (looksLikeGatewayTimeout(err)) {
+        setMessages((m) => [...m, { id: newId(), role: "assistant", text: "Still working — reconnecting…" }]);
+        await pollUntilResolved(sessionId, () => isUnmountedRef.current);
+        return;
+      }
       appendError(err);
     } finally {
       setLoading(false);
