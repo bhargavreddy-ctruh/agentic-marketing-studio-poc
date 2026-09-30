@@ -236,37 +236,44 @@ def load_all_specialists() -> None:
     # via direct_fix per the architecture doc's own examples ("just give me 5 headline options",
     # "write the caption, I already have the image", "make this copy more minimal/more playful",
     # "double-check the discount math before this goes out").
+    #
+    # text_card_writer added to all four (2026-09-30, per explicit user ask: "we need their output
+    # as canvas element") — each now writes its real result as a visible canvas text card, the
+    # same real tool call narrator.md already uses, rather than surfacing only as a chat message.
+    # This also makes each of them NOT `is_lookup_only` anymore (their allowed_tools include a
+    # real asset-producing tool) — they now flow through the ordinary "found a real storage_ref"
+    # path every asset-producing specialist already uses, no special-casing needed.
     register_specialist(SpecialistSpec(
         name="headline_writer",
         prompt_file="headline_writer.md",
-        allowed_tools=("brand_kit_lookup",),
+        allowed_tools=("brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Writes short, high-impact headlines/lead lines and alternatives for a campaign. Text only, produces no image/video/audio asset itself.",
-        required_output_fields=("primary_headline", "alternative_headlines", "hook_strategy"),
+        description="Writes short, high-impact headlines/lead lines and alternatives for a campaign, as a real canvas text card.",
+        required_output_fields=("primary_headline", "alternative_headlines", "hook_strategy", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="caption_writer",
         prompt_file="caption_writer.md",
-        allowed_tools=("brand_kit_lookup", "product_lookup"),
+        allowed_tools=("brand_kit_lookup", "product_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Writes the full social caption — body copy, call-to-action, and hashtags — for an already-approved headline/concept. Text only, produces no image/video/audio asset itself.",
-        required_output_fields=("caption_body", "call_to_action", "hashtags"),
+        description="Writes the full social caption — body copy, call-to-action, and hashtags — for an already-approved headline/concept, as a real canvas text card.",
+        required_output_fields=("caption_body", "call_to_action", "hashtags", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="tone_calibrator",
         prompt_file="tone_calibrator.md",
-        allowed_tools=("brand_kit_lookup",),
+        allowed_tools=("brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Calibrates brand voice up/down for a specific audience segment (e.g. 'make this more minimal/more playful') — text only, produces no asset itself.",
-        required_output_fields=("target_segment", "tone_profile", "voice_guidelines"),
+        description="Calibrates brand voice up/down for a specific audience segment (e.g. 'make this more minimal/more playful'), as a real canvas text card.",
+        required_output_fields=("target_segment", "tone_profile", "voice_guidelines", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="copy_claims_checker",
         prompt_file="copy_claims_checker.md",
-        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup"),
+        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Verifies prices, discounts, specs, and claims stated in marketing copy against real product facts — flags each as verified/invalid/unconfirmed with a correction. Text only, produces no asset itself.",
-        required_output_fields=("verified", "flagged_claims", "verification_notes"),
+        description="Verifies prices, discounts, specs, and claims stated in marketing copy against real product facts — flags each as verified/invalid/unconfirmed with a correction, as a real canvas text card.",
+        required_output_fields=("verified", "flagged_claims", "verification_notes", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         # Deliberately NOT given brand_kit_lookup, unlike every other specialist — the reference
