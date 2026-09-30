@@ -35,8 +35,17 @@ class GuardrailService:
         `session.brief["product_profile_ids"]` is the real list of every product this session has
         ever been linked to (appended to by `SessionService`'s chat-driven upsert and by
         `link_profiles` below). Falls back to the single `session.product_profile_id` column (older
-        sessions linked before this list existed), and finally to the user's most-recently-onboarded
-        product as a bootstrap for a session that has never mentioned or linked a product at all."""
+        sessions linked before this list existed).
+
+        Real, live-found bug (2026-09-30): this used to ALSO fall back further, to the user's
+        most-recently-onboarded product ACROSS EVERY SESSION, as a bootstrap for a session that
+        had never mentioned a product at all — unlike the brand fallback above (a deliberate,
+        documented "one brand per user" design), a user testing multiple distinct products across
+        different sessions had a brand-new, genuinely empty session silently inherit an unrelated
+        product from a different session ("could you confirm you want the Nothing Phone (2a)..."
+        in a session that was never about a phone at all). Removed — a session with no product
+        ever linked now correctly resolves to no product configured, same as it already correctly
+        shows in the Guardrails/DNA UI for that case."""
         brand_json: dict = {}
         products_json: list[dict] = []
         async with async_session_factory() as db:
@@ -65,16 +74,6 @@ class GuardrailService:
                 product = await product_repo.get(pid)
                 if product:
                     products.append(product)
-
-            # Real, live-found bug (2026-09-25): this used to be `elif` on `product_ids` being
-            # empty — but a session can have a NON-empty `product_profile_ids` list where every id
-            # is now dangling (its product row was deleted/never existed), which left `products`
-            # silently empty with no fallback ever triggering. Falls through to the bootstrap
-            # whenever nothing actually resolved, regardless of why the list didn't resolve.
-            if not products and session.user_id:
-                user_products = await product_repo.list_for_user(session.user_id)
-                if user_products:
-                    products = [user_products[-1]]
 
             for product in products:
                 # Real, live-found bug (2026-09-24): `product.attributes` alone never has the
