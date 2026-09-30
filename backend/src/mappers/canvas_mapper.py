@@ -39,7 +39,13 @@ async def _text_content(
 # checked per element type's own real specialist output (illustrator/camera_director/sound_designer
 # /reference_curator/lighting_designer's own result fields — see visual_design_lead.py/motion_lead.py
 # for where each is set).
+#
+# `verified_description` (2026-09-30) checked FIRST, above every generation prompt — a real vision
+# call's account of what's ACTUALLY in the image (`core/element_context.py`'s
+# `get_verified_image_description`) is more trustworthy than a generation prompt, which describes
+# what was ASKED for, not necessarily what the model actually delivered.
 _DESCRIPTION_FIELDS = (
+    "verified_description",
     "image_prompt", "motion_prompt", "voiceover_line", "primary_shot",
     "aesthetic_direction", "environment_description",
 )
