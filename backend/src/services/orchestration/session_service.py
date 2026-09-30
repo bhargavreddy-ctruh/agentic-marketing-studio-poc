@@ -186,6 +186,26 @@ class SessionService:
         session = await self._sessions.update(session)
         return SessionMapper.to_response(session)
 
+    async def update_title(self, session_id: str, *, user_id: str, title: str) -> SessionResponse:
+        """Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on
+        workflows") — same ownership-checked shape as `update_approval_mode`/
+        `update_guardrails_enabled` above."""
+        session = await self._get_owned_session(session_id, user_id=user_id)
+        session.title = title
+        session = await self._sessions.update(session)
+        return SessionMapper.to_response(session)
+
+    async def delete_session(self, session_id: str, *, user_id: str) -> None:
+        """Permanently deletes a workflow and everything on it (2026-09-30, explicit user ask).
+        Ownership-checked the same way every other session route is — `_get_owned_session` raises
+        Forbidden/NotFoundError before any deletion happens, so a user can never delete (or even
+        discover the existence of) another user's session by guessing an id. The real cascade
+        (canvas elements/versions, chat turns, generation jobs, tool call logs) lives in the
+        repository (`SqliteSessionRepository.delete` — Rules.md section 2: only repositories touch
+        the database)."""
+        await self._get_owned_session(session_id, user_id=user_id)
+        await self._sessions.delete(session_id)
+
     async def list_sessions(self, *, user_id: str) -> list[SessionResponse]:
         sessions = await self._sessions.list_for_user(user_id)
         return [SessionMapper.to_response(s) for s in sessions]

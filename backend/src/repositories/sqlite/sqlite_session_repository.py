@@ -1,9 +1,14 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...models.canvas_element import CanvasElementModel
+from ...models.canvas_element_version import CanvasElementVersionModel
+from ...models.chat_turn import ChatTurnModel
+from ...models.generation_job import GenerationJobModel
 from ...models.session import SessionModel
+from ...models.tool_call_log import ToolCallLogModel
 
 
 class SqliteSessionRepository:
@@ -36,3 +41,27 @@ class SqliteSessionRepository:
             .order_by(SessionModel.updated_at.desc())
         )
         return list(result.scalars().all())
+
+    async def delete(self, session_id: str) -> None:
+        """Real, live-found gap (2026-09-30, explicit user ask: "add a delete/edit button on
+        workflows") — no FK on any dependent table (`canvas_elements`, `chat_turns`,
+        `generation_jobs`, `tool_call_logs`, `canvas_element_versions`) declares
+        `ondelete="CASCADE"` (models/*.py), so a plain `DELETE FROM sessions` would fail against
+        Postgres with a foreign-key violation the moment a session has any real content. Deletes
+        every dependent row first, in dependency order (element VERSIONS before the elements they
+        version), all within this same repository call's transaction — one real, all-or-nothing
+        cascade, never a partially-deleted workflow left behind by a mid-way failure."""
+        element_ids_subquery = select(CanvasElementModel.id).where(
+            CanvasElementModel.session_id == session_id
+        )
+        await self._db.execute(
+            delete(CanvasElementVersionModel).where(
+                CanvasElementVersionModel.element_id.in_(element_ids_subquery)
+            )
+        )
+        await self._db.execute(delete(CanvasElementModel).where(CanvasElementModel.session_id == session_id))
+        await self._db.execute(delete(ChatTurnModel).where(ChatTurnModel.session_id == session_id))
+        await self._db.execute(delete(GenerationJobModel).where(GenerationJobModel.session_id == session_id))
+        await self._db.execute(delete(ToolCallLogModel).where(ToolCallLogModel.session_id == session_id))
+        await self._db.execute(delete(SessionModel).where(SessionModel.id == session_id))
+        await self._db.commit()

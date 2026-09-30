@@ -6,7 +6,7 @@
  * "propose options + free text" pattern used across ideation AND every HITL gate, so this one
  * client type covers all of them — no separate shape per gate.
  */
-import { ApiError, request, API_BASE_URL } from "./http";
+import { ApiError, request, requestNoContent, API_BASE_URL } from "./http";
 
 export { ApiError };
 
@@ -78,6 +78,27 @@ export async function createSession(
  * data source, newest-updated first (matches the backend's own ordering). */
 export async function listSessions(): Promise<SessionResponse[]> {
   return request<SessionResponse[]>("/api/v1/sessions");
+}
+
+/** Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on workflows") —
+ * same shape as `updateApprovalMode` below. */
+export async function updateSessionTitle(
+  sessionId: string,
+  title: string,
+): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/title`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title }),
+  });
+}
+
+/** Permanently deletes a workflow and everything on it (2026-09-30, explicit user ask) — the
+ * backend cascades the real delete (canvas elements/versions, chat turns, generation jobs, tool
+ * call logs) in one transaction; this call itself is NOT undoable, so every caller must confirm
+ * with the user first (the home page's delete button does, via `window.confirm`). */
+export async function deleteSession(sessionId: string): Promise<void> {
+  return requestNoContent(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
 }
 
 export async function updateSessionStyle(
