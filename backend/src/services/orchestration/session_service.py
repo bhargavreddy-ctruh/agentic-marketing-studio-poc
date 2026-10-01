@@ -13,6 +13,7 @@ from ...core.approval import is_approval, is_cancel
 from ...core.config import settings
 from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import (
+    cleanup_session,
     emit,
     get_current_turn_events,
     get_current_turn_thinking,
@@ -206,6 +207,11 @@ class SessionService:
         the database)."""
         await self._get_owned_session(session_id, user_id=user_id)
         await self._sessions.delete(session_id)
+        # Drops this session's entries from core/events.py's per-session dicts (_queues,
+        # _event_accumulators, _thinking_accumulators, etc.) — without this, that module leaks one
+        # entry per distinct session_id ever seen, for the life of the process, since turn-start
+        # only ever resets a session's entries, never removes them.
+        cleanup_session(session_id)
 
     async def list_sessions(self, *, user_id: str) -> list[SessionResponse]:
         sessions = await self._sessions.list_for_user(user_id)

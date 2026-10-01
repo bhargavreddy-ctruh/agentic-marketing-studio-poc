@@ -12,7 +12,7 @@ match the real product's actual photo."
 """
 from __future__ import annotations
 
-from ...core.exceptions import ProviderUnavailable, SpecialistFailed
+from ...core.exceptions import ProviderUnavailable, SpecialistFailed, VisionPayloadTooLarge
 from ...core.json_extract import extract_json
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
@@ -76,7 +76,10 @@ async def check_visual_fidelity(
             checked_with_vision = True
         else:
             raise ProviderUnavailable("vision", "no image available for this element")
-    except ProviderUnavailable:
+    except (ProviderUnavailable, VisionPayloadTooLarge):
+        # An image too large to compress under the vision byte budget degrades the same way a
+        # provider outage does — fall back to a text-only check rather than hard-failing the whole
+        # compliance gate over one oversized asset.
         llm = get_llm_provider()
         context = f"Generation prompt used:\n{generation_prompt_text}\n\n{facts_context}"
         try:
@@ -95,7 +98,10 @@ async def check_visual_fidelity(
         raise SpecialistFailed("visual_fidelity_checker", f"could not parse response: {exc}") from exc
 
     return {
-        "passed": bool(parsed.get("passed", True)),
+        # Fail-closed default (2026-10-01 fix): a response that's valid JSON but omits "passed"
+        # entirely used to silently count as a pass — now treated as a failure/needs-review,
+        # consistent with the explicit SpecialistFailed raises above for transport/parse errors.
+        "passed": bool(parsed.get("passed", False)),
         "reasoning": str(parsed.get("reasoning", "")),
         "violations": [str(v) for v in (parsed.get("violations") or [])],
         "checked_against_configured_product": bool(product_facts.get("configured")),
