@@ -72,6 +72,15 @@ Web/Trend Search, Asset/Mood Board Search, Router, Export/Publish.
 
 (3D Generator and Commerce/Storefront connectors are excluded by the source PDF itself.)
 
+**Real, disclosed addition beyond the original 19 (2026-10-01):** two more image tools, both
+gated on a specific context signal rather than used by default — `photorealistic_image_generator`
+(Google's Nano Banana 2 Lite via Replicate, used only when a request genuinely calls for a
+photorealistic result) and `high_resolution_image_generator` (Google's Nano Banana 2 via Replicate,
+used only when the user explicitly asks for 2K/4K/high resolution — includes real
+`google_search`/`image_search` web-grounding flags, off by default). Both are additional choices on
+the Illustrator's own tool list (see `Orchestration_Graph.md`), not a replacement for
+`base_image_generator`.
+
 ### 1c. The Human-in-the-Loop Canvas
 
 - Canvas State holds each generated element individually addressable, each pointing back to the
