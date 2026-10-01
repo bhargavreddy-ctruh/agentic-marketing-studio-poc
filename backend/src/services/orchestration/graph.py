@@ -69,6 +69,8 @@ log = get_logger(__name__)
 # as an input arg and never returns one.
 _ELEMENT_TYPE_BY_TOOL = {
     "base_image_generator": "image",
+    "photorealistic_image_generator": "image",
+    "high_resolution_image_generator": "image",
     "image_editor": "image",
     "text_overlay": "image",
     "base_video_generator": "video",

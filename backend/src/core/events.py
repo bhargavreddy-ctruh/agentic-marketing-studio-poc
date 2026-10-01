@@ -169,6 +169,19 @@ async def mark_turn_done(session_id: str) -> None:
     await _get_queue(session_id).put(_DONE)
 
 
+def cleanup_session(session_id: str) -> None:
+    """Call once, when a session is permanently deleted — drops its entries from every per-session
+    dict above. Without this, `_queues`/`_event_accumulators`/`_thinking_accumulators`/etc. grow by
+    one entry per distinct session_id ever seen, for the life of the process, since `start_new_turn`
+    only ever resets a session's entries (for the next turn), never removes them. `.pop(..., None)`
+    throughout so it's safe to call even if a session never emitted anything (no entries to drop)."""
+    _queues.pop(session_id, None)
+    _event_accumulators.pop(session_id, None)
+    _thinking_accumulators.pop(session_id, None)
+    _thinking_last_run_seq.pop(session_id, None)
+    _thinking_run_seq.pop(session_id, None)
+
+
 async def stream_events(session_id: str):
     """An async generator yielding events for one session until `mark_turn_done()` fires for it.
     Used by the SSE route — a fresh call starts listening from whatever arrives next, so opening

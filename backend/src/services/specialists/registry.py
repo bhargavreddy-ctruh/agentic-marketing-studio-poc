@@ -151,11 +151,21 @@ def load_all_specialists() -> None:
         # collab_image_generator added 2026-09-26 (Fix 9) — a distinct tool for combining 2+ real
         # visual assets (e.g. a sponsor logo + product photo) in one generation; base_image_generator
         # stays the default for everything else.
+        # photorealistic_image_generator added 2026-10-01 (explicit user ask) — Google's Nano
+        # Banana 2 Lite, a distinct tool for when the request genuinely calls for a photorealistic
+        # result rather than a stylized/illustrated one; see illustrator.md rule 3d for the choice.
+        # high_resolution_image_generator added same day (explicit user ask) — Google's Nano
+        # Banana 2 (full), gated to ONLY an explicit 2K/4K/high-resolution request; see rule 3e.
         prompt_file="illustrator.md",
-        allowed_tools=("base_image_generator", "collab_image_generator", "image_editor", "brand_kit_lookup", "product_lookup"),
+        allowed_tools=("base_image_generator", "collab_image_generator", "photorealistic_image_generator", "high_resolution_image_generator", "image_editor", "brand_kit_lookup", "product_lookup"),
         tier=ModelTier.TIER_3,
         description="Generates the base still IMAGE from scratch (full_image pipeline's core step).",
-        required_output_fields=("image_prompt", "aspect_ratio", "brand_facts_used"),
+        # "tool_used" added 2026-10-01 (explicit user ask: "make sure the agents are configured to
+        # output structured for added models also") — with 5 image tools now available (base,
+        # collab, photorealistic, high-resolution, editor), the specific tool/model actually used
+        # is now a real, structured, always-present output field, not just inferable from raw
+        # tool-call metadata buried in canvas element records.
+        required_output_fields=("image_prompt", "aspect_ratio", "brand_facts_used", "tool_used"),
     ))
     register_specialist(SpecialistSpec(
         name="composition_artist",

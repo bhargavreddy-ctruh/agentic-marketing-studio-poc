@@ -28,7 +28,7 @@ from PIL import Image
 
 from ...core.config import settings
 from ...core.events import emit
-from ...core.exceptions import ProviderUnavailable
+from ...core.exceptions import ProviderUnavailable, VisionPayloadTooLarge
 from ...core.middleware.logging import get_logger
 from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMResult, ModelTier
@@ -41,32 +41,47 @@ log = get_logger(__name__)
 # be on the safe side") — Groq's vision endpoint has no documented hard pixel limit the way
 # Cloudflare's FLUX.2 [klein] does (`providers/image/cloudflare_flux.py`'s own 511px constant is a
 # real, DOCUMENTED vendor constraint; this one is a deliberate margin, not a hard limit this
-# provider enforces), but a full-size canvas asset base64-encoded raw is real, avoidable payload
-# weight and latency for a call that only needs to SEE the image, not reproduce it pixel-for-pixel.
-# 1024px keeps genuinely useful visual detail (colors, composition, mood, legible watermarks —
-# exactly what this function is used for) while capping payload size. Re-encoded as JPEG
-# (quality=85) rather than PNG — photographic canvas assets compress far smaller as JPEG with no
-# visible quality loss at this use case's resolution, directly cutting the base64 payload further.
-_MAX_VISION_DIMENSION = 1024
+# provider enforces). A fixed pixel dimension cap doesn't actually bound payload size — a
+# highly-detailed 1024px image can still be large, while a simple one could be shrunk further
+# without losing anything useful — so the real budget this function enforces is a BYTE size, with
+# dimensions/quality as the knobs it turns to hit that budget.
+_MAX_VISION_BYTES = 5 * 1024 * 1024  # 5MB — a generous margin under typical provider base64 payload limits
+_COMPRESSION_STEPS: list[tuple[int, float]] = [
+    # (JPEG quality, longest-edge scale factor relative to the ORIGINAL image), tried in order
+    # until the result fits under _MAX_VISION_BYTES. First step is usually sufficient for a normal
+    # canvas asset; later steps exist for the rare oversized/highly-detailed image.
+    (85, 1.0),
+    (70, 0.75),
+    (55, 0.5),
+    (40, 0.35),
+    (30, 0.25),
+]
 
 
-def _downscale_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
-    """Shrinks a real canvas asset before sending it to the vision model — a deliberate safety
-    margin, not a vendor-mandated limit (contrast `cloudflare_flux.py`'s real 511px constraint).
-    Returns (bytes, mime_type): on success, always re-encoded as JPEG for the payload-size win
-    (images already small enough pass through PIL's `.thumbnail()` unchanged in dimensions, but
-    are still re-encoded). On any decode failure, returns the ORIGINAL bytes and ORIGINAL
-    mime_type untouched — a real, disclosed degrade (best-effort compression, never a hard
-    requirement to see the image at all) rather than failing the whole vision call over a resize
-    step, and never mislabeling un-re-encoded bytes with the wrong mime type."""
-    try:
-        img = Image.open(io.BytesIO(image_bytes))
-        img.thumbnail((_MAX_VISION_DIMENSION, _MAX_VISION_DIMENSION), Image.LANCZOS)
+def _compress_for_vision(image_bytes: bytes, mime_type: str) -> tuple[bytes, str]:
+    """Shrinks a real canvas asset under `_MAX_VISION_BYTES` before sending it to the vision model.
+    Returns (bytes, mime_type), always re-encoded as JPEG. Unlike the dimension-only cap this
+    replaces, a decode failure is now a hard failure (re-raised), not a silent fallback to the
+    original, unprocessed bytes — matches the fail-closed intent already used elsewhere in the
+    compliance path rather than quietly sending a provider a payload this function couldn't even
+    open. If every compression step still leaves the image over budget, raises
+    `VisionPayloadTooLarge` instead of sending an oversized payload."""
+    img = Image.open(io.BytesIO(image_bytes))
+    img = img.convert("RGB")
+    original_size = img.size
+    last_bytes = b""
+    for quality, scale in _COMPRESSION_STEPS:
+        candidate = img
+        if scale < 1.0:
+            target = (max(1, int(original_size[0] * scale)), max(1, int(original_size[1] * scale)))
+            candidate = img.copy()
+            candidate.thumbnail(target, Image.LANCZOS)
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=85)
-        return buf.getvalue(), "image/jpeg"
-    except Exception:
-        return image_bytes, mime_type
+        candidate.save(buf, format="JPEG", quality=quality)
+        last_bytes = buf.getvalue()
+        if len(last_bytes) <= _MAX_VISION_BYTES:
+            return last_bytes, "image/jpeg"
+    raise VisionPayloadTooLarge(len(last_bytes), _MAX_VISION_BYTES)
 
 
 def _build_image_url_content(
@@ -79,7 +94,7 @@ def _build_image_url_content(
     one (confirmed in that file's own docstring: "array of URIs"). This skips downloading the
     asset a second time, the PIL resize, AND the base64 33%-size inflation entirely — Cloudinary's
     own on-the-fly transform suffix (`w_1024,q_85,f_jpg`) reproduces the exact same "cap payload
-    size for a call that only needs to SEE the image" behavior `_downscale_for_vision` exists for,
+    size for a call that only needs to SEE the image" behavior `_compress_for_vision` exists for,
     done by Cloudinary's CDN instead of this backend's CPU. Falls back to the original
     download-resize-base64 path when no direct url exists (local-disk dev mode) — `image_bytes`
     is required in that case."""
@@ -89,7 +104,7 @@ def _build_image_url_content(
         transformed = image_url.replace("/image/upload/", "/image/upload/w_1024,q_85,f_jpg/", 1)
         return {"type": "image_url", "image_url": {"url": transformed}}
     assert image_bytes is not None, "image_bytes is required when no direct image_url is available"
-    resized_bytes, resized_mime = _downscale_for_vision(image_bytes, mime_type)
+    resized_bytes, resized_mime = _compress_for_vision(image_bytes, mime_type)
     b64 = base64.b64encode(resized_bytes).decode()
     return {"type": "image_url", "image_url": {"url": f"data:{resized_mime};base64,{b64}"}}
 

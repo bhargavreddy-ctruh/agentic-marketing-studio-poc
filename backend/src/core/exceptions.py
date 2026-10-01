@@ -80,6 +80,20 @@ class ComplianceCheckFailed(AppError):
         self.checker_name = checker_name
 
 
+class VisionPayloadTooLarge(AppError):
+    """An image couldn't be compressed under the vision-call byte budget after a bounded number of
+    quality/dimension reduction passes — raised instead of silently sending a provider an oversized
+    (or completely unprocessed, on a decode failure) payload."""
+
+    def __init__(self, byte_size: int, max_bytes: int):
+        super().__init__(
+            f"image is {byte_size} bytes after compression, over the {max_bytes}-byte vision limit",
+            status_code=422,
+        )
+        self.byte_size = byte_size
+        self.max_bytes = max_bytes
+
+
 class NotFoundError(AppError):
     """A requested resource (session, canvas element, brand, product) doesn't exist."""
 
