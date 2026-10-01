@@ -5002,3 +5002,26 @@ Overhauled `ChatPanel.tsx` to match the target modern, sleek dark mode aesthetic
 - **Compliance checkers failed open on a missing `passed` key (`services/compliance/brand_consistency_checker.py`, `visual_fidelity_checker.py`):** both already raised `SpecialistFailed` on a transport error or genuinely unparseable JSON (fail-closed), but `parsed.get("passed", True)` meant a response that was valid JSON yet simply OMITTED `"passed"` silently counted as a pass. Changed the default to `False` in both — consistent with the fail-closed intent already established by the surrounding exception handling. `alignment_checker.py` deliberately left untouched — it's excluded from the pass/fail gate (`compliance_gate.py`'s `worst_of` logic) and failing open there can't affect the gate's outcome either way.
 - Verified: `backend/pytest` suite (44 tests) passes unchanged; added ad hoc scripts confirming `cleanup_session` removes all 5 dict entries (and no-ops safely on an unknown session), `_compress_for_vision` both returns bytes under budget for a normal image and raises `VisionPayloadTooLarge` when forced over an artificially tiny budget, and a corrupted image now raises instead of silently passing through.
 
+## Nano Banana 2 Lite + Nano Banana 2 added as context-gated image tools (2026-10-01)
+
+- Explicit user ask: add Google's Nano Banana models (via Replicate) as new image-generation
+  tools, each gated on a specific context signal rather than used by default.
+- `providers/image/nano_banana_provider.py` wraps `google/nano-banana-2-lite` (fast/cheap, 1K
+  output, up to 14 reference images) — exposed as the new `photorealistic_image_generator` tool,
+  used only when the request genuinely calls for a photorealistic (not stylized/illustrated)
+  result (`illustrator.md` rule 3d).
+- `providers/image/nano_banana_2_provider.py` wraps `google/nano-banana-2` (higher fidelity,
+  512px/1K/2K/4K, same 14-reference support) — exposed as `high_resolution_image_generator`, used
+  only when the user explicitly asks for high resolution/2K/4K (rule 3e). Includes real
+  `google_search`/`image_search` web-grounding booleans, confirmed against the model's actual
+  OpenAPI schema the user supplied directly (not guessed) — both default off, only set when a
+  request genuinely needs real-time/current context.
+- Both wired into Illustrator's `allowed_tools` and `graph.py`'s `_ELEMENT_TYPE_BY_TOOL` map (so a
+  direct_fix using either is correctly typed as an image, not guessed from the prior element).
+- Illustrator's structured output (`required_output_fields`) gained a new `tool_used` field —
+  explicit user ask ("make sure the agents are configured to output structured for added models
+  also") — recording exactly which of the now-5 image tools was actually called, kept in sync with
+  the prompt's own `<output_format>` block (verified via the existing schema-consistency test).
+- Verified: `pytest tests/unit tests/integration -q` (44 passed), `ruff check` clean, both tools
+  confirmed to register and produce valid OpenAI-style tool schemas via a live import check.
+
