@@ -22,13 +22,13 @@ from ...core.exceptions import SpecialistFailed
 from ...core.middleware.logging import get_logger
 from ..specialists.runner import (
     AgenticStepResult,
+    deliverable_hint_block,
     run_specialist_agentic,
     run_specialist_with_review,
 )
 from .base import (
     LeadResult,
     LeadSpec,
-    aspect_ratio_hint_block,
     referenced_element_block,
     stale_campaign_context_block,
 )
@@ -99,7 +99,7 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
         f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
         f"Brief so far:\n{json.dumps(brief)}"
         f"{referenced_element_block(brief)}"
-        f"{aspect_ratio_hint_block(idea)}"
+        f"{deliverable_hint_block(brief)}"
     )
     # One-pass product compositing: if a product photo exists, tell the illustrator to pass it as
     # reference_storage_ref to base_image_generator. Qwen image-to-image generates the background

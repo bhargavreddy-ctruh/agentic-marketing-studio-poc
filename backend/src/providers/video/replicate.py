@@ -21,6 +21,7 @@ a genuine capability upgrade, not something this provider should silently suppre
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import time
 
@@ -100,7 +101,22 @@ class ReplicateVideoProvider(VideoGenProvider):
 
         start = time.monotonic()
         try:
-            output = await client.async_run(self._model, input=input_payload)
+            model_info = await client.models.async_get(self._model)
+            version = model_info.latest_version
+
+            prediction = await client.predictions.async_create(
+                version=version,
+                input=input_payload,
+            )
+
+            while prediction.status not in ["succeeded", "failed", "canceled"]:
+                await asyncio.sleep(2)
+                prediction = await client.predictions.async_get(prediction.id)
+
+            if prediction.status != "succeeded":
+                raise ProviderUnavailable("replicate", f"Prediction ended with status: {prediction.status}")
+
+            output = prediction.output
         except Exception as exc:  # the replicate SDK raises its own exception types — none escape this file
             raise ProviderUnavailable("replicate", str(exc)) from exc
 

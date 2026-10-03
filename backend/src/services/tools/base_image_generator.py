@@ -145,10 +145,16 @@ class BaseImageGeneratorTool(Tool):
                     break
 
         provider = get_image_gen_provider()
+        
+        valid_ratios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2"]
+        aspect_ratio = str(args.get("aspect_ratio") or "16:9")
+        if aspect_ratio not in valid_ratios:
+            aspect_ratio = "16:9"
+
         try:
             result = await provider.generate(
                 prompt=prompt,
-                aspect_ratio=str(args.get("aspect_ratio") or "1:1"),
+                aspect_ratio=aspect_ratio,
                 negative_prompt=str(args["negative_prompt"]).strip() or None if args.get("negative_prompt") else None,
                 enable_prompt_expansion=bool(args.get("enable_prompt_expansion", True)),
                 seed=seed,

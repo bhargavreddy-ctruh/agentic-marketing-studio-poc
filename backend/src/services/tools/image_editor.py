@@ -82,6 +82,10 @@ class ImageEditorTool(Tool):
         # image, so `match_input_image` must be false for that request to actually take effect —
         # see the precedence note on `ReplicateImageProvider.edit`.
         requested_aspect_ratio = str(args["aspect_ratio"]).strip() if args.get("aspect_ratio") else None
+        if requested_aspect_ratio:
+            valid_ratios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2"]
+            if requested_aspect_ratio not in valid_ratios:
+                requested_aspect_ratio = None
 
         try:
             result = await get_image_edit_provider().edit(

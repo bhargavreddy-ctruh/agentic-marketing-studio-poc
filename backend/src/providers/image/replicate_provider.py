@@ -53,10 +53,6 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 request_input["negative_prompt"] = negative_prompt
             if seed is not None:
                 request_input["seed"] = seed
-            if width is not None:
-                request_input["width"] = width
-            if height is not None:
-                request_input["height"] = height
             if reference_image_bytes:
                 b64_data = base64.b64encode(reference_image_bytes).decode("utf-8")
                 request_input["image"] = f"data:{reference_mime_type or 'image/png'};base64,{b64_data}"
