@@ -21,8 +21,9 @@ default (`pacing_target="moderate"`, unchanged below).
 from __future__ import annotations
 
 import json
+import re
 
-from ...core.exceptions import SpecialistFailed
+from ...core.exceptions import SpecialistFailed, SpecialistNeedsClarification
 from ..specialists.runner import run_concurrent_specialists, run_specialist_agentic
 from .base import LeadSpec, NarrativePlan, referenced_element_block, stale_campaign_context_block
 
@@ -42,6 +43,19 @@ async def run_narrative_lead(*, brief: dict, user_message: str = "") -> Narrativ
         idea = user_message.strip() + stale_campaign_context_block(brief)
     else:
         idea = brief.get("idea") or brief.get("initial_message") or ""
+
+    duration_pattern = re.compile(r"(\d+(?:\.\d+)?)\s*(seconds?|secs?|s\b|minutes?|mins?|m\b)", re.IGNORECASE)
+    if not duration_pattern.search(user_message) and not duration_pattern.search(idea):
+        raise SpecialistNeedsClarification(
+            specialist_name="narrative_lead",
+            question="How long should the video be?",
+            options=[
+                {"id": "5 seconds", "label": "5 seconds", "description": "Short and snappy"},
+                {"id": "10 seconds", "label": "10 seconds", "description": "Standard length"},
+                {"id": "15 seconds", "label": "15 seconds", "description": "Maximum allowed by model"}
+            ],
+            allow_free_text=True
+        )
 
     planning = await run_specialist_agentic(
         "shot_planner",

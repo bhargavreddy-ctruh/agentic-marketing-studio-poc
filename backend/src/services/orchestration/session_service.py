@@ -534,6 +534,12 @@ class SessionService:
         resolved_parent_element_id = parent_element.id if parent_element else None
         resolved_product_id: str | None = None
         resolved_product_name: str | None = None
+        
+        import logging
+        log = logging.getLogger(__name__)
+        log.info(f"[GROUPING] target_product_id: {target_product_id}, referenced_element_ids: {referenced_element_ids}")
+        log.info(f"[GROUPING] parent_element: {parent_element.id if parent_element else None}, start_new_product: {start_new_product}")
+        
         if target_product_id:
             # An explicit pick from the session's own known products — the real name is looked up
             # server-side, never trusted from the client.
@@ -543,6 +549,7 @@ class SessionService:
             if picked_product:
                 resolved_product_id = picked_product.id
                 resolved_product_name = picked_product.name
+            log.info(f"[GROUPING] resolved from target_product_id: {resolved_product_id}")
         elif parent_element and parent_element.product_id and not start_new_product:
             # No explicit target — inherit the referenced element's own product, so a follow-up
             # generation from an existing product's asset stays grouped with it by default.
@@ -556,6 +563,8 @@ class SessionService:
             # infer as before" — unchanged, only this NEW explicit flag skips inheritance.
             resolved_product_id = parent_element.product_id
             resolved_product_name = parent_element.product_name
+            log.info(f"[GROUPING] resolved from parent_element: {resolved_product_id}")
+
         # Genuinely nothing resolved yet — may still be filled in after the graph runs (see
         # `product_facts` below); if that doesn't resolve it either, lands in the frontend's flat
         # "Unassigned" bucket (`CanvasEngine.tsx`), never a fabricated grouping.
@@ -601,6 +610,12 @@ class SessionService:
         # image/video generation tool — `brief["idea"]` is not always this turn's own message (it
         # can be stale/summarized), so this is threaded separately rather than reusing that field.
         brief_for_graph["_current_turn_message"] = user_message
+        
+        from ...core.deliverables import detect_deliverable
+        detected_spec = detect_deliverable(user_message)
+        if detected_spec:
+            brief_for_graph["deliverable"] = detected_spec.key
+            
         # Fallback fields for backwards compatibility with parts of graph that expect latest_element
         if latest_element:
             brief_for_graph["latest_element_id"] = latest_element.id
@@ -728,34 +743,34 @@ class SessionService:
 
         # Inject product photo storage ref into the brief so base_image_generator can
         # auto-use it as image-to-image reference when no explicit reference_storage_ref is given.
-        # (Reads `session.product_profile_id` AFTER the chat-driven update above, so this is the
-        # CURRENT turn's product's photo, not a stale one left over from an earlier campaign.)
-        if session.product_profile_id and not start_new_product and (
-            not brief_for_graph.get("product_photo_storage_ref") or resolved_product_id is None
-        ):
-            # `not start_new_product` guards this WHOLE block (2026-09-28, Phase 1): both effects
-            # below — auto-grounding generation on the session's current product photo, AND the
-            # session-level grouping fallback — are exactly the kind of unrequested inheritance
-            # `start_new_product` exists to defeat. Without this guard, "+ Start new product"
-            # would still silently land back in the session's existing product here, one level
-            # down from the parent-inheritance check above.
+        # Real, live-found cross-product contamination bug (2026-10-03): `session.product_profile_id`
+        # is the LAST product the session's own chat-detection touched — in a session with multiple
+        # products, a turn referencing an S26 element while the session is "on" the Nothing Phone
+        # product injected the Nothing Phone's photo as `product_photo_storage_ref`, causing
+        # Environment Designer to generate a scene WITH the wrong phone. Fix: when a referenced
+        # element belongs to a specific product (`resolved_product_id` already set above from the
+        # parent's own product_id), prefer THAT product's photo first. Fall back to the
+        # session-level product only when the reference has no product assignment.
+        photo_product_id = resolved_product_id or (session.product_profile_id if not start_new_product else None)
+        if photo_product_id:
             async with async_session_factory() as db:
                 from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
                 product_repo = SqliteProductRepository(db)
-                product = await product_repo.get(session.product_profile_id)
+                product = await product_repo.get(photo_product_id)
                 if product:
-                    if product.photo_storage_ref and not brief_for_graph.get("product_photo_storage_ref"):
+                    if product.photo_storage_ref:
                         brief_for_graph["product_photo_storage_ref"] = product.photo_storage_ref
-                    # Fix 5 (2026-09-26): last-resort grouping fallback — an explicit pick, an
-                    # inherited parent's product, or this turn's own chat-detected product (all
-                    # above) all still take precedence; only when NONE of those resolved anything
-                    # does a plain creative-direction turn now still land in the session's current
-                    # product instead of `None`/"Unassigned" (verified: 5/61 elements resolved a
-                    # product before this fix — this closes that gap for any session that has ever
-                    # had one attached, reusing the same DB fetch above, no extra query).
-                    if resolved_product_id is None:
+                    elif "product_photo_storage_ref" in brief_for_graph:
+                        # Clear stale persisted value for old sessions
+                        del brief_for_graph["product_photo_storage_ref"]
+                    
+                    # Last-resort grouping fallback (Fix 5, 2026-09-26): only fills in what the
+                    # explicit pick / inherited parent / chat-detection above left unresolved.
+                    if resolved_product_id is None and not start_new_product:
                         resolved_product_id = product.id
                         resolved_product_name = product.name
+        elif "product_photo_storage_ref" in brief_for_graph:
+            del brief_for_graph["product_photo_storage_ref"]
 
         # `runner.py`'s tool-context choke point only has access to `brief`, not to this
         # function's local `resolved_product_id` — thread it through so `product_lookup`'s own
@@ -795,21 +810,44 @@ class SessionService:
                 resume_state["target_specialist"] = paused_plan.get("specialist_name")
                 resume_brief["_resume_direct_fix_context"] = paused_plan.get("context")
                 result_state = await _direct_fix_node(resume_state)
+            elif paused_plan.get("route") == "full_video":
+                # The video pipeline doesn't have true step-by-step resume, but we can restart it fresh
+                # with the combined context of the original idea and the user's new answer, ensuring it
+                # doesn't get misrouted by the orchestrator.
+                original_message = paused_plan.get("original_message", "")
+                combined_idea = f"{original_message}\nUser clarification answer: {user_message}".strip()
+                resume_brief["idea"] = combined_idea
+                resume_state["user_message"] = combined_idea
+                
+                from .graph import _motion_lead_node
+                result_state = await _motion_lead_node(resume_state)
             else:
                 resume_state["dynamic_plan"] = paused_plan.get("plan")
                 resume_brief["_resume_next_step_index"] = paused_plan.get("next_step_index")
                 resume_brief["_resume_completed_results"] = paused_plan.get("completed_results")
                 result_state = await _dynamic_executor_node(resume_state)
         else:
-            graph = get_graph()
-            result_state = await graph.ainvoke(
-                {
-                    "session_id": session.id,
-                    "user_id": session.user_id,
-                    "user_message": user_message,
+            from ..ideation.requirements_check import run_requirements_check
+            req_prompt = run_requirements_check(user_message, brief_for_graph, existing_elements, referenced_elements)
+            
+            if req_prompt:
+                result_state = {
                     "brief": brief_for_graph,
+                    "result": {
+                        "message": req_prompt.message,
+                        "options": [opt.model_dump() for opt in req_prompt.options],
+                    }
                 }
-            )
+            else:
+                graph = get_graph()
+                result_state = await graph.ainvoke(
+                    {
+                        "session_id": session.id,
+                        "user_id": session.user_id,
+                        "user_message": user_message,
+                        "brief": brief_for_graph,
+                    }
+                )
 
         # Only the fields ideation/orchestrator actually mutate belong in the persisted brief —
         # the latest-element scratch fields above are graph-input-only, not part of the session's
@@ -831,7 +869,7 @@ class SessionService:
             # reasoning as the other scratch keys above; never part of the session's own
             # accumulated state (`resolved_product_id`/`brand_logo_storage_ref` are recomputed
             # fresh every turn anyway, same as `approval_mode`).
-            "resolved_product_id", "brand_logo_storage_ref", "clarification_answer",
+            "resolved_product_id", "brand_logo_storage_ref", "product_photo_storage_ref", "clarification_answer",
             "_resume_direct_fix_context", "_resume_next_step_index", "_resume_completed_results",
         )
         session.brief = {k: v for k, v in returned_brief.items() if k not in _scratch_keys}

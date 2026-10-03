@@ -38,9 +38,8 @@ async def test_question_shape_raises_needs_clarification_not_failed():
             '"options": [{"id": "p1", "label": "2a", "description": "Nothing Phone (2a)"}, '
             '{"id": "p2", "label": "4a", "description": "Nothing Phone 4a"}]}'
         ),
-    ):
-        with pytest.raises(SpecialistNeedsClarification) as excinfo:
-            await run_specialist_agentic("reference_curator", context="find references")
+    ), pytest.raises(SpecialistNeedsClarification) as excinfo:
+        await run_specialist_agentic("reference_curator", context="find references")
 
     exc = excinfo.value
     assert exc.question == "Which linked product is this about — the 2a or the 4a?"
@@ -55,9 +54,8 @@ async def test_question_without_options_is_still_recognized():
     with patch(
         "src.services.specialists.runner.get_llm_provider",
         return_value=_fake_llm('{"question": "What text should the headline say?"}'),
-    ):
-        with pytest.raises(SpecialistNeedsClarification) as excinfo:
-            await run_specialist_agentic("reference_curator", context="find references")
+    ), pytest.raises(SpecialistNeedsClarification) as excinfo:
+        await run_specialist_agentic("reference_curator", context="find references")
 
     assert excinfo.value.question == "What text should the headline say?"
     assert excinfo.value.options is None

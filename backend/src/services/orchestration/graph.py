@@ -57,6 +57,37 @@ from ..specialists.runner import run_concurrent_specialists, run_specialist_with
 from .orchestrator import route, route_condition
 from .state import GraphState
 
+async def _emit_intermediate_element(
+    session_id: str,
+    element_type: str,
+    produced_by_specialist: str,
+    storage_ref: str,
+    metadata: dict | None = None,
+    product_id: str | None = None,
+    parent_element_id: str | None = None,
+):
+    from ...models.base import async_session_factory
+    from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+    from ...repositories.models import CanvasElementModel
+    from .session_service import _run_compliance_background
+    import asyncio
+    import uuid
+
+    async with async_session_factory() as db:
+        canvas = SqliteCanvasRepository(db)
+        el = await canvas.add_element(CanvasElementModel(
+            id=uuid.uuid4().hex,
+            session_id=session_id,
+            element_type=element_type,
+            produced_by_specialist=produced_by_specialist,
+            storage_ref=storage_ref,
+            metadata_json=metadata or {},
+            product_id=product_id,
+            parent_element_id=parent_element_id,
+        ))
+    emit("element_created", element_id=el.id)
+    asyncio.create_task(_run_compliance_background(el.id))
+
 log = get_logger(__name__)
 
 # Which real element_type each tool's own storage_ref output actually is — used by
@@ -103,7 +134,7 @@ _ANNOTATION_ONLY_TOOLS = {"text_card_writer"}
 # matches the same real, audited pattern `motion_lead.py`'s `run_concurrent_specialists` usage
 # already proved out (independent GENERATION branches, never independent EDITS of the same thing).
 _ASSET_MUTATING_SPECIALISTS = frozenset(
-    {"composition_artist", "prop_stylist", "lighting_designer", "overlay_artist"}
+    {"composition_artist", "prop_stylist", "lighting_designer", "overlay_artist", "brand_asset_applier"}
 )
 
 
@@ -586,7 +617,24 @@ async def _motion_lead_node(state: GraphState) -> GraphState:
         # except-block through every internal stage individually.
         log.info("motion_lead_needs_clarification", extra={"_extra_question": exc.question})
         emit("lead_paused", lead="motion_lead", question=exc.question)
-        return {**state, "result": _clarification_result(exc)}
+        
+        # Real, live-found bug (2026-10-03): Because the video pipeline does not support true mid-plan
+        # resume (per `_clarification_result`'s own docstring, it intentionally restarts fresh), we MUST
+        # clear the staging state here. If we don't, `brief["video_stage"]` remains "motion_pending",
+        # and the user's ANSWER to the clarification question is erroneously evaluated as an approval
+        # decision on the NEXT turn, causing the video generation to silently cancel.
+        brief["video_stage"] = None
+        brief.pop("multi_video_plan", None)
+        brief.pop("narrative_plan", None)
+        brief.pop("scene_plan", None)
+        brief.pop("narrative_plans", None)
+        brief.pop("scene_plans", None)
+        
+        return {
+            **state,
+            "paused_plan": {"route": "full_video", "original_message": user_message},
+            "result": _clarification_result(exc)
+        }
 
 
 async def _run_multi_video_node(
@@ -786,6 +834,7 @@ async def _run_multi_video_node(
         state["result"] = _combine_multi_generation_results(results, requested_count=n).to_dict()
     except SpecialistFailed as exc:
         log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
+        state["paused_plan"] = {"route": "full_video", "original_message": user_message}
         state["result"] = {
             "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
             "options": [
@@ -977,6 +1026,25 @@ async def _run_single_video_node(
                     brief=brief
                 )
                 emit("lead_completed", lead="scene_lead", revision=True)
+                if scene.scene_image_storage_ref:
+                    await _emit_intermediate_element(
+                        session_id=state["session_id"],
+                        element_type="image",
+                        produced_by_specialist="environment_designer",
+                        storage_ref=scene.scene_image_storage_ref,
+                        product_id=brief.get("resolved_product_id"),
+                        parent_element_id=brief.get("latest_element_id"),
+                    )
+                if scene.scene_description_storage_ref:
+                    await _emit_intermediate_element(
+                        session_id=state["session_id"],
+                        element_type="text",
+                        produced_by_specialist="lighting_designer",
+                        storage_ref=scene.scene_description_storage_ref,
+                        metadata={"text": "Scene Description"},
+                        product_id=brief.get("resolved_product_id"),
+                        parent_element_id=brief.get("latest_element_id"),
+                    )
                 return _stage_scene_for_approval(scene, revised=True)
         elif stage == "motion_pending":
             # Scene was already approved in an earlier turn too — reload it, never regenerate it.
@@ -985,6 +1053,27 @@ async def _run_single_video_node(
             emit("lead_started", lead="scene_lead")
             scene = await run_scene_lead(shot_description=narrative.shots[0], brief=brief)
             emit("lead_completed", lead="scene_lead")
+            
+            if scene.scene_image_storage_ref:
+                await _emit_intermediate_element(
+                    session_id=state["session_id"],
+                    element_type="image",
+                    produced_by_specialist="environment_designer",
+                    storage_ref=scene.scene_image_storage_ref,
+                    product_id=brief.get("resolved_product_id"),
+                    parent_element_id=brief.get("latest_element_id"),
+                )
+            if scene.scene_description_storage_ref:
+                await _emit_intermediate_element(
+                    session_id=state["session_id"],
+                    element_type="text",
+                    produced_by_specialist="lighting_designer",
+                    storage_ref=scene.scene_description_storage_ref,
+                    metadata={"text": "Scene Description"},
+                    product_id=brief.get("resolved_product_id"),
+                    parent_element_id=brief.get("latest_element_id"),
+                )
+
             if approval_mode == "approve":
                 return _stage_scene_for_approval(scene, revised=False)
 
@@ -1014,6 +1103,7 @@ async def _run_single_video_node(
         state["result"] = result.to_dict()
     except SpecialistFailed as exc:
         log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
+        state["paused_plan"] = {"route": "full_video", "original_message": user_message}
         state["result"] = {
             "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
             "options": [
@@ -1097,6 +1187,10 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
 
     direct_fix_context = "\n\n".join(context_parts)
     direct_fix_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+    from ..specialists.runner import deliverable_hint_block
+    hint = deliverable_hint_block(brief)
+    if hint:
+        direct_fix_context += hint
 
     # Resuming a paused clarification question (2026-09-30) — reuse the EXACT context this
     # specialist saw when it asked, plus the user's real answer, instead of rebuilding fresh
@@ -1314,8 +1408,8 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     # dynamic-routed edit/follow-up request never goes through visual_design_lead.py at all. Its
     # own trailing block now (not appended into block 0) so it stays the LAST/most recent thing
     # before the model acts, regardless of how many referenced-element blocks came before it.
-    from ..leads.base import aspect_ratio_hint_block
-    hint = aspect_ratio_hint_block(user_message or brief.get("idea") or "")
+    from ..specialists.runner import deliverable_hint_block
+    hint = deliverable_hint_block(brief)
     if hint:
         current_context.append({"type": "text", "text": hint})
 

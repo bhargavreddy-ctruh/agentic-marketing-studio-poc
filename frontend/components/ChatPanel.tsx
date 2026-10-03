@@ -214,6 +214,9 @@ function ChatPanel(
   // `handlePickOption` can resend the SAME reference for any continuation that doesn't supply a
   // new one (see `isContinuationOfPrompt` below).
   const lastReferencedIdsRef = useRef<string[] | undefined>(undefined);
+  // Tracks the product id of the last referenced element so continuations of a prompt
+  // (e.g. answering a clarifying question) keep the same grouping as the turn that started it.
+  const lastReferencedProductIdRef = useRef<string | null | undefined>(undefined);
 
   // Real, live-found gap (2026-09-30): a long generation's `postTurn()` call sometimes fails with
   // a 502 even though the backend is still genuinely working — confirmed live, the generation
@@ -383,13 +386,28 @@ function ChatPanel(
       const idsToSend = freshIds && freshIds.length > 0
         ? freshIds
         : wasContinuation ? lastReferencedIdsRef.current : freshIds;
+      // Derive targetProductId from the referenced elements' own product. Prefer the freshly
+      // referenced one; fall back to the last-used one for continuations (same turn, same reference).
+      const freshProductId = referencedElements?.find(e => e.productId)?.productId ?? null;
+      const productIdToSend = freshIds && freshIds.length > 0
+        ? freshProductId
+        : wasContinuation ? lastReferencedProductIdRef.current : freshProductId;
       lastReferencedIdsRef.current = idsToSend;
+      lastReferencedProductIdRef.current = productIdToSend;
       onClearReference?.();
       const useStartNewProduct = startNewProduct;
       setStartNewProduct(false);
 
       const { result: res, thinking, seconds } = await withNarration(sid, () =>
-        postTurn(sid!, { freeText: text, referencedElementIds: idsToSend, startNewProduct: useStartNewProduct }),
+        postTurn(sid!, {
+          freeText: text,
+          referencedElementIds: idsToSend,
+          // Pass the product group so the generated element lands in the same group as the
+          // referenced source. Omit (undefined) when startNewProduct is true so the backend's
+          // own "start new product" logic takes over instead.
+          targetProductId: useStartNewProduct ? undefined : (productIdToSend ?? undefined),
+          startNewProduct: useStartNewProduct,
+        }),
       );
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();
@@ -428,13 +446,23 @@ function ChatPanel(
       const idsToSend = freshIds && freshIds.length > 0
         ? freshIds
         : wasContinuation ? lastReferencedIdsRef.current : freshIds;
+      const freshProductId = referencedElements?.find(e => e.productId)?.productId ?? null;
+      const productIdToSend = freshIds && freshIds.length > 0
+        ? freshProductId
+        : wasContinuation ? lastReferencedProductIdRef.current : freshProductId;
       lastReferencedIdsRef.current = idsToSend;
+      lastReferencedProductIdRef.current = productIdToSend;
       onClearReference?.();
       const useStartNewProduct = startNewProduct;
       setStartNewProduct(false);
 
       const { result: res, thinking, seconds } = await withNarration(sessionId, () =>
-        postTurn(sessionId, { pickedOptionId: option.id, referencedElementIds: idsToSend, startNewProduct: useStartNewProduct }),
+        postTurn(sessionId, {
+          pickedOptionId: option.id,
+          referencedElementIds: idsToSend,
+          targetProductId: useStartNewProduct ? undefined : (productIdToSend ?? undefined),
+          startNewProduct: useStartNewProduct,
+        }),
       );
       setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
       if (res.status === "completed") onGenerated?.();

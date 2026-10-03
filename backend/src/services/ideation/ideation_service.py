@@ -170,6 +170,8 @@ number given), never when the value has already been given, by the user or the e
 
 CONTEXT GUARDRAIL: If the user's message is a bare action (like "retry", "do it again", "start over") AND there is no clear subject or idea established in the existing context, you MUST mark `clear: false` and ask them what they actually want to create. Never let a completely context-free request proceed to generation where the downstream agents would be forced to guess or hallucinate a generic product.
 
+MULTIPLE CANVAS ELEMENTS AMBIGUITY: If multiple generated elements exist on the canvas and the user's request asks for an edit, modification, or enhancement (e.g., "make it pop", "recolor it", "add a price tag") WITHOUT specifying which element (e.g., does NOT say "the first image", "the video clip", or reference a specific tile), do NOT guess or default blindly. You MUST set `clear: false`, ask which element they want to edit, and provide pickable options corresponding to each existing element.
+
 Besides that, only ask when you genuinely could not proceed without guessing at
 something important — e.g. the request is ambiguous between multiple real targets, or contradicts
 something already established. Being asked something trivial on every single message is worse UX
@@ -237,7 +239,19 @@ async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None
         )
     ]
     latest_ref = brief.get("latest_element_storage_ref")
-    if latest_ref:
+    referenced_elements = brief.get("referenced_elements_context", [])
+    if len(referenced_elements) > 1:
+        elements_summary = []
+        for i, el in enumerate(referenced_elements, 1):
+            ref = el.get("storage_ref")
+            kind = el.get("element_type", "element")
+            desc = el.get("description") or "generated element"
+            elements_summary.append(f"- Option {i} (id: {el.get('id', i)}, ref: {ref}): {kind} depicting '{desc}'")
+        context_parts.append(
+            "MULTIPLE ELEMENTS CURRENTLY ON CANVAS:\n" + "\n".join(elements_summary) +
+            "\nIf the user's message is an edit/fix/modification request but does NOT clearly specify which of these elements to alter, set clear: false and offer options for each element."
+        )
+    elif latest_ref:
         existing_kind = brief.get("latest_element_type", "unknown kind")
         existing_desc = brief.get("latest_element_description") or "(no description recorded)"
         context_parts.append(

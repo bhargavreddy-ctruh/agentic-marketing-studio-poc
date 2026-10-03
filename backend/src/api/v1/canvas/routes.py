@@ -301,12 +301,18 @@ async def list_element_versions(
 
 from pydantic import BaseModel
 
+from ....core.deliverables import DELIVERABLES
+
 AD_SPECS = {
-    "instagram_square": {"name": "Instagram Feed (1:1)", "width": 1080, "height": 1080, "aspect_ratio": "1:1", "safe_zone_pct": 0.05},
-    "instagram_story": {"name": "Instagram Story / Reels (9:16)", "width": 1080, "height": 1920, "aspect_ratio": "9:16", "safe_zone_pct": 0.15},
-    "meta_portrait": {"name": "Meta Feed Portrait (4:5)", "width": 1080, "height": 1350, "aspect_ratio": "4:5", "safe_zone_pct": 0.05},
-    "landscape_banner": {"name": "Google Display / Youtube (16:9)", "width": 1920, "height": 1080, "aspect_ratio": "16:9", "safe_zone_pct": 0.05},
-    "linkedin_post": {"name": "LinkedIn Post (1.91:1)", "width": 1200, "height": 628, "aspect_ratio": "1.91:1", "safe_zone_pct": 0.05},
+    k: {
+        "name": v.label,
+        "width": v.width,
+        "height": v.height,
+        "aspect_ratio": v.aspect_ratio,
+        "safe_zone_pct": v.safe_zone_pct,
+    }
+    for k, v in DELIVERABLES.items()
+    if v.width and v.height
 }
 
 

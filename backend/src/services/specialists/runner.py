@@ -41,9 +41,35 @@ from .registry import get_specialist
 
 log = get_logger(__name__)
 
-# Tools whose `aspect_ratio` arg gets deterministically enforced from the real user message
-# instead of trusted from the model's own tool-call arg — see the call site below.
-_ASPECT_RATIO_ENFORCED_TOOLS = frozenset({"base_image_generator", "image_editor", "base_video_generator"})
+_ASPECT_RATIO_ENFORCED_TOOLS = frozenset({
+    "base_image_generator",
+    "image_editor",
+    "base_video_generator",
+    "collab_image_generator",
+    "photorealistic_image_generator",
+    "high_resolution_image_generator",
+})
+
+
+def deliverable_hint_block(brief: dict | None) -> str:
+    """Returns a system prompt hint block specifying target aspect ratio and specs from brief["deliverable"]."""
+    if not brief:
+        return ""
+    deliverable_key = brief.get("deliverable")
+    if deliverable_key:
+        from ...core.deliverables import get_deliverable
+        spec = get_deliverable(deliverable_key)
+        if spec:
+            dims = f"{spec.width}x{spec.height}" if spec.width and spec.height else "custom"
+            return (
+                f"\n\n[TARGET DELIVERABLE SPEC]\n"
+                f"Deliverable: {spec.label}\n"
+                f"Aspect Ratio: {spec.aspect_ratio} ({dims})\n"
+                f"Strictly adhere to aspect_ratio='{spec.aspect_ratio}' for all visual generation and layout tools."
+            )
+    from ..leads.base import aspect_ratio_hint_block
+    return aspect_ratio_hint_block(brief.get("_current_turn_message") or brief.get("idea") or "")
+
 
 
 def _extract_balanced_call_args(text: str, open_paren_idx: int) -> str | None:
@@ -222,9 +248,10 @@ async def run_specialist_agentic(
     system_prompt += (
         "\n\n<MASTER_DIRECTIVE>\n"
         "You are creating top-tier, crazy, eye-catching, bold marketing material. "
-        "CRITICAL RULE 1 — Referenced elements: If the context mentions a referenced element "
-        "(a storage_ref, 'referenced image', 'the referenced mobile', or any element the user pointed to), "
-        "that element IS the product/subject. NEVER ask which product or model to use in that case — just use it. "
+        "CRITICAL RULE 1 — Referenced elements: If a single referenced element "
+        "(a storage_ref, 'referenced image', or element pointed to) is provided, "
+        "use it directly as the subject/grounding. If MULTIPLE elements exist on canvas and it is ambiguous "
+        "which one the user wants to edit, do NOT silently default — return a clarifying question with options via Rule 5. "
         "CRITICAL RULE 2 — Product nouns: If the user says 'the mobile', 'the sneaker', 'the product', "
         "or any noun referring to a product, treat it as sufficient — generate using that subject. "
         "Only fail for clarification if the request is COMPLETELY void of any subject (e.g. just 'make something nice' with zero context). "
@@ -245,7 +272,7 @@ async def run_specialist_agentic(
         "but follow the user's instruction, ignoring the conflicting guardrail. "
         "CRITICAL RULE 5 — Genuine ambiguity: if, after applying rules 1-4, a request is genuinely "
         "ambiguous in a way that would make you guess at something you shouldn't (which of several "
-        "real, DIFFERENT linked products this is about; whether to use a real uploaded asset or "
+        "real, DIFFERENT linked products this is about; which canvas tile to edit; whether to use a real uploaded asset or "
         "invent one; any choice where guessing wrong produces a materially wrong result) — do NOT "
         "silently guess, and do NOT return {\"error\": \"...\"} (that reports a FAILURE, not a "
         "question, and gets shown to the user as a generic 'something went wrong' rather than your "
@@ -353,10 +380,17 @@ async def run_specialist_agentic(
                         # image AND video AND every route (dynamic executor, visual_design_lead,
                         # motion_lead) at once, not a hint repeated at three separate call sites.
                         if tool_name in _ASPECT_RATIO_ENFORCED_TOOLS and brief:
-                            from ..leads.base import infer_aspect_ratio_from_text
-                            detected_ratio = infer_aspect_ratio_from_text(
-                                brief.get("_current_turn_message") or brief.get("idea") or ""
-                            )
+                            detected_ratio = None
+                            if brief.get("deliverable"):
+                                from ...core.deliverables import get_deliverable
+                                d = get_deliverable(brief["deliverable"])
+                                if d:
+                                    detected_ratio = d.aspect_ratio
+                            if not detected_ratio:
+                                from ..leads.base import infer_aspect_ratio_from_text
+                                detected_ratio = infer_aspect_ratio_from_text(
+                                    brief.get("_current_turn_message") or brief.get("idea") or ""
+                                )
                             if detected_ratio and args.get("aspect_ratio") != detected_ratio:
                                 args["aspect_ratio"] = detected_ratio
                         # Its own trace span, nested under this specialist's — real per-tool
