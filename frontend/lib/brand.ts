@@ -19,9 +19,13 @@ export interface BrandProfile {
 }
 
 /** The current user's own onboarded brands (Tasks_Workflows.md #3) — the home page's Brand DNA
- * settings panel real data source. */
+ * settings panel real data source. `cache: "default"` (2026-10-05, FRONTEND_AUDIT.md #15) — this
+ * list changes rarely (only on an explicit onboard/edit/delete elsewhere), unlike canvas/turn data
+ * which genuinely needs the `no-store` default `request()` otherwise enforces; opts into the
+ * browser's normal HTTP cache instead of forcing a fresh round-trip through the Vercel→backend
+ * proxy on every single mount. */
 export async function listBrands(): Promise<BrandProfile[]> {
-  return request<BrandProfile[]>("/api/v1/brands");
+  return request<BrandProfile[]>("/api/v1/brands", { cache: "default" });
 }
 
 /** `rawFacts` is deliberately free-form (colors, voice, logo rules, prohibited imagery — whatever

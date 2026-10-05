@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import ChatPanel, { ChatPanelHandle } from "@/components/ChatPanel";
 import CanvasView, { ReferencedElement } from "@/components/CanvasView";
@@ -8,7 +8,7 @@ import NodeGraphView from "@/components/NodeGraphView";
 import GuardrailsSection from "@/components/GuardrailsSection";
 import DNASection from "@/components/DNASection";
 import StyleLockModal from "@/components/StyleLockModal";
-import { LiveEvent, openEventStream } from "@/lib/events";
+import { LiveEvent, buildPipelineNodes, openEventStream } from "@/lib/events";
 import { ApiError, User, me } from "@/lib/auth";
 import { Spinner } from "@/components/Spinner";
 import { CloseButton } from "@/components/CloseButton";
@@ -84,9 +84,41 @@ export default function StudioPage() {
     label: string;
   } | null>(null);
 
+  // Computed ONCE here and passed down to BOTH `getActiveSpecialist` and `<AgentHUD>` below
+  // (2026-10-05, FRONTEND_AUDIT.md #12) — both used to independently call `buildPipelineNodes`
+  // on the same `turnEvents`, a real duplicate O(N) rebuild on every single streamed event
+  // (including every per-token `llm_delta`). Still recomputes once per `turnEvents` change
+  // (unavoidable — the data did change), just no longer twice per change.
+  const pipelineNodes = useMemo(() => buildPipelineNodes(turnEvents), [turnEvents]);
+
   const activeSpecialist = useMemo(() => {
-    return getActiveSpecialist(turnEvents, generating, generatingKind);
-  }, [turnEvents, generating, generatingKind]);
+    return getActiveSpecialist(pipelineNodes, generating, generatingKind);
+  }, [pipelineNodes, generating, generatingKind]);
+
+  // Stabilized (2026-10-05, FRONTEND_AUDIT.md #13) — `CanvasView`/`ChatPanel` are now
+  // `React.memo`'d; a fresh array/object/function identity every render (the previous inline
+  // `.map(...)`/`{...}`/`() => ...` forms below) would make that memo a no-op.
+  const referencedElementIds = useMemo(
+    () => referencedElements.map((e) => e.id),
+    [referencedElements],
+  );
+  const pendingGeneration = useMemo(
+    () => (generating ? { kind: generatingKind } : null),
+    [generating, generatingKind],
+  );
+  const handleToggleElements = useCallback(() => setShowElementsDrawer((s) => !s), []);
+  const handleToggleMaximize = useCallback(() => setIsChatMaximized((prev) => !prev), []);
+  const handleChatGenerated = useCallback(() => setRefreshSignal((n) => n + 1), []);
+  const handleClearReference = useCallback(
+    (id?: string) => setReferencedElements((prev) => (id ? prev.filter((e) => e.id !== id) : [])),
+    [],
+  );
+  const handleAddReferenceElement = useCallback(
+    (el: ReferencedElement) =>
+      setReferencedElements((prev) => (prev.some((p) => p.id === el.id) ? prev : [...prev, el])),
+    [],
+  );
+  const handleChatSessionId = useCallback(() => {}, []);
 
   async function checkAuth() {
     setAuthError(null);
@@ -172,14 +204,53 @@ export default function StudioPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function handleRestoreEvents(events: LiveEvent[]) {
+  const handleRestoreEvents = useCallback((events: LiveEvent[]) => {
     const base = Date.now() - events.length;
     setTurnEvents(events.map((e, i) => ({ ...e, _receivedAt: base + i })));
+  }, []);
+
+  // Real, live-found gap (2026-10-05, FRONTEND_AUDIT.md #12) — this used to call `setTurnEvents`
+  // once per SSE event, including every per-token `llm_delta` (dozens-to-hundreds per turn), each
+  // one a full re-render of everything depending on `turnEvents` (AgentHUD, CanvasView via
+  // `activeSpecialist`, NodeGraphView when active). Buffered here in a ref and flushed via one
+  // `requestAnimationFrame` per frame instead — sub-16ms-granularity updates were never visually
+  // distinguishable anyway, so this is a pure win, not a visible behavior change.
+  const pendingEventsRef = useRef<LiveEvent[]>([]);
+  const flushScheduledRef = useRef(false);
+
+  function flushPendingEvents() {
+    flushScheduledRef.current = false;
+    const pending = pendingEventsRef.current;
+    if (pending.length === 0) return;
+    pendingEventsRef.current = [];
+    setTurnEvents((prev) => {
+      // Replays the exact same per-event reduction the old one-call-per-event code did
+      // ("turn_started resets the list, anything else appends") — just folded over however many
+      // events arrived within this one animation frame instead of one state update each.
+      let acc = prev;
+      for (const e of pending) {
+        acc = e.type === "turn_started" ? [e] : [...acc, e];
+      }
+      return acc;
+    });
   }
 
-  function handleTurnEvent(event: LiveEvent) {
+  useEffect(() => {
+    return () => {
+      // Drop anything still buffered on unmount — no setState-after-unmount from a straggling
+      // rAF callback.
+      pendingEventsRef.current = [];
+      flushScheduledRef.current = false;
+    };
+  }, []);
+
+  const handleTurnEvent = useCallback((event: LiveEvent) => {
     const stamped: LiveEvent = { ...event, _receivedAt: Date.now() };
-    setTurnEvents((prev) => (event.type === "turn_started" ? [stamped] : [...prev, stamped]));
+    pendingEventsRef.current.push(stamped);
+    if (!flushScheduledRef.current) {
+      flushScheduledRef.current = true;
+      requestAnimationFrame(flushPendingEvents);
+    }
 
     if (event.type === "turn_started") {
       setGenerating(true);
@@ -193,9 +264,10 @@ export default function StudioPage() {
       setGenerating(false);
       setGeneratingKind(null);
     }
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  function handleRequestGenerate(kind: "image" | "video" | "audio") {
+  const handleRequestGenerate = useCallback((kind: "image" | "video" | "audio") => {
     const labels = {
       image: "Describe the new image you want:",
       video: "Describe the new video you want:",
@@ -204,7 +276,7 @@ export default function StudioPage() {
     // Open the PromptModal instead of the native window.prompt() — same behaviour,
     // styled to match the studio dark theme (spec 8c).
     setPromptModal({ kind, label: labels[kind] });
-  }
+  }, []);
 
   function handlePromptConfirm(description: string) {
     if (!promptModal) return;
@@ -270,13 +342,13 @@ export default function StudioPage() {
           <CanvasView
             sessionId={sessionId}
             refreshSignal={refreshSignal}
-            referencedElementIds={referencedElements.map(e => e.id)}
+            referencedElementIds={referencedElementIds}
             onReferenceElements={setReferencedElements}
             onRequestGenerate={handleRequestGenerate}
-            pendingGeneration={generating ? { kind: generatingKind } : null}
+            pendingGeneration={pendingGeneration}
             activeSpecialist={activeSpecialist}
             showElements={showElementsDrawer}
-            onToggleElements={() => setShowElementsDrawer((s) => !s)}
+            onToggleElements={handleToggleElements}
             onElementsCountChange={setElementsCount}
           />
         ) : (
@@ -329,7 +401,7 @@ export default function StudioPage() {
         {/* Center: Live Agent HUD */}
         <div className="flex items-center justify-center min-w-0 mx-auto px-1">
           <AgentHUD
-            events={turnEvents}
+            nodes={pipelineNodes}
             generating={generating}
             generatingKind={generatingKind}
           />
@@ -438,15 +510,15 @@ export default function StudioPage() {
           <ChatPanel
             ref={chatPanelRef}
             sessionId={sessionId}
-            onSessionId={() => {}}
-            onGenerated={() => setRefreshSignal((n) => n + 1)}
+            onSessionId={handleChatSessionId}
+            onGenerated={handleChatGenerated}
             referencedElements={referencedElements}
-            onClearReference={(id) => setReferencedElements(prev => id ? prev.filter(e => e.id !== id) : [])}
-            onAddReferenceElement={(el) => setReferencedElements(prev => prev.some(p => p.id === el.id) ? prev : [...prev, el])}
+            onClearReference={handleClearReference}
+            onAddReferenceElement={handleAddReferenceElement}
             onTurnEvent={handleTurnEvent}
             onRestoreEvents={handleRestoreEvents}
             isMaximized={isChatMaximized}
-            onToggleMaximize={() => setIsChatMaximized((prev) => !prev)}
+            onToggleMaximize={handleToggleMaximize}
           />
         </div>
       </div>

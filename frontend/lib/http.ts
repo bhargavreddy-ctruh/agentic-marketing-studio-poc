@@ -32,8 +32,12 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   // curling the same endpoint directly returned the correct data — Next.js's own fetch cache (which
   // defaults to caching GETs unless told not to, independent of any HTTP Cache-Control header the
   // backend sends) was serving back the FIRST response ever made for that URL (the empty one, from
-  // before generation finished). Every API call here must always hit the network live.
-  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include", cache: "no-store" });
+  // before generation finished). Every API call here must always hit the network live — UNLESS
+  // the caller explicitly opts in to a different policy via `init.cache` (2026-10-05,
+  // FRONTEND_AUDIT.md #15): a handful of rarely-changing lists (brands/products) don't need to
+  // force a fresh network round-trip on every mount through the Vercel→backend proxy. Default
+  // stays `"no-store"` so every existing call site is completely unaffected unless it opts in.
+  const res = await fetch(`${API_BASE_URL}${path}`, { ...init, credentials: "include", cache: init?.cache ?? "no-store" });
   if (!res.ok) {
     // The backend's real typed-error-to-JSON-response shape (core/middleware/error_handler.py) —
     // surfaced honestly rather than a generic "something went wrong".

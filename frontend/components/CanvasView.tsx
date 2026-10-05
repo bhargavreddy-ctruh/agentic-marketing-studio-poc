@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { ReactNode, memo, useCallback, useEffect, useRef, useState } from "react";
 import CanvasEngine, { CanvasTile } from "@/components/canvas/CanvasEngine";
 import { PromptModal } from "@/components/PromptModal";
 import { CloseButton } from "@/components/CloseButton";
@@ -158,7 +158,7 @@ interface CanvasViewProps {
   onElementsCountChange?: (count: number) => void;
 }
 
-export default function CanvasView({
+function CanvasView({
   sessionId,
   refreshSignal,
   referencedElementIds = [],
@@ -671,3 +671,8 @@ export default function CanvasView({
     </div>
   );
 }
+
+// React.memo (2026-10-05, FRONTEND_AUDIT.md #13) — only effective combined with page.tsx's own
+// fix to stabilize the props it passes (referencedElementIds/pendingGeneration/onToggleElements
+// etc. were all recreated fresh every render there, which would make this memo a no-op by itself).
+export default memo(CanvasView);

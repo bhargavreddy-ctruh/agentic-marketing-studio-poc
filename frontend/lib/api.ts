@@ -177,8 +177,8 @@ export async function postTurn(
   });
 }
 
-export async function getSession(sessionId: string): Promise<SessionResponse> {
-  return request<SessionResponse>(`/api/v1/sessions/${sessionId}`);
+export async function getSession(sessionId: string, signal?: AbortSignal): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}`, signal ? { signal } : undefined);
 }
 
 /** One real, persisted chat turn (`ChatTurnResponse`, 2026-09-22) — `thinking_text` is the real
@@ -211,7 +211,7 @@ export interface ChatTurn {
  * docstring for the exact pagination shape. */
 export async function listTurns(
   sessionId: string,
-  opts?: { limit?: number; beforeId?: string },
+  opts?: { limit?: number; beforeId?: string; signal?: AbortSignal },
 ): Promise<ChatTurn[]> {
   const params = new URLSearchParams();
   if (opts?.limit != null) params.set("limit", String(opts.limit));
@@ -219,6 +219,7 @@ export async function listTurns(
   const qs = params.toString();
   const turns = await request<ChatTurn[]>(
     `/api/v1/sessions/${sessionId}/turns${qs ? `?${qs}` : ""}`,
+    opts?.signal ? { signal: opts.signal } : undefined,
   );
   for (const t of turns) {
     if (t.referenced_elements) {
