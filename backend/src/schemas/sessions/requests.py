@@ -26,6 +26,15 @@ class UpdateApprovalModeRequest(BaseModel):
     approval_mode: str = Field(pattern="^(auto|approve)$")
 
 
+class SelectBrandRequest(BaseModel):
+    # New (2026-10-05, explicit user ask: a brand picker dropdown in the Brand DNA tab) — lets the
+    # user switch a session to one of their OWN already-scraped/saved brands without re-crawling.
+    # `brand_id` ownership is verified route-side (`BrandDnaService.get_brand`, which already
+    # raises on another user's brand) before this is ever applied — strictly per-user, never a
+    # cross-user reference.
+    brand_id: str = Field(..., min_length=1)
+
+
 class UpdateGuardrailsEnabledRequest(BaseModel):
     # Per-session on/off toggle (2026-09-25, explicit user ask: "add a toggle to turn off
     # guardrails if user wants to") — same shape/pattern as `UpdateApprovalModeRequest` above.

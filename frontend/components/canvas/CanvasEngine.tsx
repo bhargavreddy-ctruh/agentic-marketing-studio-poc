@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Camera, Viewport, fitViewport } from "./camera";
 import type { SpecialistAgent } from "../AgentHUD";
+import { canvasTileImageUrl } from "@/lib/http";
 
 export interface CanvasTile {
   id: string;
@@ -858,7 +859,13 @@ export default function CanvasEngine({
             ) : (
               // eslint-disable-next-line @next/next/no-img-element -- a dynamic, backend-served
               // asset URL, not a static build-time asset next/image is meant for.
-              <img src={tile.url} alt="" className="w-full" draggable={false} />
+              <img
+                src={canvasTileImageUrl(tile.url)}
+                alt=""
+                className="w-full"
+                draggable={false}
+                loading="lazy"
+              />
             )}
 
             {/* A real caption, not a fabricated one (2026-09-22, per an explicit user ask: "label

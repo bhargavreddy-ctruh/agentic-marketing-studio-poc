@@ -17,9 +17,9 @@ import {
   updateApprovalMode,
 } from "@/lib/api";
 import { assetUrl } from "@/lib/http";
-import { ReferencedElement } from "@/components/CanvasView";
+import { ReferencedElement, elementKind } from "@/components/CanvasView";
 import { LiveEvent, describeEvent, openEventStream } from "@/lib/events";
-import { CanvasElement, getCanvasState } from "@/lib/canvas";
+import { CanvasElement, getCanvasState, uploadAndPlaceElement } from "@/lib/canvas";
 
 /** `video_stage` values a session's brief can carry while paused at a real pipeline gate
  * (`graph.py`'s `_motion_lead_node`) — used only to pick which proposal detail to render; the
@@ -140,6 +140,13 @@ interface ChatPanelProps {
   onGenerated?: () => void;
   referencedElements?: ReferencedElement[];
   onClearReference?: (id?: string) => void;
+  /** Appends one uploaded attachment (paperclip/paste/drop on the composer) to the chat's current
+   * reference selection — a real, live-found gap (fidelity audit 2026-10-05): the composer had no
+   * attach path at all, so a user who said "apply my image" with nothing already on the canvas had
+   * no way to give the agent that image except first uploading it onto the canvas separately and
+   * then clicking "reference" there. Reuses the exact same `uploadAndPlaceElement` +
+   * `ReferencedElement` shape `CanvasView`'s own tile-click reference flow already uses. */
+  onAddReferenceElement?: (element: ReferencedElement) => void;
   /** Every raw event for the turn currently in flight, forwarded up to `page.tsx` — Node Mode
    * (`NodeGraphView`) needs the full real event stream, not just the human-readable narration
    * lines this panel builds for itself. Called once per real event, in order; `page.tsx` resets
@@ -165,7 +172,7 @@ export interface ChatPanelHandle {
 }
 
 function ChatPanel(
-  { sessionId, onSessionId, onGenerated, referencedElements, onClearReference, onTurnEvent, onRestoreEvents, isMaximized, onToggleMaximize }: ChatPanelProps,
+  { sessionId, onSessionId, onGenerated, referencedElements, onClearReference, onAddReferenceElement, onTurnEvent, onRestoreEvents, isMaximized, onToggleMaximize }: ChatPanelProps,
   ref: React.ForwardedRef<ChatPanelHandle>,
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -173,6 +180,51 @@ function ChatPanel(
   const [approvalMode, setApprovalMode] = useState<"auto" | "approve">("auto");
   const [changingMode, setChangingMode] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [attaching, setAttaching] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  /** The one real path every attach gesture (paperclip click, paste, drop) reduces to — uploads
+   * the file, places it as a real canvas element, then adds it to the chat's reference selection
+   * so it reaches the next turn as a real `referenced_element_id`, exactly like clicking an
+   * existing canvas tile to reference it. */
+  async function attachFile(file: File) {
+    if (!sessionId || !file.type.startsWith("image/")) return;
+    setAttaching(true);
+    try {
+      const el: CanvasElement = await uploadAndPlaceElement(sessionId, file);
+      onAddReferenceElement?.({
+        id: el.id,
+        kind: elementKind(el.element_type),
+        url: el.storage_ref ? assetUrl(el.storage_ref, el.url) : "",
+        description: el.description,
+        productId: el.product_id,
+        productName: el.product_name,
+      });
+      onGenerated?.(); // bump the canvas refresh so the uploaded tile shows up there too
+    } catch (err) {
+      console.error("attachFile failed", err);
+    } finally {
+      setAttaching(false);
+    }
+  }
+
+  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
+    if (!item) return;
+    const file = item.getAsFile();
+    if (file) {
+      e.preventDefault();
+      void attachFile(file);
+    }
+  }
+
+  function handleDrop(e: React.DragEvent<HTMLTextAreaElement>) {
+    const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
+    if (file) {
+      e.preventDefault();
+      void attachFile(file);
+    }
+  }
   const [narration, setNarration] = useState<string[]>([]);
   // The real raw model text streaming live DURING the current turn (2026-09-22, per an explicit
   // user ask: "i want it as it generates" — the collapsed post-hoc "Analyzed your request" block
@@ -184,7 +236,26 @@ function ChatPanel(
   const [liveThinking, setLiveThinking] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  
+
+  // Chat history lazy-load (2026-10-05, per an explicit user ask: "add lazy loading to chat box,
+  // but load initial things immidiately") — the initial mount now asks the backend for only the
+  // most recent `INITIAL_TURN_LIMIT` turns (fast, same shape of fix as the canvas's own
+  // performance round earlier this session), instead of the whole session history every time.
+  // Older turns page in on demand — scrolling near the top of the list, or the explicit button —
+  // rather than being paid for up front on every single load.
+  const INITIAL_TURN_LIMIT = 20;
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [loadingMoreHistory, setLoadingMoreHistory] = useState(false);
+  // The oldest turn id currently loaded — the real pagination cursor (`before_id`) for the next
+  // "load earlier" fetch. A ref, not state: it's read inside an event handler, never rendered.
+  const oldestTurnIdRef = useRef<string | null>(null);
+  const historyScrollRef = useRef<HTMLDivElement>(null);
+  // Prepending older messages must NOT trigger the "always scroll to the latest message" effect
+  // below — that effect fires on every `messages` change, which would otherwise yank the view back
+  // to the bottom the instant older history loads, undoing the very scroll-up gesture that
+  // triggered the load. Set right before a prepend, consumed (and cleared) by that effect once.
+  const suppressAutoScrollRef = useRef(false);
+
   const [activeTab, setActiveTab] = useState<"Chat" | "Assets" | "Plan">("Chat");
   const [canvasAssets, setCanvasAssets] = useState<CanvasElement[]>([]);
   const [loadingAssets, setLoadingAssets] = useState(false);
@@ -267,6 +338,10 @@ function ChatPanel(
   // or a narration status line, so the user never has to manually scroll down to see what just
   // arrived.
   useEffect(() => {
+    if (suppressAutoScrollRef.current) {
+      suppressAutoScrollRef.current = false;
+      return;
+    }
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, liveThinking, narration, loading]);
 
@@ -488,9 +563,12 @@ function ChatPanel(
   async function loadHistory(isCancelled?: () => boolean) {
     if (!sessionId) return;
     try {
-      const [session, turns] = await Promise.all([getSession(sessionId), listTurns(sessionId)]);
+      const [session, turns] = await Promise.all([
+        getSession(sessionId),
+        listTurns(sessionId, { limit: INITIAL_TURN_LIMIT }),
+      ]);
       if (isCancelled?.()) return;
-      
+
       // Wire the real session title (4a) — already fetched above, just never stored before.
       setSessionTitle(session.title ?? "Untitled workflow");
 
@@ -501,17 +579,23 @@ function ChatPanel(
         { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
         { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
       ]);
-      
+
+      // A full page back (same size as what was asked for) means there's likely more behind it;
+      // a short page means we've already seen every turn this session has. Re-derived fresh on
+      // every full reload (including a manual refresh), same as `hasMoreHistory` itself.
+      oldestTurnIdRef.current = turns[0]?.id ?? null;
+      setHasMoreHistory(turns.length === INITIAL_TURN_LIMIT);
+
       const lastTurnForNode = turns[turns.length - 1];
       if (lastTurnForNode) onRestoreEvents?.(lastTurnForNode.events as LiveEvent[]);
-      
+
       if (session.status === "generating") {
         restored.push({ id: newId(), role: "assistant", text: "Reconnecting — a generation is still in progress…" });
         setMessages(restored);
         await pollUntilResolved(sessionId, () => isCancelled?.() ?? false);
         return;
       }
-      
+
       if (turns.length === 0) {
         setMessages([]);
         return;
@@ -520,6 +604,50 @@ function ChatPanel(
       setMessages(restored);
     } catch (err) {
       appendError(err);
+    }
+  }
+
+  /** Pages one older batch of turns in from `oldestTurnIdRef.current` and prepends them — the
+   * on-demand half of the lazy-load (initial load above only ever fetches the most recent
+   * `INITIAL_TURN_LIMIT`). Preserves the user's scroll position across the prepend (otherwise the
+   * container's native "stick near the top" behavior would shove the view back down to whatever
+   * was on screen a moment ago, right as new content appears above it). */
+  async function loadEarlierHistory() {
+    if (!sessionId || loadingMoreHistory || !hasMoreHistory || !oldestTurnIdRef.current) return;
+    setLoadingMoreHistory(true);
+    const container = historyScrollRef.current;
+    const prevScrollHeight = container?.scrollHeight ?? 0;
+    const prevScrollTop = container?.scrollTop ?? 0;
+    try {
+      const older = await listTurns(sessionId, {
+        limit: INITIAL_TURN_LIMIT,
+        beforeId: oldestTurnIdRef.current,
+      });
+      if (older.length === 0) {
+        setHasMoreHistory(false);
+        return;
+      }
+      const olderMessages: ChatMessage[] = older.flatMap((turn: ChatTurn) => [
+        { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
+        { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
+      ]);
+      oldestTurnIdRef.current = older[0]?.id ?? oldestTurnIdRef.current;
+      setHasMoreHistory(older.length === INITIAL_TURN_LIMIT);
+      suppressAutoScrollRef.current = true;
+      setMessages((m) => [...olderMessages, ...m]);
+      requestAnimationFrame(() => {
+        if (container) container.scrollTop = prevScrollTop + (container.scrollHeight - prevScrollHeight);
+      });
+    } catch (err) {
+      appendError(err);
+    } finally {
+      setLoadingMoreHistory(false);
+    }
+  }
+
+  function handleHistoryScroll(e: React.UIEvent<HTMLDivElement>) {
+    if (e.currentTarget.scrollTop < 80 && hasMoreHistory && !loadingMoreHistory) {
+      void loadEarlierHistory();
     }
   }
 
@@ -656,7 +784,23 @@ function ChatPanel(
       </header>
 
       {activeTab === "Chat" && (
-        <div className="flex-1 space-y-4 overflow-y-auto pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-surface-700">
+        <div
+          ref={historyScrollRef}
+          onScroll={handleHistoryScroll}
+          className="flex-1 space-y-4 overflow-y-auto pr-1 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-surface-700"
+        >
+          {hasMoreHistory && (
+            <div className="flex justify-center pb-2">
+              <button
+                type="button"
+                onClick={loadEarlierHistory}
+                disabled={loadingMoreHistory}
+                className="rounded-full border border-surface-700/50 bg-surface-800/50 px-3 py-1 text-xs text-surface-400 transition-colors hover:text-surface-200 disabled:opacity-50"
+              >
+                {loadingMoreHistory ? "Loading earlier messages…" : "Load earlier messages"}
+              </button>
+            </div>
+          )}
           {messages.length === 0 && (
             <div className="flex h-full items-center justify-center">
             <p className="text-sm text-surface-500 text-center max-w-xs">
@@ -1064,6 +1208,9 @@ function ChatPanel(
               handleSend();
             }
           }}
+          onPaste={handlePaste}
+          onDrop={handleDrop}
+          onDragOver={(e) => e.preventDefault()}
           disabled={loading}
         />
         <div className="flex items-center justify-between px-2 pb-1">
@@ -1114,6 +1261,26 @@ function ChatPanel(
               title="Add a brand/product link to auto-extract DNA"
             >
               🔗
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void attachFile(file);
+                e.target.value = "";
+              }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={!sessionId || attaching}
+              className="text-surface-500 hover:text-surface-300 transition-colors disabled:opacity-30"
+              title="Attach an image (or paste/drop one into the message box)"
+            >
+              {attaching ? "…" : "📎"}
             </button>
             <button type="button" className="text-surface-500 hover:text-surface-300 transition-colors" title="Voice Input">
               <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">

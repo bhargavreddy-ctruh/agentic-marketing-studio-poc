@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ...core.exceptions import ProviderUnavailable
+from ...core.image_quality import append_quality_guard_to_prompt
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.nano_banana_provider import get_nano_banana_provider
 from .base import Tool, ToolResult
@@ -64,6 +65,14 @@ class PhotorealisticImageGeneratorTool(Tool):
                 "enum": ["jpg", "png"],
                 "default": "jpg",
             },
+            "negative_prompt": {
+                "type": "string",
+                "description": (
+                    "Elements to avoid (this model has no native negative-prompt field — folded "
+                    "into the prompt text as an explicit exclusion clause). A quality-baseline "
+                    "exclusion is applied automatically; use this for request-specific additions."
+                ),
+            },
             "seed": {
                 "type": "integer",
                 "description": "Set for reproducible results across calls.",
@@ -76,6 +85,7 @@ class PhotorealisticImageGeneratorTool(Tool):
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return ToolResult(ok=False, data={}, error="prompt is required")
+        prompt = append_quality_guard_to_prompt(prompt, args.get("negative_prompt"))
 
         refs = args.get("reference_storage_refs") or []
         if not isinstance(refs, list):

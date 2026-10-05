@@ -50,6 +50,7 @@ class DiscountClaimsCalculatorTool(Tool):
 
         real_price = product.attributes.get("price")
         real_discount = product.attributes.get("discount_percent")
+        real_currency = product.attributes.get("currency") or ""
         claimed_price = args.get("claimed_price")
         claimed_discount = args.get("claimed_discount_percent")
 
@@ -65,15 +66,19 @@ class DiscountClaimsCalculatorTool(Tool):
                 "real_discount_percent": real_discount,
                 "price_accurate": price_accurate,
                 "discount_accurate": discount_accurate,
-                "overlay_text_should_use": _format_overlay_text(real_price, real_discount),
+                "overlay_text_should_use": _format_overlay_text(real_price, real_discount, real_currency),
             },
         )
 
 
-def _format_overlay_text(price: float | None, discount: float | None) -> str:
+def _format_overlay_text(price: float | None, discount: float | None, currency: str = "") -> str:
+    # Real, live-found bug (2026-10-05): this used to hardcode "$" regardless of the product's
+    # real currency — a real scraped Indian product's overlay text would show "$164900" even
+    # though the product is genuinely ₹-denominated. Uses the product's real stored `currency`
+    # now; no symbol at all when the source never actually stated one, rather than guessing.
     parts = []
     if price is not None:
-        parts.append(f"${price:g}")
+        parts.append(f"{currency}{price:g}")
     if discount:
         parts.append(f"{discount:g}% off")
     return " — ".join(parts)

@@ -147,7 +147,12 @@ class BrandDnaService:
         already enforces)."""
         emit("crawler_started", session_id=session.id, url=url, url_type="brand")
         try:
+            # Real per-stage progress (2026-10-05, explicit user ask: "show what's being
+            # extracted so the user doesn't feel left out") — `crawler_step` used to only ever
+            # fire on failure; these are the real stages this function actually goes through.
+            emit("crawler_step", session_id=session.id, url=url, url_type="brand", status="scraping_page")
             page = await _scrape_with_fallback(url)
+            emit("crawler_step", session_id=session.id, url=url, url_type="brand", status="extracting_facts")
             facts = await _extract_brand_facts(page)
             name = str(facts.get("name") or "Unnamed brand").strip()[:255] or "Unnamed brand"
             raw_facts = {
@@ -166,6 +171,7 @@ class BrandDnaService:
             # populated `logo_storage_ref` (the same field the manual "Brand Logo (PNG)" upload
             # sets). Best-effort: a missing/unreachable logo never fails the whole crawl.
             if page.logo_url:
+                emit("crawler_step", session_id=session.id, url=url, url_type="brand", status="downloading_logo")
                 try:
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
                         resp = await client.get(page.logo_url)
@@ -187,6 +193,7 @@ class BrandDnaService:
             # never populated. `page.fonts` is real @font-face rules the site itself declares, not
             # a guess — cap at 2 so one page with a huge type system doesn't bloat storage.
             if page.fonts:
+                emit("crawler_step", session_id=session.id, url=url, url_type="brand", status="downloading_fonts")
                 font_refs = dict(brand.font_storage_refs or {})
                 for family, font_url in page.fonts[:2]:
                     try:
@@ -211,7 +218,7 @@ class BrandDnaService:
             emit("crawler_completed", session_id=session.id, url=url, url_type="brand", brand_profile_id=brand.id)
             return brand
         except Exception as exc:
-            emit("crawler_step", session_id=session.id, url=url, status="failed", error=str(exc))
+            emit("crawler_step", session_id=session.id, url=url, url_type="brand", status="failed", error=str(exc))
             raise
 
     async def get_brand(self, brand_id: str, *, user_id: str) -> BrandProfileModel:

@@ -124,9 +124,22 @@ export default function HomePage() {
       const created = await createSession(newApprovalMode, newTitle.trim() || undefined);
       // Fire-and-forget — the crawl runs as the session's own background task (same
       // POST /{id}/crawl route ChatPanel's "🔗 Add Link" popover uses); never blocks navigation.
-      if (newCompanyUrl.trim()) crawlUrl(created.id, newCompanyUrl.trim()).catch(() => {});
-      if (newProductUrl.trim()) crawlUrl(created.id, newProductUrl.trim()).catch(() => {});
-      router.push(`/studio/${created.id}`);
+      const crawlingKinds: string[] = [];
+      if (newCompanyUrl.trim()) {
+        crawlUrl(created.id, newCompanyUrl.trim(), "brand").catch(() => {});
+        crawlingKinds.push("brand");
+      }
+      if (newProductUrl.trim()) {
+        crawlUrl(created.id, newProductUrl.trim(), "product").catch(() => {});
+        crawlingKinds.push("product");
+      }
+      // Real, live-found gap (2026-10-05, explicit user report: "it was showing empty not even
+      // 'scraping etc', which will confuse user") — the studio page had NOTHING indicating a
+      // crawl kicked off at creation time, since the DNA modal (the only place crawl status ever
+      // showed) isn't open yet. A `?crawling=brand,product` query param tells the studio page to
+      // show a real status banner for these specific kinds right from its first render.
+      const crawlingParam = crawlingKinds.length ? `?crawling=${crawlingKinds.join(",")}` : "";
+      router.push(`/studio/${created.id}${crawlingParam}`);
     } catch (err) {
       setWorkflowsError(err instanceof ApiError ? err.message : "Could not create a new workflow.");
       setCreating(false);

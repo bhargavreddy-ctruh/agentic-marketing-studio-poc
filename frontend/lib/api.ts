@@ -202,9 +202,24 @@ export interface ChatTurn {
 
 /** Real, persisted chat history — the actual fix for a page refresh losing the conversation
  * (2026-09-22). Every prior turn, oldest first, each with its real user message, the real
- * "thinking" streamed live during it, and the real final response. */
-export async function listTurns(sessionId: string): Promise<ChatTurn[]> {
-  const turns = await request<ChatTurn[]>(`/api/v1/sessions/${sessionId}/turns`);
+ * "thinking" streamed live during it, and the real final response.
+ *
+ * `opts` (2026-10-05, chat lazy-load) — omit entirely for the full history (unchanged default,
+ * still used wherever the whole session's turns are genuinely needed). Pass `limit` alone for
+ * just the most recent N turns (the chat panel's fast initial load); add `beforeId` (an
+ * already-loaded turn's id) to page further back from there — see the backend route's own
+ * docstring for the exact pagination shape. */
+export async function listTurns(
+  sessionId: string,
+  opts?: { limit?: number; beforeId?: string },
+): Promise<ChatTurn[]> {
+  const params = new URLSearchParams();
+  if (opts?.limit != null) params.set("limit", String(opts.limit));
+  if (opts?.beforeId) params.set("before_id", opts.beforeId);
+  const qs = params.toString();
+  const turns = await request<ChatTurn[]>(
+    `/api/v1/sessions/${sessionId}/turns${qs ? `?${qs}` : ""}`,
+  );
   for (const t of turns) {
     if (t.referenced_elements) {
       for (const el of t.referenced_elements) {
@@ -226,10 +241,30 @@ export async function cancelTurn(sessionId: string): Promise<{ cancelled: boolea
 /** Product/Brand crawler (2026-09-28) — background-dispatched on the backend, returns
  * immediately; progress/results surface purely via the SSE `crawler_*` events already streamed
  * through the same event-stream helper turn narration uses. */
-export async function crawlUrl(sessionId: string, url: string): Promise<{ status: string; url: string }> {
+/** `urlType` — explicit "brand"/"product", when the caller actually knows (which DNA tab, or
+ * which of the two workflow-creation URL fields) — always wins server-side over the backend's own
+ * URL-shape heuristic. A real, live-found bug this fixes (fidelity audit 2026-10-05): a product
+ * URL submitted from the Product DNA tab used to be silently classified and saved as a BRAND
+ * crawl, because the backend had no idea which tab the user meant and guessed from the URL alone.
+ * Omit `urlType` only for a caller with no real tab/field context (e.g. the chat "Add a link"
+ * popover), which keeps today's heuristic fallback. */
+/** Switches a session to one of the user's own already-scraped/saved brands, no re-crawl needed
+ * (new 2026-10-05, the Brand DNA tab's brand-picker dropdown). Ownership of `brandId` is verified
+ * server-side before this applies — strictly per-user, never a cross-user reference. */
+export async function selectSessionBrand(sessionId: string, brandId: string): Promise<SessionResponse> {
+  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/brand`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brand_id: brandId }),
+  });
+}
+
+export async function crawlUrl(
+  sessionId: string, url: string, urlType?: "brand" | "product",
+): Promise<{ status: string; url: string }> {
   return request<{ status: string; url: string }>(`/api/v1/sessions/${sessionId}/crawl`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(urlType ? { url, url_type: urlType } : { url }),
   });
 }

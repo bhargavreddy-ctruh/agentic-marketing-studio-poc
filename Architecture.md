@@ -123,6 +123,20 @@ conversational flow, not a separate upload form.
   versioning can be fully detached via a config flag (every edit becomes its own element instead of
   a version of an existing one); real LLM provider retries/fallbacks are now visible live in chat
   and Node Mode, not just server-logged.
+- **Brand/Product DNA scraping made genuinely real-time, concurrent, and per-user selectable**
+  (2026-10-05) — brand and product can now scrape simultaneously with independent live progress
+  bars (a missing `set_current_session()` call had silently dropped every crawl SSE event before
+  this); a per-session lock fixes a real lost-update race between concurrent crawls; a Brand DNA
+  dropdown lets a user pick from their own previously-scraped brands (strictly per-user). See
+  Memory.md's "Brand/Product DNA Scraping" entry for the full root-cause list.
+- **Canvas list responses and specialist prompts are now both bounded, not bloated** (2026-10-05)
+  — canvas element descriptions are capped in the list response (the full vision-model text is
+  still used for real grounding server-side); every specialist now gets a short, curated "what's
+  available this turn" summary instead of the session's entire raw `brief` dict; `product_lookup`
+  is now a MANDATORY call (not advisory wording) for every product-facing specialist, not just
+  illustrator/overlay_artist. Chat history also now lazy-loads (most recent turns first, older ones
+  paged in on scroll) instead of fetching a session's entire turn history up front. See Memory.md's
+  "Canvas/Assets Load Performance" and "Chat History Lazy-Load" entries for full detail.
 
 ## 2. Folder and file structure
 

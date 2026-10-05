@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ...core.exceptions import ProviderUnavailable
+from ...core.image_quality import append_quality_guard_to_prompt
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.nano_banana_2_provider import get_nano_banana_2_provider
 from .base import Tool, ToolResult
@@ -48,8 +49,11 @@ class HighResolutionImageGeneratorTool(Tool):
             "resolution": {
                 "type": "string",
                 "enum": ["512px", "1K", "2K", "4K"],
-                "default": "2K",
-                "description": "Output resolution — set to match what the user explicitly asked for (e.g. '4K' if they said 4K).",
+                "description": (
+                    "Output resolution — REQUIRED, no default: decide this explicitly every call "
+                    "(e.g. '4K' if the user said 4K, '2K' for a general high-fidelity marketing ask) "
+                    "rather than relying on a silently-substituted value."
+                ),
             },
             "aspect_ratio": {
                 "type": "string",
@@ -61,6 +65,14 @@ class HighResolutionImageGeneratorTool(Tool):
                 "type": "string",
                 "enum": ["jpg", "png"],
                 "default": "jpg",
+            },
+            "negative_prompt": {
+                "type": "string",
+                "description": (
+                    "Elements to avoid (this model has no native negative-prompt field — folded "
+                    "into the prompt text as an explicit exclusion clause). A quality-baseline "
+                    "exclusion is applied automatically; use this for request-specific additions."
+                ),
             },
             "seed": {
                 "type": "integer",
@@ -77,13 +89,20 @@ class HighResolutionImageGeneratorTool(Tool):
                 "description": "Ground generation using real web images (via Google Image Search) as visual context — also auto-enables web search. Only set true when the request genuinely needs to be grounded in what something real currently/actually looks like.",
             },
         },
-        "required": ["prompt"],
+        "required": ["prompt", "resolution"],
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         prompt = str(args.get("prompt") or "").strip()
         if not prompt:
             return ToolResult(ok=False, data={}, error="prompt is required")
+        resolution = str(args.get("resolution") or "").strip()
+        if resolution not in {"512px", "1K", "2K", "4K"}:
+            return ToolResult(
+                ok=False, data={},
+                error="resolution is required — explicitly decide 512px/1K/2K/4K, no silent default",
+            )
+        prompt = append_quality_guard_to_prompt(prompt, args.get("negative_prompt"))
 
         refs = args.get("reference_storage_refs") or []
         if not isinstance(refs, list):
@@ -107,7 +126,7 @@ class HighResolutionImageGeneratorTool(Tool):
                 prompt=prompt,
                 reference_images=reference_images or None,
                 aspect_ratio=str(args["aspect_ratio"]).strip() if args.get("aspect_ratio") else None,
-                resolution=str(args.get("resolution") or "2K"),
+                resolution=resolution,
                 output_format=str(args.get("output_format") or "jpg"),
                 seed=int(args["seed"]) if args.get("seed") is not None else None,
                 google_search=bool(args.get("google_search", False)),

@@ -1,14 +1,16 @@
 """
-Visual Design Lead — Architecture.md section 1a: Reference Curator -> Palette Strategist ->
-Illustrator -> Composition Artist, in that order (each depends on the previous one's output, so
-this sequence is genuinely serial, not an arbitrary choice).
+Visual Design Lead — Illustrator -> (conditional) Composition Artist.
 
-The fixed part of this file is WHICH SPECIALISTS RUN IN WHAT ORDER — the Lead's own definition,
-per the reference architecture. WHICH TOOLS EACH SPECIALIST CALLS IS NOT FIXED (Memory.md, Phase 2
-— the move to real agentic tool-calling): each specialist genuinely decides for itself whether and
-which of its allowed_tools to invoke, verified live. This file no longer pre-fetches
-brand_kit_lookup before Palette Strategist runs, and no longer parses an "image_prompt" field to
-call base_image_generator itself — Palette Strategist and Illustrator make those calls themselves.
+Collapsed 2026-10-05 (fidelity audit): used to run Reference Curator -> Palette Strategist ->
+Illustrator -> Composition Artist as 4 mandatory LLM hops for every still image. Reference
+Curator/Palette Strategist each added a real hop that produced a free-text paraphrase the
+illustrator then had to re-synthesize alongside the user's own words — a real, confirmed cause of
+"more agents, worse output" (prompt-by-committee dilution: each paraphrasing hop pushed the final
+prompt toward vaguer/more generic language than the user's own focused request). Illustrator now
+looks up references/palette itself, only when genuinely useful (`illustrator.md` rule 1b), and
+reports its own `aesthetic_direction`/`palette_direction` — the two specialists stay registered
+(harmless) but are no longer called from here. Composition Artist remains gated (section below):
+only invoked when the request actually implies an edit, not unconditionally after every generation.
 
 Deliberately does NOT touch the database — this function's job is generation only. The calling
 SessionService persists the resulting CanvasElement, keeping "only repositories touch the
@@ -16,7 +18,7 @@ database" intact even though this file lives in services/ (Rules.md section 1).
 """
 from __future__ import annotations
 
-import json
+import re
 
 from ...core.exceptions import SpecialistFailed
 from ...core.middleware.logging import get_logger
@@ -26,23 +28,40 @@ from ..specialists.runner import (
     run_specialist_agentic,
     run_specialist_with_review,
 )
+from ..tools.registry import get_tool
 from .base import (
     LeadResult,
     LeadSpec,
+    available_context_block,
     referenced_element_block,
     stale_campaign_context_block,
 )
 
 log = get_logger(__name__)
 
+# Fidelity audit (Memory.md, 2026-10-05): composition_artist used to run unconditionally after
+# EVERY fresh illustrator generation, via image_editor, with no art-direction instructions of its
+# own and no real signal that an edit was actually requested — a blind second model pass that could
+# only no-op or make things worse, plus a wasted LLM hop. Its own prompt file (composition_artist.md
+# rule 2) already says to only call image_editor "if the user asks to modify, fix, or edit" — this
+# gate enforces that at the call site instead of leaving it to chance.
+_COMPOSITION_EDIT_TRIGGER_RE = re.compile(
+    r"\b(discount|% ?off|strike ?through|strike-through|price|logo fix|creative brief|"
+    r"edit|fix|change|adjust|modify|update)\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_composition_pass(user_message: str) -> bool:
+    """Deterministic, cheap: does this request actually imply the kind of targeted edit
+    composition_artist exists for (price/discount/strike-through, a logo correction, an explicit
+    creative-brief ask) — not just "is there a fresh image," which is true on every call."""
+    return bool(_COMPOSITION_EDIT_TRIGGER_RE.search(user_message or ""))
+
+
 VISUAL_DESIGN_LEAD = LeadSpec(
     name="visual_design_lead",
-    specialist_sequence=(
-        "reference_curator",
-        "palette_strategist",
-        "illustrator",
-        "composition_artist",
-    ),
+    specialist_sequence=("illustrator", "composition_artist"),
     full_job_trigger="New still image from scratch",
 )
 
@@ -70,35 +89,16 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
         idea = brief.get("idea") or brief.get("initial_message") or ""
 
     # `referenced_element_block` explicitly called out here (2026-09-22), not just left buried in
-    # the raw `json.dumps(brief)` dump below — see that helper's own docstring for the real,
-    # live-found reason (base.py). The full brief dump stays too, for every OTHER scratch field
-    # Reference Curator might genuinely need.
-    reference = await run_specialist_agentic(
-        "reference_curator",
-        context=f"Campaign idea:\n{idea}{referenced_element_block(brief)}\n\nBrief so far:\n{json.dumps(brief)}",
-        brief=brief,
-    )
-    aesthetic_direction = reference.get("aesthetic_direction", "")
-
-    # `referenced_element_block` here too (2026-09-25) — Palette Strategist previously had no
-    # storage_ref anywhere in its context, so it could never actually analyze the real referenced
-    # image (`runner.py`'s reference_storage_ref auto-injection into tool context also only
-    # activates `if brief:`, so `brief=brief` below is a real prerequisite, not just for chat
-    # history). See visual_palette_analyzer.py for what it can now do with that storage_ref.
-    palette = await run_specialist_agentic(
-        "palette_strategist",
-        context=(
-            f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}"
-            f"{referenced_element_block(brief)}"
-        ),
-        brief=brief,
-    )
-
+    # a raw brief dump — see that helper's own docstring for the real, live-found reason (base.py).
+    # `available_context_block` (2026-10-05, fidelity audit) replaces what used to be a full
+    # `json.dumps(brief)` tail — a short, structured "what's available" summary instead of dumping
+    # 20+ raw keys (including internal scratch flags) and hoping illustrator finds what it needs.
+    # No reference_curator/palette_strategist pre-pass any more (see module docstring) —
+    # illustrator looks these up itself when useful.
     illustrator_context = (
-        f"Campaign idea:\n{idea}\n\nAesthetic direction:\n{aesthetic_direction}\n\n"
-        f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
-        f"Brief so far:\n{json.dumps(brief)}"
+        f"Campaign idea:\n{idea}"
         f"{referenced_element_block(brief)}"
+        f"{available_context_block(brief)}"
         f"{deliverable_hint_block(brief)}"
     )
     # One-pass product compositing: if a product photo exists, tell the illustrator to pass it as
@@ -181,6 +181,8 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     primary_call = all_image_calls[-1]
     storage_ref = primary_call.data["storage_ref"]
     image_prompt = illustration.get("image_prompt", "")
+    aesthetic_direction = illustration.get("aesthetic_direction", "")
+    palette_direction = illustration.get("palette_direction", "")
     
     # Add older generated options (if any) to extra elements so the user sees everything produced
     extra_images = []
@@ -210,30 +212,61 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
     # generation. Same real degrade `motion_lead.py` already uses when `video_editor_cutter` fails
     # after Camera Director's real paid render succeeds: a real, unrefined result beats a discarded
     # one every time.
-    try:
-        composition = await run_specialist_agentic(
-            "composition_artist",
-            context=(
-                f"The generated image's storage_ref is: {storage_ref}\nIts prompt was:\n{image_prompt}\n\n"
-                f"Aesthetic direction:\n{aesthetic_direction}\n\n"
-                f"Palette direction:\n{palette.get('palette_direction', '')}"
-            ),
-        )
-    except SpecialistFailed as exc:
-        log.warning(
-            "visual_design_lead_composition_failed_keeping_illustration",
-            extra={"_extra_error": exc.message, "_extra_storage_ref": storage_ref},
-        )
+    if _needs_composition_pass(user_message or idea):
+        try:
+            composition = await run_specialist_agentic(
+                "composition_artist",
+                context=(
+                    f"The user's actual request (what to do, if anything, to the generated image):\n"
+                    f"{user_message or idea}\n\n"
+                    f"The generated image's storage_ref is: {storage_ref}\nIts prompt was:\n{image_prompt}\n\n"
+                    f"Aesthetic direction:\n{aesthetic_direction}\n\n"
+                    f"Palette direction:\n{palette_direction}"
+                ),
+            )
+        except SpecialistFailed as exc:
+            log.warning(
+                "visual_design_lead_composition_failed_keeping_illustration",
+                extra={"_extra_error": exc.message, "_extra_storage_ref": storage_ref},
+            )
+            composition = AgenticStepResult(specialist_name="composition_artist", model="", data={}, tool_calls=[])
+    else:
+        # No edit/price/discount/creative-brief signal in the actual request — skip the pass
+        # entirely rather than running a blind second model call with nothing to do (Part 2,
+        # section N). The creative-brief card still gets built below, from illustrator's own output.
         composition = AgenticStepResult(specialist_name="composition_artist", model="", data={}, tool_calls=[])
     edit_result = composition.latest_result("image_editor")
     if edit_result and edit_result.get("storage_ref"):
         storage_ref = edit_result["storage_ref"]
 
+    # Exact sizing (Part 1, fidelity audit 2026-10-05): a known deliverable (e.g. a YouTube
+    # thumbnail) specifies real pixel dimensions, not just an aspect ratio — "approximately 16:9"
+    # from the generation model isn't the same as exactly 1280x720. Deterministic, not another LLM
+    # call: run the real `image_crop_resize` tool directly on the final image whenever the brief
+    # has resolved dimensions.
+    deliverable_key = brief.get("deliverable")
+    if deliverable_key:
+        from ...core.deliverables import get_deliverable
+        spec = get_deliverable(deliverable_key)
+        if spec and spec.width and spec.height:
+            resize_result = await get_tool("image_crop_resize").run({
+                "storage_ref": storage_ref,
+                "target_width": spec.width,
+                "target_height": spec.height,
+            })
+            if resize_result.ok and resize_result.data.get("storage_ref"):
+                storage_ref = resize_result.data["storage_ref"]
+            else:
+                log.warning(
+                    "visual_design_lead_exact_sizing_failed",
+                    extra={"_extra_error": resize_result.error, "_extra_storage_ref": storage_ref},
+                )
+
     # Product subject fidelity is now handled in one pass by the illustrator above (passing
     # reference_storage_ref to base_image_generator when a product photo exists). Qwen generates
     # the scene with the product already composited — no separate PIL overlay step needed.
 
-    all_steps = (reference, palette, illustration, composition)
+    all_steps = (illustration, composition)
     # A real, visible "creative brief" text card (2026-09-22) — the reference product this POC is
     # modeled on shows exactly this kind of card on its own canvas. Written by Composition Artist
     # itself via a genuine `text_card_writer` tool call (a real, modular tool, per an explicit user
@@ -257,7 +290,7 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
                 "label": "creative_brief",
                 "text": (
                     f"Aesthetic direction:\n{aesthetic_direction}\n\n"
-                    f"Palette direction:\n{palette.get('palette_direction', '')}\n\n"
+                    f"Palette direction:\n{palette_direction}\n\n"
                     f"Image prompt used:\n{image_prompt}"
                 ),
             },
@@ -269,7 +302,7 @@ async def run_visual_design_lead(*, brief: dict, user_message: str = "") -> Lead
         extra_elements=[creative_brief_extra] + extra_images,
         metadata={
             "aesthetic_direction": aesthetic_direction,
-            "palette_direction": palette.get("palette_direction", ""),
+            "palette_direction": palette_direction,
             "image_prompt": image_prompt,
             "aspect_ratio": aspect_ratio,
             "composition_edit_applied": bool(edit_result),

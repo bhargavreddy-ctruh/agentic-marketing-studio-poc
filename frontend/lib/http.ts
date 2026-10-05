@@ -78,3 +78,17 @@ export async function requestNoContent(path: string, init?: RequestInit): Promis
 export function assetUrl(storageRef: string, directUrl?: string | null): string {
   return directUrl || `${API_BASE_URL}/api/v1/canvas/assets/${storageRef}`;
 }
+
+/** Real, live-found performance bug (2026-10-05, fidelity audit): every canvas tile loaded its
+ * full original-resolution Cloudinary image, eagerly, regardless of the tile's actual on-screen
+ * size. Reuses the exact same on-the-fly Cloudinary transform suffix
+ * `backend/src/providers/llm/vision.py` already proves out for its own "cap payload size" need —
+ * a canvas tile doesn't need original pixels any more than a vision-model call does. Falls back to
+ * the untransformed url unchanged when it isn't a real Cloudinary url (local-disk dev mode, or any
+ * other asset host) — never breaks the image, just skips the optimization. */
+export function canvasTileImageUrl(url: string): string {
+  const marker = "/image/upload/";
+  const i = url.indexOf(marker);
+  if (i === -1) return url;
+  return `${url.slice(0, i)}${marker}w_1280,q_80,f_auto/${url.slice(i + marker.length)}`;
+}

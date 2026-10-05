@@ -45,6 +45,7 @@ from ..leads.base import (
     LeadResult,
     NarrativePlan,
     ScenePlan,
+    available_context_block,
     referenced_element_block,
     stale_campaign_context_block,
 )
@@ -56,6 +57,18 @@ from ..specialists.registry import SPECIALIST_REGISTRY, get_specialist
 from ..specialists.runner import run_concurrent_specialists, run_specialist_with_review
 from .orchestrator import route, route_condition
 from .state import GraphState
+
+
+def _user_safe_failure_message() -> str:
+    """Chat-facing failure text (Part 7, fidelity audit 2026-10-05): the raw `exc.message` (and the
+    internal lead/specialist name) used to be interpolated straight into the chat bubble — a real,
+    live-found example leaked a provider name and an environment-variable name verbatim ("Provider
+    'replicate_llm' is unavailable: REPLICATE_API_TOKEN is not set"), and even the non-leaky cases
+    named internal plumbing ("Ran into an issue with visual_design_lead") a non-technical user has
+    no reason to see. The real detail is already logged server-side at every call site
+    (`log.error(..., extra={"_extra_error": exc.message})`) right before this is built."""
+    return "Ran into an issue generating that — want to try again?"
+
 
 async def _emit_intermediate_element(
     session_id: str,
@@ -409,7 +422,7 @@ async def _visual_design_lead_node(state: GraphState) -> GraphState:
         storage_ref = getattr(exc, "partial_storage_ref", None)
         log.error("visual_design_lead_failed", extra={"_extra_error": exc.message, "_extra_storage_ref": storage_ref})
         state["result"] = {
-            "message": f"Ran into an issue with visual_design_lead: {exc.message}. How should we proceed?",
+            "message": _user_safe_failure_message(),
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
                 {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
@@ -490,7 +503,7 @@ async def _full_audio_node(state: GraphState) -> GraphState:
     except SpecialistFailed as exc:
         log.error("full_audio_failed", extra={"_extra_error": exc.message})
         state["result"] = {
-            "message": f"Ran into an issue with full_audio: {exc.message}. How should we proceed?",
+            "message": _user_safe_failure_message(),
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
                 {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
@@ -836,7 +849,7 @@ async def _run_multi_video_node(
         log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
         state["paused_plan"] = {"route": "full_video", "original_message": user_message}
         state["result"] = {
-            "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
+            "message": _user_safe_failure_message(),
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
                 {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
@@ -1105,7 +1118,7 @@ async def _run_single_video_node(
         log.error("full_video_pipeline_failed", extra={"_extra_error": exc.message})
         state["paused_plan"] = {"route": "full_video", "original_message": user_message}
         state["result"] = {
-            "message": f"Ran into an issue with full_video_pipeline: {exc.message}. How should we proceed?",
+            "message": _user_safe_failure_message(),
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
                 {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
@@ -1159,8 +1172,6 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
     # `complete_with_vision` (or confirming these tiers actually support it), a separate,
     # deliberate integration decision, not something to attach speculatively. Left as the
     # pre-existing plain-text context for now.
-    import json
-
     context_parts = [f"User request:\n{state.get('user_message', '')}"]
     if brief.get("idea"):
         context_parts.append(f"Campaign idea so far:\n{brief['idea']}")
@@ -1186,7 +1197,7 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
         )
 
     direct_fix_context = "\n\n".join(context_parts)
-    direct_fix_context += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+    direct_fix_context += available_context_block(brief)
     from ..specialists.runner import deliverable_hint_block
     hint = deliverable_hint_block(brief)
     if hint:
@@ -1226,7 +1237,7 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
     except SpecialistFailed as exc:
         log.error("direct_fix_failed", extra={"_extra_specialist": target, "_extra_error": exc.message})
         state["result"] = {
-            "message": f"Ran into an issue with {target}: {exc.message}. How should we proceed?",
+            "message": _user_safe_failure_message(),
             "options": [
                 {"id": "retry", "label": "Try again", "description": "Have the agent take another pass at it"},
                 {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"}
@@ -1346,6 +1357,24 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
     }
     if brief.get("latest_element_id") and produced_tool not in _ANNOTATION_ONLY_TOOLS:
         result["update_existing_element_id"] = brief["latest_element_id"]
+
+    # Real, live-found gap (2026-10-05 fidelity audit): a script_writer result used to land as a
+    # raw field dump with no canvas card and no way forward but "Try again/Cancel" — now that it
+    # writes a real text_card_storage_ref (above), it reaches this success path like any other
+    # asset, but still needs its own next-step options (a lookup/text-only result has nothing else
+    # to react to) and to persist the approved script so `narrative_lead` can reuse it instead of
+    # regenerating when the user picks "Turn this into a video".
+    if target == "script_writer" and step.data.get("script_line"):
+        brief["approved_script"] = step.data["script_line"]
+        state["brief"] = brief
+        result["message"] = "Here's the script — want to turn it into a video, revise it, or is this good as-is?"
+        result["options"] = [
+            {"id": "turn_into_video", "label": "Turn this into a video", "description": "Use this script as the voiceover for a full video generation"},
+            {"id": "revise_script", "label": "Revise the script", "description": "Say what to change and I'll rewrite it"},
+            {"id": "looks_good", "label": "Looks good", "description": "Keep it as-is for now"},
+        ]
+        result["allow_free_text"] = True
+
     state["result"] = result
     emit("lead_completed", lead="direct_fix")
     return state
@@ -1362,18 +1391,16 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
     brief = state.get("brief") or {}
     user_message = state.get("user_message") or ""
-    import json
-    
+
     current_context = [{"type": "text", "text": f"Campaign idea so far:\n{brief.get('idea') or user_message}"}]
 
     # Real, live-found ordering fix (2026-09-26, decomposition-quality investigation): the full
-    # brief JSON dump used to come AFTER the referenced-element context and BEFORE the
+    # A raw brief JSON dump used to go here, AFTER the referenced-element context and BEFORE the
     # aspect-ratio hint — burying the actual actionable instructions behind the biggest, noisiest
-    # block right before the model has to act. Moved here instead, right after the campaign idea
-    # and well before anything that needs to stay salient — the referenced-element context and the
-    # aspect-ratio hint below are now the LAST things the model reads, not buried before a JSON
-    # wall.
-    current_context[0]["text"] += f"\n\nFull session brief context:\n{json.dumps(brief)}"
+    # block right before the model has to act. `available_context_block` (2026-10-05, fidelity
+    # audit) replaces it with a short, structured summary instead — concise regardless of position,
+    # so where it sits in the message matters far less than when this was a full JSON wall.
+    current_context[0]["text"] += available_context_block(brief)
 
     referenced_elements = brief.get("referenced_elements_context", [])
     if referenced_elements:
@@ -1437,9 +1464,24 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             ),
         })
 
-    # Only enforce asset generation for specialists that actually produce assets,
-    # not for planning/strategy specialists (like reference_curator or palette_strategist)
-    generating_specialists = {"base_image_generator", "overlay_artist", "image_animator", "sound_designer", "upscaler", "outpainter"}
+    # Only enforce asset generation for specialists that actually produce assets, not for
+    # planning/strategy specialists (like reference_curator or palette_strategist). Real, live-
+    # found bug (2026-10-05, found while verifying camera_director's reliability as a standalone
+    # 'dynamic' step for the video-thumbnail-equivalent fix): this set previously contained TOOL
+    # names and invented names that are never real specialists at all (`base_image_generator`,
+    # `image_animator`, `upscaler`, `outpainter` — none of these match `SPECIALIST_REGISTRY`), so
+    # `specialist in generating_specialists` below could never match the two specialists it most
+    # needed to (`illustrator`, `camera_director`) — a real image/video generation that silently
+    # produced no asset never triggered the self-correction retry this check exists for. Fixed to
+    # the real, registered specialist names that call an asset-producing tool.
+    # `environment_designer`/`prop_stylist`/`lighting_designer` added on cross-check (same day):
+    # all three call `image_editor`/`base_image_generator` same as `composition_artist`/
+    # `scene_builder` (already in this set) and were missed in the first pass.
+    generating_specialists = {
+        "illustrator", "composition_artist", "camera_director", "video_editor_cutter",
+        "sound_designer", "overlay_artist", "scene_builder", "brand_asset_applier",
+        "environment_designer", "prop_stylist", "lighting_designer",
+    }
 
     async def _run_one_step(i: int, step_info: dict, latest_ref_snapshot: str | None):
         """Builds one step's context and runs it — a pure function of the plan/brief/context plus
@@ -1751,7 +1793,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     }
     
     # If this was an edit plan on an existing element, update it. If it generated something new, don't.
-    has_generator = any(s.get("specialist") in ("illustrator", "camera_director", "environment_designer") for s in plan)
+    has_generator = any(s.get("specialist") in ("illustrator", "camera_director", "environment_designer", "scene_builder") for s in plan)
     if brief.get("latest_element_id") and not has_generator and latest_tool not in _ANNOTATION_ONLY_TOOLS:
         result["update_existing_element_id"] = brief["latest_element_id"]
         

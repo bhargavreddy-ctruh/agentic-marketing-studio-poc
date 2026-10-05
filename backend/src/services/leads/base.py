@@ -127,6 +127,83 @@ class ScenePlan:
         )
 
 
+# Real, live-found performance + precision bug (2026-10-05, fidelity audit): a canvas element's
+# `description` can be a multi-hundred-word vision-model essay (`session_service.py`'s
+# `_describe_uploaded_image`) — passed verbatim, uncapped, into every specialist's context. Reuses
+# the same bound `canvas_mapper.py`'s own list-response truncation already applies, so a long
+# description never dominates a specialist's limited context budget.
+_MAX_INTERPOLATED_DESCRIPTION_CHARS = 300
+
+
+def _truncate_description(text: str) -> str:
+    text = text.strip()
+    if len(text) <= _MAX_INTERPOLATED_DESCRIPTION_CHARS:
+        return text
+    return text[:_MAX_INTERPOLATED_DESCRIPTION_CHARS].rstrip() + "…"
+
+
+def available_context_block(brief: dict) -> str:
+    """A short, STRUCTURED "what's actually available this turn" summary — replaces the raw
+    `json.dumps(brief)` tail every Lead used to hand a specialist (`visual_design_lead.py`,
+    `narrative_lead.py`, `motion_lead.py`, `graph.py`'s direct_fix path). Real, live-found gap this
+    closes (2026-10-05, explicit user ask: "every llm should know what parameters/images/everything
+    they have... without filling useless/bloating the llm with unnecessary data"): `brief` typically
+    holds 20+ keys — campaign/product/brand detail blobs, narrative/scene plans, recent chat
+    history, internal scratch flags (`_error`, `_resume_*`, `_element_disambiguation_needed`) — none
+    of it curated for the receiving specialist. Dumping all of it doesn't make more real facts
+    available; it just buries the handful that actually matter under noise the model has to sift
+    through itself — the same "noise measurably biases the model" failure mode
+    `referenced_element_block`'s own docstring below already names, just not previously applied to
+    the brief as a whole. States plainly what's resolved and which tool reveals more — never the
+    raw values themselves — so this stays short regardless of how much is actually in the brief.
+    Deliberately excludes every internal/scratch key; a specialist never needs to know about
+    pause/resume bookkeeping or disambiguation flags to do its own job."""
+    lines = ["Available context for this request (use the named tool to see the real details):"]
+
+    product_id = brief.get("resolved_product_id")
+    if product_id:
+        lines.append(
+            f"- A product is linked (id: {product_id}) — call `product_lookup` for its real "
+            f"must_show/never_show/claims/price facts before using any of them."
+        )
+    else:
+        lines.append("- No specific product is resolved for this request.")
+
+    refs = brief.get("referenced_elements_context") or []
+    if refs:
+        for el in refs[:3]:  # a bounded preview, not every referenced element's full description
+            kind = el.get("element_type", "element")
+            desc = el.get("description")
+            desc_part = f" — {_truncate_description(desc)}" if isinstance(desc, str) and desc.strip() else ""
+            lines.append(f"- Referenced {kind} (storage_ref: {el.get('storage_ref')}){desc_part}")
+        if len(refs) > 3:
+            lines.append(f"- ...and {len(refs) - 3} more referenced element(s).")
+    else:
+        lines.append("- No elements are explicitly referenced this turn.")
+
+    deliverable = brief.get("deliverable")
+    if deliverable:
+        lines.append(f"- Target deliverable/format: {deliverable}.")
+
+    if brief.get("approved_script"):
+        lines.append("- A script was already approved earlier this session — reuse it, don't rewrite it.")
+
+    # Ledger + Digests (2026-10-05, tiered conversation memory) — local import to avoid a circular
+    # import (`conversation_memory.py` is a sibling module, not a dependency of this one at load
+    # time). Both render to "" when absent (a fresh session, or memory not yet computed for this
+    # turn), so this is a no-op addition for any brief that doesn't carry them.
+    from ..knowledge.conversation_memory import digests_block, ledger_block
+
+    ledger_text = ledger_block(brief.get("ledger"))
+    if ledger_text:
+        lines.append(ledger_text)
+    digests_text = digests_block(brief.get("memory_digests"))
+    if digests_text:
+        lines.append(digests_text)
+
+    return "\n\n" + "\n".join(lines)
+
+
 def referenced_element_block(brief: dict) -> str:
     """A real, explicit callout of whichever element the user actually referenced this turn
     (`session_service.py`'s `latest_element_*` scratch fields, resolved from a real
@@ -144,7 +221,8 @@ def referenced_element_block(brief: dict) -> str:
     if not ref:
         return ""
     kind = brief.get("latest_element_type", "element")
-    desc = brief.get("latest_element_description") or "(no description recorded for it)"
+    raw_desc = brief.get("latest_element_description")
+    desc = _truncate_description(raw_desc) if isinstance(raw_desc, str) and raw_desc.strip() else "(no description recorded for it)"
     return (
         f"\n\nThe user is referencing an EXISTING {kind} already on the canvas (storage_ref: {ref}) "
         f"— its real content: {desc}\nUse this as real, direct grounding for what's being asked, "

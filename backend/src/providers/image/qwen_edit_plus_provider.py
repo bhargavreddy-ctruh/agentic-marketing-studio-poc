@@ -46,6 +46,7 @@ class QwenEditPlusProvider:
         prompt: str,
         reference_images: list[tuple[bytes, str]],
         aspect_ratio: str | None = None,
+        negative_prompt: str | None = None,
         seed: int | None = None,
     ) -> ImageResult:
         """`reference_images`: 2+ real (bytes, mime_type) pairs — e.g. a brand/sponsor logo and
@@ -67,6 +68,8 @@ class QwenEditPlusProvider:
             }
             if aspect_ratio:
                 request_input["aspect_ratio"] = aspect_ratio
+            if negative_prompt:
+                request_input["negative_prompt"] = negative_prompt
             if seed is not None:
                 request_input["seed"] = seed
 

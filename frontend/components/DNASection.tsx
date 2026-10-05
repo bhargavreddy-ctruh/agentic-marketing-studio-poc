@@ -1,14 +1,33 @@
 import { useEffect, useState } from "react";
 import { assetUrl, request } from "@/lib/http";
-import { crawlUrl } from "@/lib/api";
+import { crawlUrl, selectSessionBrand } from "@/lib/api";
+import { openEventStream } from "@/lib/events";
 import { ProductProfile, deleteProduct, getProduct, updateProduct } from "@/lib/product";
 import { BrandProfile, listBrands, updateBrandFacts } from "@/lib/brand";
 
+// Real, live-found gap (2026-10-05, explicit user ask: "show whats being extracted so user
+// doesnt feel left out") — maps the real `crawler_step` stage names (`product_dna_service.py`/
+// `brand_dna_service.py`'s own `emit()` calls) to human-readable text.
+const CRAWL_STAGE_TEXT: Record<string, string> = {
+  scraping_page: "Fetching the page…",
+  extracting_facts: "Extracting DNA from the page…",
+  downloading_images: "Downloading product images…",
+  downloading_logo: "Downloading the brand logo…",
+  downloading_fonts: "Downloading brand fonts…",
+};
+
 interface DNASectionProps {
   sessionId: string;
+  /** Real, live-found gap (2026-10-05, explicit user report: "scraped images don't show up on
+   * canvas without a reload") — a product crawl creates real CanvasElementModel rows server-side,
+   * but nothing told the canvas to refetch. Called once a product crawl's own completion is
+   * detected (the same signal that already flips this tab's status to "DNA extracted!"), same
+   * shape as ChatPanel's `onGenerated` so the parent can reuse the exact same `refreshSignal` bump
+   * it already wires there — no new refresh mechanism, just a missing call site. */
+  onProductCrawled?: () => void;
 }
 
-export default function DNASection({ sessionId }: DNASectionProps) {
+export default function DNASection({ sessionId, onProductCrawled }: DNASectionProps) {
   const [activeTab, setActiveTab] = useState<"campaign" | "brand" | "product">("campaign");
 
   // Real, live-found gap (2026-09-25, explicit user report: this tab "is still empty") — this
@@ -24,6 +43,13 @@ export default function DNASection({ sessionId }: DNASectionProps) {
   const [detectedLoading, setDetectedLoading] = useState(false);
   const [detectedBrand, setDetectedBrand] = useState<BrandProfile | null>(null);
   const [detectedBrandLoading, setDetectedBrandLoading] = useState(false);
+  // New (2026-10-05, explicit user ask: "add a dropdown in brand dna so user can choose the brand
+  // he wants to work with from the scraped ones of the user, strictly per user isolation") —
+  // `listBrands()` is already a real, auth-scoped (`list_for_user`) endpoint — this is the SAME
+  // list `detectedBrand` above is resolved from, just kept around so the user can pick a different
+  // one of THEIR OWN brands without re-crawling. Never fetched from anywhere else.
+  const [allBrands, setAllBrands] = useState<BrandProfile[]>([]);
+  const [switchingBrand, setSwitchingBrand] = useState(false);
 
   // 2026-09-25, real requirement: "give the user option to edit" the brand facts shown above —
   // the card was read-only; this is a real add/edit/remove key-value editor over the brand's
@@ -57,32 +83,61 @@ export default function DNASection({ sessionId }: DNASectionProps) {
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Product/Brand crawler (2026-09-28) — one shared "paste a link, Auto-Extract DNA" bar, reused
-  // by both the Brand and Product tabs below. Refresh is a short poll rather than an SSE
-  // subscription (the crawl route is fire-and-forget on the backend) — simplest working option
-  // for this tab; ChatPanel.tsx's Add Link popover narrates live progress via the event stream.
-  const [crawlUrlInput, setCrawlUrlInput] = useState("");
-  const [crawling, setCrawling] = useState(false);
+  // Product/Brand crawler (2026-09-28, independent state per tab since 2026-10-05 fidelity audit).
+  // Real, live-found bugs this closes:
+  // 1. "Single bar" — this used to be ONE shared `crawlUrlInput`/`crawling` pair for BOTH tabs, so
+  //    starting a Brand crawl disabled the Product tab's button too (and vice versa), and the
+  //    pasted URL text was literally shared between tabs. Now keyed per `DnaKind` so both tabs
+  //    stay independently usable and can genuinely run at the same time.
+  // 2. Wrong-DNA-type crawl — the backend used to GUESS brand vs product purely from the URL's own
+  //    shape, defaulting to "brand" whenever nothing matched; a real product URL submitted from
+  //    THIS tab was silently saved as a brand crawl instead, leaving the Product tab looking like
+  //    nothing happened. `crawlUrl`'s new explicit `urlType` arg (passed as this tab's own `kind`)
+  //    always wins server-side now.
+  // 3. A failed/timed-out crawl used to leave a permanently stuck "Crawling…" message with no
+  //    error — `crawlStatus` below carries a real `isError` flag so a failure is visibly distinct.
+  // Refresh is still a short poll rather than an SSE subscription (simplest working option for
+  // this tab; ChatPanel.tsx's Add Link popover narrates live progress via the event stream).
+  type DnaKind = "brand" | "product";
+  const [crawlUrlInputs, setCrawlUrlInputs] = useState<Record<DnaKind, string>>({ brand: "", product: "" });
+  const [crawling, setCrawlingState] = useState<Record<DnaKind, boolean>>({ brand: false, product: false });
+  const [crawlStatus, setCrawlStatus] = useState<Record<DnaKind, { message: string; isError: boolean } | null>>({
+    brand: null, product: null,
+  });
 
-  async function handleTriggerCrawl() {
-    const url = crawlUrlInput.trim();
-    if (!url || crawling) return;
-    setCrawling(true);
-    setError(null);
+  async function handleTriggerCrawl(kind: DnaKind) {
+    const url = crawlUrlInputs[kind].trim();
+    if (!url || crawling[kind]) return;
+    setCrawlingState((prev) => ({ ...prev, [kind]: true }));
+    setCrawlStatus((prev) => ({ ...prev, [kind]: { message: "Crawling — extracting DNA…", isError: false } }));
+    // Real per-stage progress (2026-10-05, explicit user ask): scoped to THIS crawl's own
+    // lifetime, same pattern `ChatPanel.tsx`'s `withNarration`/`pollUntilResolved` already use for
+    // their own turn-scoped SSE subscriptions — opened right before the crawl starts, closed in
+    // `finally` below. Filtered to `event.url === url` so a concurrent brand+product crawl (now
+    // possible since both tabs have independent state) never cross-attributes the other's progress
+    // text. The existing poll loop below stays the authoritative completion/data signal; this only
+    // supplies nicer intermediate text while it waits.
+    const closeStream = openEventStream(sessionId, (event) => {
+      if (event.url !== url) return;
+      if (event.type === "crawler_step" && typeof event.status === "string" && event.status !== "failed") {
+        const text = CRAWL_STAGE_TEXT[event.status];
+        if (text) setCrawlStatus((prev) => ({ ...prev, [kind]: { message: text, isError: false } }));
+      }
+    });
     try {
       const crawledUrlCount = (await request<any>(`/api/v1/sessions/${sessionId}`).catch(() => null))?.brief
         ?.crawled_urls?.length ?? 0;
-      await crawlUrl(sessionId, url);
-      setSuccessMsg("Crawling — extracting DNA…");
-      setCrawlUrlInput("");
+      await crawlUrl(sessionId, url, kind);
+      setCrawlUrlInputs((prev) => ({ ...prev, [kind]: "" }));
       // Poll for up to ~30s — the backend crawl (page render + LLM extraction) usually finishes
-      // well within this window; a slow/failed crawl just leaves the tab showing what it had.
+      // well within this window.
       // Real, live-found bug (2026-09-28): this used to only update state when a brand/product id
       // CHANGED or the product list grew — but a brand is updated IN PLACE (same id, merged
       // facts/logo) and re-crawling a known product can enrich it without the list growing, so
       // those checks silently never fired for the most common case. Unconditionally refetch and
       // set state every tick instead; `crawled_urls` growing is this crawl's own real completion
       // signal, not a guess about which field changed.
+      let completed = false;
       for (let i = 0; i < 15; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const data = await request<any>(`/api/v1/sessions/${sessionId}`);
@@ -97,34 +152,56 @@ export default function DNASection({ sessionId }: DNASectionProps) {
           setDetectedProducts(results.filter((p): p is ProductProfile => p !== null));
         }
         if ((data.brief?.crawled_urls?.length ?? 0) > crawledUrlCount) {
-          setSuccessMsg("DNA extracted!");
+          setCrawlStatus((prev) => ({ ...prev, [kind]: { message: "DNA extracted!", isError: false } }));
+          completed = true;
+          if (kind === "product") onProductCrawled?.(); // tell the canvas to refetch — new images just landed
           break;
         }
       }
+      // Real, live-found gap (2026-10-05): a crawl that never grew `crawled_urls` within the poll
+      // window used to leave the stuck "Crawling…" message forever, with no way to tell a failure
+      // from "still thinking" — surfaced as a real, visible error with a retry affordance instead.
+      if (!completed) {
+        setCrawlStatus((prev) => ({
+          ...prev,
+          [kind]: { message: "Crawl timed out — the site may be slow or blocking scraping. Try again?", isError: true },
+        }));
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Crawl failed");
+      setCrawlStatus((prev) => ({
+        ...prev, [kind]: { message: e instanceof Error ? e.message : "Crawl failed", isError: true },
+      }));
     } finally {
-      setCrawling(false);
+      setCrawlingState((prev) => ({ ...prev, [kind]: false }));
+      closeStream();
     }
   }
 
-  function renderCrawlBar() {
+  function renderCrawlBar(kind: DnaKind) {
+    const status = crawlStatus[kind];
     return (
-      <div className="flex gap-2 rounded-xl border border-surface-700/60 bg-surface-900/60 p-2.5">
-        <input
-          className="flex-1 rounded-lg border border-surface-700 bg-surface-800 px-2.5 py-1.5 text-xs text-surface-50 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-          placeholder="Paste a website or product link (e.g. https://...)"
-          value={crawlUrlInput}
-          onChange={(e) => setCrawlUrlInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleTriggerCrawl()}
-        />
-        <button
-          onClick={handleTriggerCrawl}
-          disabled={crawling || !crawlUrlInput.trim()}
-          className="shrink-0 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:opacity-50"
-        >
-          {crawling ? "Extracting…" : "Auto-Extract DNA"}
-        </button>
+      <div className="flex flex-col gap-1.5">
+        <div className="flex gap-2 rounded-xl border border-surface-700/60 bg-surface-900/60 p-2.5">
+          <input
+            className="flex-1 rounded-lg border border-surface-700 bg-surface-800 px-2.5 py-1.5 text-xs text-surface-50 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+            placeholder="Paste a website or product link (e.g. https://...)"
+            value={crawlUrlInputs[kind]}
+            onChange={(e) => setCrawlUrlInputs((prev) => ({ ...prev, [kind]: e.target.value }))}
+            onKeyDown={(e) => e.key === "Enter" && handleTriggerCrawl(kind)}
+          />
+          <button
+            onClick={() => handleTriggerCrawl(kind)}
+            disabled={crawling[kind] || !crawlUrlInputs[kind].trim()}
+            className="shrink-0 rounded-lg bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-500 disabled:opacity-50"
+          >
+            {crawling[kind] ? "Extracting…" : "Auto-Extract DNA"}
+          </button>
+        </div>
+        {status && (
+          <div className={`px-1 text-xs ${status.isError ? "text-red-400" : "text-surface-400"}`}>
+            {status.message}
+          </div>
+        )}
       </div>
     );
   }
@@ -156,6 +233,7 @@ export default function DNASection({ sessionId }: DNASectionProps) {
         let brand: BrandProfile | null = null;
         try {
           const brands = await listBrands();
+          setAllBrands(brands);
           // Mirrors the backend's own resolution (`GuardrailService._load_brand_and_products_json`):
           // explicit `session.brand_profile_id` wins, else the user's first onboarded brand.
           brand = (data.brand_profile_id && brands.find((b) => b.id === data.brand_profile_id)) || brands[0] || null;
@@ -440,7 +518,39 @@ export default function DNASection({ sessionId }: DNASectionProps) {
 
         {activeTab === "brand" && (
           <div className="h-full flex flex-col space-y-4">
-            {renderCrawlBar()}
+            {renderCrawlBar("brand")}
+            {allBrands.length > 1 && (
+              <div className="flex items-center gap-2">
+                <label className="text-[10px] uppercase font-bold tracking-wider text-surface-400 shrink-0">
+                  Working brand
+                </label>
+                <select
+                  className="flex-1 rounded-lg border border-surface-700 bg-surface-800 px-2 py-1.5 text-xs text-surface-50 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 disabled:opacity-50"
+                  value={detectedBrand?.id ?? ""}
+                  disabled={switchingBrand}
+                  onChange={async (e) => {
+                    const brandId = e.target.value;
+                    const picked = allBrands.find((b) => b.id === brandId);
+                    if (!picked) return;
+                    setSwitchingBrand(true);
+                    setDetectedBrand(picked); // optimistic — it's already this user's own brand
+                    try {
+                      await selectSessionBrand(sessionId, brandId);
+                    } catch (e) {
+                      console.error("selectSessionBrand failed", e);
+                    } finally {
+                      setSwitchingBrand(false);
+                    }
+                  }}
+                >
+                  {allBrands.map((b) => (
+                    <option key={b.id} value={b.id} className="bg-surface-900 text-surface-200">
+                      {b.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             {(detectedBrandLoading || detectedBrand) && (
               <div className="space-y-2">
                 <p className="text-[10px] uppercase font-bold tracking-wider text-surface-400">
@@ -613,7 +723,7 @@ export default function DNASection({ sessionId }: DNASectionProps) {
 
         {activeTab === "product" && (
           <div className="h-full flex flex-col space-y-4">
-            {renderCrawlBar()}
+            {renderCrawlBar("product")}
             {(detectedLoading || detectedProducts.length > 0) && (
               <div className="space-y-2">
                 <p className="text-[10px] uppercase font-bold tracking-wider text-surface-400">
@@ -672,7 +782,15 @@ export default function DNASection({ sessionId }: DNASectionProps) {
                           <>
                             <dt className="text-surface-500">Price</dt>
                             <dd className="text-surface-200">
-                              {p.attributes.price != null ? `$${p.attributes.price}` : "—"}
+                              {/* Real, live-found bug (2026-10-05): this used to hardcode "$"
+                                  regardless of the product's real currency — a scraped Indian
+                                  product showed both a hardcoded "$164900" here and the real
+                                  "₹164900.00..." leaked into Must Show below. Uses the real
+                                  extracted currency now; no symbol at all (just the number) when
+                                  the source didn't actually state one, rather than guessing. */}
+                              {p.attributes.price != null
+                                ? `${p.attributes.currency || ""}${p.attributes.price}`
+                                : "—"}
                               {p.attributes.discount_percent != null && ` (${p.attributes.discount_percent}% off)`}
                             </dd>
                           </>
