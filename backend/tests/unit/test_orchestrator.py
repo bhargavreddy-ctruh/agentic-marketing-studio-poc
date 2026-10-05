@@ -6,6 +6,7 @@ Phase 0 keyword heuristic never got upgraded despite the phase plan implying it 
 these tests mock the LLM provider rather than hitting a real network call, restoring the "no
 network" unit-test guarantee while still exercising route()'s real parsing/fallback logic.
 """
+import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -115,3 +116,30 @@ async def test_asks_for_approval_via_laya_when_llm_unavailable_but_laya_isnt():
         result = await route(state)
     assert result["route"] == "approval_required"
     assert result["result"]["options"][0]["id"] == "laya_approve_composition_artist"
+
+
+@pytest.mark.asyncio
+async def test_thumbnail_request_with_reference_accepts_dynamic_illustrator_route():
+    """Regression test for a confirmed bug: 'make a youtube thumbnail' referencing an existing
+    product photo must not be impossible to route to dynamic/illustrator. This verifies route()
+    correctly accepts and passes through a dynamic/illustrator decision when the model makes one —
+    the real judgment call (is this an in-place edit vs. a new deliverable) lives in the
+    orchestrator's prompt (Rule 7b) and can only be fully verified against a live model; this test
+    only proves the plumbing doesn't reject a correct decision."""
+    state = {
+        "user_message": "make a youtube thumbnail out of this phone photo",
+        "session_id": "s1",
+        "brief": {
+            "referenced_elements_context": [
+                {"id": "el1", "element_type": "image", "description": "Nothing Phone product shot on white background", "storage_ref": "ref123"}
+            ]
+        },
+    }
+    plan = [{"specialist": "illustrator", "instruction": "Use storage_ref ref123 as reference_storage_ref for an image-to-image 16:9 thumbnail generation."}]
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "dynamic", "target_specialist": None, "plan": plan})),
+    ):
+        result = await route(state)
+    assert result["route"] == "dynamic"
+    assert result["dynamic_plan"][0]["specialist"] == "illustrator"

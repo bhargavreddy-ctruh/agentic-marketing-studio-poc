@@ -130,19 +130,25 @@ def load_all_specialists() -> None:
     # been wired to Palette Strategist and Script Writer before (Memory.md, Phase 3).
     register_specialist(SpecialistSpec(
         name="reference_curator",
+        # text_card_writer added 2026-10-05 (Part 7 fidelity audit): no longer called from
+        # visual_design_lead.py's default pipeline (folded into illustrator, see that file's
+        # docstring), but still reachable standalone via direct_fix ("find me some mood
+        # references") — gets the same humanized-card treatment as headline_writer etc. instead of
+        # a raw "Reference Summary: ..." field dump.
         prompt_file="reference_curator.md",
-        allowed_tools=("web_trend_search", "asset_mood_board_search", "brand_kit_lookup"),
+        allowed_tools=("web_trend_search", "asset_mood_board_search", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Gathers mood/trend references BEFORE any generation — never produces or edits an asset itself.",
-        required_output_fields=("reference_summary",),
+        description="Gathers mood/trend references — standalone-reachable via direct_fix, as a real canvas text card.",
+        required_output_fields=("reference_summary", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="palette_strategist",
+        # text_card_writer added 2026-10-05 — same reasoning as reference_curator above.
         prompt_file="palette_strategist.md",
-        allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup"),
+        allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Decides a color direction BEFORE generation — never produces or edits an asset itself.",
-        required_output_fields=("color_palette",),
+        description="Decides a color direction — standalone-reachable via direct_fix, as a real canvas text card.",
+        required_output_fields=("color_palette", "text_card_storage_ref"),
     ))
     register_specialist(SpecialistSpec(
         name="illustrator",
@@ -156,16 +162,32 @@ def load_all_specialists() -> None:
         # result rather than a stylized/illustrated one; see illustrator.md rule 3d for the choice.
         # high_resolution_image_generator added same day (explicit user ask) — Google's Nano
         # Banana 2 (full), gated to ONLY an explicit 2K/4K/high-resolution request; see rule 3e.
+        # web_trend_search/asset_mood_board_search/color_palette_extractor/visual_palette_analyzer
+        # added 2026-10-05 (fidelity audit): previously reference_curator + palette_strategist ran
+        # as two separate, mandatory LLM hops before every illustrator call, each producing a
+        # free-text paraphrase the illustrator then had to re-synthesize — classic "prompt by
+        # committee" dilution (confirmed root cause of worse-than-a-direct-prompt output). Folded
+        # directly into illustrator's own tool-calling loop instead: it looks these up itself, only
+        # when genuinely useful, with zero paraphrasing hop in between.
         prompt_file="illustrator.md",
-        allowed_tools=("base_image_generator", "collab_image_generator", "photorealistic_image_generator", "high_resolution_image_generator", "image_editor", "brand_kit_lookup", "product_lookup"),
+        allowed_tools=(
+            "base_image_generator", "collab_image_generator", "photorealistic_image_generator",
+            "high_resolution_image_generator", "image_editor", "brand_kit_lookup", "product_lookup",
+            "web_trend_search", "asset_mood_board_search", "color_palette_extractor", "visual_palette_analyzer",
+        ),
         tier=ModelTier.TIER_3,
         description="Generates the base still IMAGE from scratch (full_image pipeline's core step).",
         # "tool_used" added 2026-10-01 (explicit user ask: "make sure the agents are configured to
         # output structured for added models also") — with 5 image tools now available (base,
         # collab, photorealistic, high-resolution, editor), the specific tool/model actually used
         # is now a real, structured, always-present output field, not just inferable from raw
-        # tool-call metadata buried in canvas element records.
-        required_output_fields=("image_prompt", "aspect_ratio", "brand_facts_used", "tool_used"),
+        # tool-call metadata buried in canvas element records. aesthetic_direction/palette_direction
+        # added 2026-10-05 — illustrator now owns what reference_curator/palette_strategist used to
+        # report separately, so the same fields still reach the creative-brief card/metadata.
+        required_output_fields=(
+            "image_prompt", "aspect_ratio", "brand_facts_used", "tool_used",
+            "aesthetic_direction", "palette_direction",
+        ),
     ))
     register_specialist(SpecialistSpec(
         name="composition_artist",
@@ -174,7 +196,10 @@ def load_all_specialists() -> None:
         # (aesthetic/palette direction + the real image prompt used) as a genuine tool call, not
         # Python code hand-building a string after the fact (Rules.md section 1: the same agentic
         # pattern every other generation capability already uses).
-        allowed_tools=("image_editor", "brand_kit_lookup", "text_card_writer"),
+        # product_lookup added 2026-10-05 (fidelity audit) — composition_artist.md's own rule 3
+        # already told the LLM to "check product_lookup" for real currency/price facts, but the
+        # tool was never actually granted here — a dangling instruction it could never follow.
+        allowed_tools=("image_editor", "brand_kit_lookup", "product_lookup", "text_card_writer"),
         tier=ModelTier.TIER_2,
         description="Applies a targeted EDIT to an already-existing image using the image_editor tool (direct_fix use case). Handles ALL visual modifications to images: recoloring, changing subjects, editing content, striking through prices, adding discounted prices visually onto an image, modifying text baked into images, and any request that says 'image edit' or 'edit image'. This is the DEFAULT specialist for any image edit request. Never generates a new image from scratch, never touches video. Also writes the real creative-brief text card for a just-generated image.",
         required_output_fields=("notes",),
@@ -182,7 +207,9 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="camera_director",
         prompt_file="camera_director.md",
-        allowed_tools=("base_video_generator", "brand_kit_lookup"),
+        # product_lookup added 2026-10-05 (fidelity audit) — a shot that shows the linked product
+        # needs the same real grounding every other product-facing specialist already has.
+        allowed_tools=("base_video_generator", "brand_kit_lookup", "product_lookup"),
         tier=ModelTier.TIER_3,
         description="Generates NEW raw video footage/clips from scratch (full_video pipeline's Motion Lead step) — this is the specialist for 'make a video of X', not video_editor_cutter.",
         required_output_fields=("motion_prompt", "camera_motion", "aspect_ratio"),
@@ -219,7 +246,7 @@ def load_all_specialists() -> None:
             "brand_kit_lookup", "text_overlay",
         ),
         tier=ModelTier.TIER_1,
-        description="Adds a SIMPLE text label or headline onto an image as a floating overlay (NOT baked into the image). ONLY use when the user explicitly asks to 'add text', 'add a headline', or 'add a caption' as a separate layer. Do NOT use for image edits, price modifications, striking through prices, or any visual modification of the image content itself — those go to composition_artist.",
+        description="Adds a SIMPLE text label or headline onto an image as a floating overlay (NOT baked into the image), at the SAME aspect ratio/size as the source — cannot reshape, recompose, or restyle. ONLY use when the user explicitly asks to 'add text', 'add a headline', or 'add a caption' as a separate layer on an image that otherwise stays the same. Do NOT use for image edits, price modifications, striking through prices, or any visual modification of the image content itself (those go to composition_artist), and do NOT use for a thumbnail/poster/hero-banner/story-style request that uses an existing photo as reference material for a new, differently-shaped deliverable (that goes to illustrator for an image-to-image generation) — even if the request also mentions bold text, since the image itself needs to change, not just gain a text layer.",
         required_output_fields=("needs_overlay", "discount_facts", "reasoning", "overlay_text"),
     ))
     register_specialist(SpecialistSpec(
@@ -236,10 +263,10 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="script_writer",
         prompt_file="script_writer.md",
-        allowed_tools=("brand_kit_lookup",),
+        allowed_tools=("brand_kit_lookup", "product_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
-        description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio).",
-        required_output_fields=("has_script", "script_line"),
+        description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio) — as a real canvas text card.",
+        required_output_fields=("has_script", "script_line", "text_card_storage_ref"),
     ))
     # Copy Lead group (2026-09-29, Architecture.md's Copy Lead table) — all four are pure-JSON,
     # lookup-only specialists (see `is_lookup_only`/`_LOOKUP_ONLY_TOOLS` above), standalone-reachable
@@ -256,7 +283,10 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="headline_writer",
         prompt_file="headline_writer.md",
-        allowed_tools=("brand_kit_lookup", "text_card_writer"),
+        # product_lookup added 2026-10-05 (fidelity audit): a headline claiming/implying a product
+        # fact (a spec, a price, a feature) needs the same real grounding every other copy
+        # specialist already has — see headline_writer.md's own mandatory-lookup rule.
+        allowed_tools=("brand_kit_lookup", "product_lookup", "text_card_writer"),
         tier=ModelTier.TIER_1,
         description="Writes short, high-impact headlines/lead lines and alternatives for a campaign, as a real canvas text card.",
         required_output_fields=("primary_headline", "alternative_headlines", "hook_strategy", "text_card_storage_ref"),
@@ -298,6 +328,20 @@ def load_all_specialists() -> None:
         required_output_fields=("pacing_target",),
     ))
     register_specialist(SpecialistSpec(
+        name="scene_builder",
+        # Fidelity audit (2026-10-05): collapses environment_designer -> prop_stylist ->
+        # lighting_designer (3 hops: generate, then two edit passes) into ONE generation call with
+        # environment/prop/lighting direction baked into a single art-directed prompt — the
+        # generate-then-edit-then-edit chain added 2 extra LLM hops per shot for comparatively
+        # thin creative value. The three old specialists stay registered (harmless, nothing else
+        # calls them) but `scene_lead.py` now calls this instead.
+        prompt_file="scene_builder.md",
+        allowed_tools=("base_image_generator", "brand_kit_lookup", "text_card_writer"),
+        tier=ModelTier.TIER_3,
+        description="Generates ONE fully art-directed scene/background IMAGE (environment + props + lighting decided together) for the full_video pipeline's Scene Lead step — the only image-generation call in the video pipeline, so it gets the same tier as illustrator.",
+        required_output_fields=("environment_description", "prop_description", "lighting_description", "use_existing_image_as_scene", "scene_description_storage_ref"),
+    ))
+    register_specialist(SpecialistSpec(
         name="environment_designer",
         prompt_file="environment_designer.md",
         allowed_tools=("base_image_generator", "brand_kit_lookup"),
@@ -335,7 +379,9 @@ def load_all_specialists() -> None:
         prompt_file="narrator.md",
         # audio_transcriber added 2026-09-22 — real understanding of an existing AUDIO element
         # (words, pace, acoustic mood) when asked to describe one, not just a guess from its label.
-        allowed_tools=("text_card_writer", "brand_kit_lookup", "audio_transcriber"),
+        # product_lookup added 2026-10-05 (fidelity audit) — narration/description of a linked
+        # product should state real facts, not an invented guess.
+        allowed_tools=("text_card_writer", "brand_kit_lookup", "audio_transcriber", "product_lookup"),
         tier=ModelTier.TIER_2,
         description="Writes a real text card describing an existing image/video/audio element, or a narrative/summary in writing — never generates or edits an image/video/audio asset itself. The right target whenever the user asks for something to be DESCRIBED, narrated, or summarized in text, not generated/edited as a new media asset.",
         required_output_fields=("narration_text", "text_card_storage_ref"),
