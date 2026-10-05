@@ -1,6 +1,6 @@
 "use client";
 
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { forwardRef, memo, useEffect, useImperativeHandle, useRef, useState } from "react";
 import {
   ApiError,
   ChatTurn,
@@ -560,12 +560,12 @@ function ChatPanel(
     inputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
-  async function loadHistory(isCancelled?: () => boolean) {
+  async function loadHistory(isCancelled?: () => boolean, signal?: AbortSignal) {
     if (!sessionId) return;
     try {
       const [session, turns] = await Promise.all([
-        getSession(sessionId),
-        listTurns(sessionId, { limit: INITIAL_TURN_LIMIT }),
+        getSession(sessionId, signal),
+        listTurns(sessionId, { limit: INITIAL_TURN_LIMIT, signal }),
       ]);
       if (isCancelled?.()) return;
 
@@ -603,6 +603,10 @@ function ChatPanel(
       restored[restored.length - 1] = describeResponse(session, turns[turns.length - 1].thinking_text ?? undefined);
       setMessages(restored);
     } catch (err) {
+      // A real `AbortController`-driven cancellation (2026-10-05, same fix shape as
+      // `CanvasView.tsx`'s own mount effect) — Strict Mode's first invocation gets aborted by the
+      // second, same as every other fetch here; nothing to show the user for that, it's expected.
+      if (err instanceof DOMException && err.name === "AbortError") return;
       appendError(err);
     }
   }
@@ -657,9 +661,18 @@ function ChatPanel(
 
   useEffect(() => {
     let cancelled = false;
-    loadHistory(() => cancelled);
+    // Real, live-found gap (2026-10-05): `cancelled` alone only suppressed the STATE UPDATE for a
+    // Strict-Mode-superseded call — the actual `getSession`/`listTurns` network requests (and the
+    // DB connections they hold) still went out and completed a second time regardless, doubling
+    // real load on an already deliberately small connection pool shared with production
+    // (`models/base.py`'s `pool_size=3, max_overflow=2`). A real `AbortController` (same fix shape
+    // already proven in `CanvasView.tsx`'s own mount effect) now cancels the IN-FLIGHT request
+    // itself, not just its effect on state.
+    const controller = new AbortController();
+    loadHistory(() => cancelled, controller.signal);
     return () => {
       cancelled = true;
+      controller.abort();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
@@ -1324,4 +1337,6 @@ function ChatPanel(
   );
 }
 
-export default forwardRef(ChatPanel);
+// React.memo (2026-10-05, FRONTEND_AUDIT.md #13) — wraps the forwardRef result; only effective
+// once page.tsx (its sole caller) also stabilizes the inline callback props it passes down.
+export default memo(forwardRef(ChatPanel));

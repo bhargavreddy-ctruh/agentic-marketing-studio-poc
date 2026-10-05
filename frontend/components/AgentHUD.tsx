@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { LiveEvent, PipelineNode, buildPipelineNodes } from "@/lib/events";
+import { PipelineNode } from "@/lib/events";
 
 export interface SpecialistAgent {
   id: string;
@@ -90,14 +90,12 @@ function matchesSpecialist(text: string, agent: SpecialistAgent): boolean {
 }
 
 export function getActiveSpecialist(
-  events: LiveEvent[],
+  nodes: PipelineNode[],
   generating: boolean,
   generatingKind?: "image" | "video" | "audio" | "text" | null,
 ): { agent: SpecialistAgent; taskLabel: string; thinkingSnippet?: string } | null {
-  if (!generating && events.length === 0) return null;
+  if (!generating && nodes.length === 0) return null;
 
-  const nodes = buildPipelineNodes(events);
-  
   // 1. Look for currently running node
   const runningNode = nodes.slice().reverse().find((n) => n.status === "running");
   if (runningNode) {
@@ -131,21 +129,19 @@ export function getActiveSpecialist(
 }
 
 interface AgentHUDProps {
-  events: LiveEvent[];
+  nodes: PipelineNode[];
   generating: boolean;
   generatingKind?: "image" | "video" | "audio" | "text" | null;
   className?: string;
 }
 
 export default function AgentHUD({
-  events,
+  nodes,
   generating,
   generatingKind,
   className = "",
 }: AgentHUDProps) {
   const [hoveredAgentId, setHoveredAgentId] = useState<string | null>(null);
-
-  const nodes = useMemo(() => buildPipelineNodes(events), [events]);
 
   const agentStates = useMemo(() => {
     return SPECIALIST_ROSTER.map((agent) => {

@@ -5311,3 +5311,108 @@ Overhauled `ChatPanel.tsx` to match the target modern, sleek dark mode aesthetic
   (`image_editor`/`base_image_generator`) as `composition_artist`/`scene_builder`, which WERE
   already in the set. All 4 fixed. Full suite re-verified: 100 passed, no change in count (prompt/
   description/set-membership fixes only, no new test needed beyond what already covers routing).
+
+## Deployed + Local Studio-Page Slowness (2026-10-05)
+
+- User reported the deployed Vercel app, and "even the local code," loading slowly. Investigated
+  the live login page directly first (617ms total load, 128ms TTFB — not slow), narrowing the real
+  complaint to the `/studio/[sessionId]` page, which `FRONTEND_AUDIT.md` (2026-09-30) had already
+  ranked real, cited issues for.
+- **Deployed was stale, not slow.** `main` was 28 commits behind `feat/scraper-and-url-images` and
+  contained none of today's earlier perf fixes (confirmed via `git log main..feat/...` and grepping
+  `main`'s own log for zero lazy/pagination/truncation commits). Turned out already resolved by the
+  time this was checked — `origin/main` had PR #3 merged in (`df8b6ea`), so local `main` just
+  needed a fast-forward; no new merge/push needed for that part.
+- **Local studio slowness was `FRONTEND_AUDIT.md`'s own still-open #12/#13** — confirmed NOT a new
+  bug; studio's data-fetching (`ChatPanel.tsx`/`CanvasView.tsx`) was already correctly parallelized
+  (`Promise.all`), ruling out a fetch waterfall. Fixed both:
+  - **#12**: `AgentHUD.tsx` independently called `buildPipelineNodes()` a second time
+    (`getActiveSpecialist` internally, PLUS its own `useMemo`) on the exact same `turnEvents` data
+    `page.tsx` already builds via its own `activeSpecialist` useMemo — a real duplicate O(N)
+    rebuild on every single streamed SSE event, including every per-token `llm_delta`. Refactored
+    `getActiveSpecialist`/`AgentHUD` to both accept a pre-computed `nodes: PipelineNode[]` prop
+    instead of raw `events`, computed exactly ONCE in `page.tsx` (`pipelineNodes`, a single
+    `useMemo`) and passed to both. Also buffered `handleTurnEvent`'s incoming SSE events in a ref
+    and flushed into `setTurnEvents` via one `requestAnimationFrame` callback per frame instead of
+    one `setState` per event — sub-16ms-granularity updates were never visually distinguishable
+    anyway, so this is a pure win with no behavior change (verified: the batched flush replays the
+    exact same per-event "turn_started resets, anything else appends" reduction the old one-call-
+    per-event code did, just folded over however many events land in one frame).
+  - **#13**: `CanvasView`, `CanvasEngine`, and `ChatPanel` were never `React.memo`'d, and
+    `page.tsx` recreated their props fresh every render (`referencedElementIds={arr.map(...)}`,
+    `pendingGeneration={generating ? {...} : null}`, and half a dozen inline arrow-function
+    callbacks) — wrapping the components alone would have been a no-op without this. Both landed
+    together: stabilized every prop via `useMemo`/`useCallback` in `page.tsx`
+    (`referencedElementIds`, `pendingGeneration`, `handleToggleElements`, `handleToggleMaximize`,
+    `handleChatGenerated`, `handleClearReference`, `handleAddReferenceElement`,
+    `handleChatSessionId`, plus converting `handleTurnEvent`/`handleRestoreEvents`/
+    `handleRequestGenerate` from plain function declarations to `useCallback`s), then wrapped all
+    three components in `React.memo` (`ChatPanel`: `memo(forwardRef(ChatPanel))`, composing with
+    its existing `forwardRef`).
+  - **#15's "every page" half**: `lib/http.ts`'s `request()` hardcoded `cache: "no-store"`
+    unconditionally on every call. Changed to `init?.cache ?? "no-store"` — an explicit opt-in,
+    default completely unchanged for every existing call site. Flipped only `listBrands()`
+    (`lib/brand.ts`) to `cache: "default"` — a rarely-changing list, safe to let the browser's
+    normal HTTP cache handle. Left `listOnboardedProducts()`/`getProduct()`, `me()`, and
+    `listVersions()` untouched exactly as the audit's own fix note specified (the first fans out
+    through a shared `getProduct()` used elsewhere where freshness matters more; `me()`/
+    `listVersions()` are explicitly flagged as separate, riskier decisions not worth bundling here).
+  - Deliberately NOT touched this round (bigger, separate follow-ups, not needed for this
+    complaint): #14's full viewport-based tile culling, #16's visibility-aware polling pause,
+    #17's `page.tsx` state consolidation, #18's per-row chat message memoization.
+- Verified: `tsc --noEmit` clean after every change; live in the browser — the studio page (both
+  an existing long session and a freshly-created one) mounts and renders with no React
+  warnings/errors (no "Maximum update depth," no hook-order issues) after the refactor. Could not
+  fully exercise a live multi-turn streaming session for a before/after responsiveness comparison
+  (no test-account password on hand for the existing 92-turn session) — this is the one remaining
+  manual check worth doing.
+- Per explicit instruction, this round (frontend-only) was pushed to `origin` only
+  (`bhargavreddy-ctruh/agentic-marketing-studio-poc`), not to `ctruh` — unlike the prior round's
+  push which went to both remotes.
+
+## Studio Page Hanging / "Assets Won't Load" — Real Root Cause (2026-10-05)
+
+- User reported `/studio/[sessionId]` specifically (not just general lagginess) sometimes hangs on
+  "Loading studio…" indefinitely, with canvas assets never appearing. Reproduced live.
+- **Root cause confirmed via backend logs: database connection-pool exhaustion, the same failure
+  mode as the SSE-route bug fixed earlier today, recurring from a different source.** Local `.env`
+  points `DATABASE_URL` directly at the SAME production Supabase instance
+  (`aws-0-ap-northeast-2.pooler.supabase.com`) — not a local database — and `models/base.py` keeps
+  the pool deliberately tiny (`pool_size=3, max_overflow=2` = 5 total) to stay under Supabase's
+  shared 15-connection project cap. A single studio page mount fires auth/me, sessions, canvas,
+  turns, and brands requests, several of them genuinely duplicated by React Strict Mode's dev-only
+  double-invoke — easily 10+ concurrent requests contending for 5 slots, each also paying real
+  cross-continent round-trip latency. When the pool saturates, requests queue up to the real 30s
+  SQLAlchemy `QueuePool` timeout before failing outright — exactly the stuck spinner and the
+  `turns`/`canvas` network calls that never resolved. Confirmed via `TimeoutError: QueuePool limit
+  of size 3 overflow 2 reached` entries hitting `list_turns`/`get_canvas_state`/`list_brands`/
+  `get_current_user` in the backend log.
+- Given the choice between (a) de-duplicating requests, (b) giving local dev its own database, or
+  (c) raising the pool size, the user chose (a) — the safe option with no risk to the production
+  pool's Supabase-imposed safety margin.
+- **Fix 1 — `ChatPanel.tsx`'s `loadHistory` only soft-cancelled, never hard-aborted.** Its Strict-
+  Mode guard (`cancelled` flag) only suppressed the STATE UPDATE for a superseded mount — the
+  actual `getSession`/`listTurns` network requests (and the DB connections they hold) still
+  completed a second time regardless, unlike `CanvasView.tsx`'s own mount effect, which already
+  uses a real `AbortController`. Added `signal?: AbortSignal` to `getSession`/`listTurns`
+  (`lib/api.ts`, same pattern as `getCanvasState`), threaded a real `AbortController` through
+  `ChatPanel`'s mount effect, and added the matching `AbortError` guard in its catch block (same
+  shape as `CanvasView.tsx`'s). Verified live: the Strict-Mode-superseded `sessions`/`turns` calls
+  now show `net::ERR_ABORTED` in the network log instead of both completing — confirmed the fix
+  actually engages, not just compiles.
+- **Fix 2 — `me()` had no de-duplication at all.** `app/page.tsx` and `app/studio/[sessionId]/
+  page.tsx` each call `me()` independently on their own mount; live network logs showed up to 5 raw
+  `/api/v1/auth/me` requests for a single page load. Added a module-level in-flight-promise cache
+  in `lib/auth.ts`'s `me()` — any concurrent caller coalesces onto the same underlying request,
+  cleared as soon as it settles so a later, genuinely new check (e.g. a manual retry) still fires
+  fresh. Module-level state survives a Strict-Mode component unmount/remount (the module itself
+  isn't torn down), unlike a `useRef`.
+- Verified: `tsc --noEmit` clean; live — reloaded the real, populated session
+  (`efbbc66e246449f6a5eb6dd9ae094d98`, 52 real elements) repeatedly, confirmed canvas images (`/api/
+  v1/canvas/assets/*`) now return 200 and render, and the previously-duplicated `sessions`/`turns`
+  calls now correctly abort instead of double-firing.
+- **Not fixed this round, flagged for later**: the underlying pool is still small and still shared
+  with production from local dev — real contention under genuinely heavy local use (multiple tabs,
+  rapid navigation) can still exhaust it; the user explicitly deferred options (b)/(c) above.
+- Per explicit instruction, this round (frontend-only, no backend/schema changes) was pushed to
+  `origin` only, not `ctruh`.

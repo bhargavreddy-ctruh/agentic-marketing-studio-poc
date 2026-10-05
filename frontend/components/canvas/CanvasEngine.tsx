@@ -13,7 +13,7 @@
  * "one file owns the mechanism, everything else depends on an interface" isolation this project's
  * backend already applies to every vendor provider (Rules.md section 1).
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Camera, Viewport, fitViewport } from "./camera";
 import type { SpecialistAgent } from "../AgentHUD";
 import { canvasTileImageUrl } from "@/lib/http";
@@ -414,7 +414,7 @@ const PENDING_ICON_BY_KIND: Record<string, string> = {
   text: "📝",
 };
 
-export default function CanvasEngine({
+function CanvasEngine({
   tiles,
   onUndo,
   onRedo,
@@ -1121,3 +1121,7 @@ export default function CanvasEngine({
     </div>
   );
 }
+
+// React.memo (2026-10-05, FRONTEND_AUDIT.md #13) — same caveat as CanvasView's own memo: only
+// effective once CanvasView.tsx (its sole caller) also stabilizes the props it passes down.
+export default memo(CanvasEngine);
