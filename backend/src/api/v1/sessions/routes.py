@@ -10,22 +10,33 @@ first turn included.
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
-from fastapi import APIRouter, status
+from fastapi import APIRouter, Cookie, Query, status
 from starlette.responses import Response, StreamingResponse
 
 from ....core.events import stream_events
+from ....core.exceptions import Unauthorized
 from ....core.middleware.logging import get_logger
+from ....models.base import async_session_factory
 from ....schemas.sessions.requests import (
     CreateSessionRequest,
     PostTurnRequest,
+    SelectBrandRequest,
     UpdateApprovalModeRequest,
     UpdateDnaRequest,
     UpdateGuardrailsEnabledRequest,
     UpdateTitleRequest,
 )
 from ....schemas.sessions.responses import ChatTurnResponse, SessionResponse
-from ...dependencies import CurrentUserDep, SessionServiceDep
+from ...dependencies import (
+    SESSION_COOKIE_NAME,
+    BrandDnaServiceDep,
+    CurrentUserDep,
+    SessionServiceDep,
+    get_current_user,
+    get_session_service,
+)
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 log = get_logger(__name__)
@@ -74,6 +85,21 @@ async def update_guardrails_enabled(
     return await svc.update_guardrails_enabled(
         session_id, user_id=current_user.id, guardrails_enabled=body.guardrails_enabled
     )
+
+
+@router.put("/{session_id}/brand", response_model=SessionResponse)
+async def select_brand(
+    session_id: str, body: SelectBrandRequest, svc: SessionServiceDep,
+    brand_svc: BrandDnaServiceDep, current_user: CurrentUserDep,
+) -> SessionResponse:
+    """New (2026-10-05, explicit user ask: a brand picker dropdown in the Brand DNA tab) — switches
+    this session to one of the user's own already-scraped/saved brands, no re-crawl needed.
+    `brand_svc.get_brand` is the real ownership gate: it already raises Forbidden/NotFound if
+    `brand_id` doesn't belong to `current_user` (same check `upload_brand_logo` etc. already use) —
+    checked BEFORE `select_brand` ever touches the session, so this can never link a session to
+    another user's brand."""
+    await brand_svc.get_brand(body.brand_id, user_id=current_user.id)
+    return await svc.select_brand(session_id, user_id=current_user.id, brand_id=body.brand_id)
 
 
 @router.put("/{session_id}/title", response_model=SessionResponse)
@@ -266,17 +292,27 @@ async def cancel_turn(
 
 @router.get("/{session_id}/turns", response_model=list[ChatTurnResponse])
 async def list_turns(
-    session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
+    session_id: str,
+    svc: SessionServiceDep,
+    current_user: CurrentUserDep,
+    limit: int | None = Query(default=None, gt=0, le=200),
+    before_id: str | None = Query(default=None),
 ) -> list[ChatTurnResponse]:
     """Real, persisted chat history (2026-09-22) — the actual fix for a page refresh losing the
     conversation. Every prior turn's real user message, the real "thinking" text streamed live
-    during it, and the real final response — ownership-checked like every other session route."""
-    return await svc.list_turns(session_id, user_id=current_user.id)
+    during it, and the real final response — ownership-checked like every other session route.
+
+    `limit`/`before_id` (2026-10-05, chat lazy-load): both optional and unset by default, so an
+    omitted query string still returns the full history exactly as before. Pass `limit` alone for
+    "the most recent N turns"; add `before_id` (an already-loaded turn's id) to page further back
+    in history from there. Returned turns are always in ascending (oldest-first) order either way."""
+    return await svc.list_turns(session_id, user_id=current_user.id, limit=limit, before_id=before_id)
 
 
 @router.get("/{session_id}/events")
 async def stream_session_events(
-    session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
+    session_id: str,
+    session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE_NAME)] = None,
 ) -> StreamingResponse:
     """Live narration (Architecture.md: 'watch generation happen live') — open this BEFORE or
     DURING a POST .../turns call for the same session_id to see real events (ideation, routing,
@@ -285,8 +321,29 @@ async def stream_session_events(
 
     Ownership-checked (Tasks_Workflows.md #2) via the same real lookup `get_session` does — a live
     event stream is real, session-scoped information, not something a different user should be
-    able to watch just by knowing the id."""
-    await svc.get_session(session_id, user_id=current_user.id)
+    able to watch just by knowing the id.
+
+    Real, live-found fix (2026-10-05): this route used to take `svc: SessionServiceDep` /
+    `current_user: CurrentUserDep` like every other route — both depend on the request-scoped
+    `DbSession` (`Depends(get_session)`). FastAPI's own documented gotcha: a `yield`-based
+    dependency's cleanup (closing the session, returning its connection to the pool) only runs
+    AFTER the full response is sent — for a `StreamingResponse`, that means the ENTIRE SSE stream's
+    lifetime, not just the quick ownership check above. With `pool_size=3, max_overflow=2` (5 total
+    — see `models/base.py`'s own docstring on why it's kept this small for Supabase), it took only
+    a handful of concurrently open chat tabs to exhaust the WHOLE pool for every other endpoint in
+    the app — confirmed live: a sustained burst of `QueuePool limit ... connection timed out`
+    across completely unrelated routes (auth, canvas, brand lists), surfaced to the user as a flat
+    "Network error — is the backend running?" / "Failed to fetch". Fixed by doing the ownership
+    check inside its own explicitly short-lived session (`async_session_factory()`, opened and
+    closed BEFORE the `StreamingResponse` begins), reusing the same `get_current_user`/
+    `get_session_service` dependency FUNCTIONS directly rather than through FastAPI's `Depends` — so
+    no connection is held for the stream's duration."""
+    if session_token is None:
+        raise Unauthorized()
+    async with async_session_factory() as db:
+        current_user = await get_current_user(db, session_token)
+        svc = get_session_service(db)
+        await svc.get_session(session_id, user_id=current_user.id)
 
     async def _sse_body():
         async for event in stream_events(session_id):
@@ -321,7 +378,7 @@ async def crawl_url(
     immediately, and progress/results surface purely via the existing SSE `crawler_*` events (see
     `GET /{session_id}/events`)."""
     await svc.get_session(session_id, user_id=current_user.id)  # ownership check
-    task = asyncio.create_task(run_crawl_and_ingest(session_id, body.url))
+    task = asyncio.create_task(run_crawl_and_ingest(session_id, body.url, url_type=body.url_type))
     _crawl_tasks.add(task)
     task.add_done_callback(_crawl_tasks.discard)
     return {"status": "started", "url": body.url}

@@ -28,6 +28,14 @@ class DiscountMathCalculatorTool(Tool):
         "properties": {
             "base_price": {"type": "number"},
             "discount_percent": {"type": "number"},
+            "currency": {
+                "type": "string",
+                "description": (
+                    "The real currency symbol/code the user actually stated (e.g. '₹', '$', 'INR'). "
+                    "Required, no default — never assume a currency the user didn't actually say; "
+                    "leave empty only if the user truly gave no currency at all."
+                ),
+            },
         },
         "required": ["base_price", "discount_percent"],
     }
@@ -38,6 +46,10 @@ class DiscountMathCalculatorTool(Tool):
             discount_percent = float(args["discount_percent"])
         except (KeyError, TypeError, ValueError):
             return ToolResult(ok=False, data={}, error="base_price and discount_percent must be real numbers")
+        # Real, live-found bug (2026-10-05): this used to hardcode "$" regardless of what currency
+        # the user actually stated in chat — fixed to use whatever the caller passes (or no
+        # symbol at all, never a guessed one).
+        currency = str(args.get("currency") or "")
 
         final_price = round(base_price * (1 - discount_percent / 100), 2)
         return ToolResult(
@@ -47,7 +59,7 @@ class DiscountMathCalculatorTool(Tool):
                 "discount_percent": discount_percent,
                 "final_price": final_price,
                 "overlay_text_should_use": (
-                    f"${final_price:,.0f} ({discount_percent:g}% OFF, was ${base_price:,.0f})"
+                    f"{currency}{final_price:,.0f} ({discount_percent:g}% OFF, was {currency}{base_price:,.0f})"
                 ),
             },
         )

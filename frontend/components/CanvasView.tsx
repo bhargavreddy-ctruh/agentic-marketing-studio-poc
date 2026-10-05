@@ -40,7 +40,7 @@ interface VersionInfo {
  * alongside real shot-list/scene-description/creative-brief cards — the reference product's own
  * canvas shows exactly this kind of text card next to the generated tiles; this app already
  * computed all of this real text, it just never became a visible element before. */
-function elementKind(elementType: string): "image" | "video" | "audio" | "text" {
+export function elementKind(elementType: string): "image" | "video" | "audio" | "text" {
   if (elementType === "video") return "video";
   if (elementType === "audio") return "audio";
   if (elementType === "text") return "text";
@@ -248,12 +248,13 @@ export default function CanvasView({
     // `sessionId`/`refresh`, both stable for the lifetime of one mounted session.
   }, [sessionId]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal?: AbortSignal) => {
     // No session yet (the user hasn't sent a first message) — a real empty infinite canvas, not
     // an error. Nothing to fetch, nothing to render.
     if (!sessionId) return;
     try {
-      const state = await getCanvasState(sessionId);
+      const state = await getCanvasState(sessionId, signal);
+      if (signal?.aborted) return; // a newer call already superseded this one
       setElements(state.elements);
       onElementsCountChange?.(state.elements.length);
       setError(null);
@@ -285,6 +286,7 @@ export default function CanvasView({
       }
       setVersionInfo(new Map(infos));
     } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return; // intentionally superseded, not a real failure
       setError(err instanceof ApiError ? `${err.message} (HTTP ${err.status})` : "Could not load the canvas.");
     }
   }, [sessionId]);
@@ -298,8 +300,18 @@ export default function CanvasView({
     // reusable `useCallback` (also called imperatively from several event handlers below), so
     // inlining its body into this effect isn't a real option; a fully "compliant" rewrite would
     // need the experimental `useEffectEvent` API, unavailable in this project's React 18.3.1.
+    //
+    // Real, live-found bug (2026-10-05, fidelity audit): React 18 Strict Mode (dev only)
+    // double-invokes this effect (mount → cleanup → mount again), which used to fire TWO
+    // concurrent, un-cancellable `getCanvasState` calls — the second could race/abort the first at
+    // the network layer, observed live as paired `net::ERR_FAILED` requests. A real
+    // `AbortController`, aborted on cleanup, makes the first invocation's own in-flight request
+    // cancel itself cleanly instead of racing — same fix shape as any other double-invoke-prone
+    // data fetch.
+    const controller = new AbortController();
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    refresh();
+    refresh(controller.signal);
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- refreshSignal is a deliberate,
     // externally-bumped trigger, not a value `refresh` itself reads.
   }, [refresh, refreshSignal]);

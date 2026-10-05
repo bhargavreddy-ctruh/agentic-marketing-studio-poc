@@ -21,6 +21,10 @@ export interface ProductAttributes {
   // The product's real, physical color (2026-09-30) — a genuine product fact, distinct from any
   // brand color guideline. See backend/src/core/guardrails.py's _product_rules "color" handling.
   color: string;
+  // The product's real currency symbol/code (2026-10-05, fidelity bug fix) — the UI used to
+  // hardcode "$" on every price regardless of what currency the product actually uses. Empty
+  // string when unclear (never guess a currency the source didn't actually state).
+  currency: string;
   must_show: string[];
   never_show: string[];
   claims_allowed: string[];

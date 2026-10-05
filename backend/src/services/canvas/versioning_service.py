@@ -157,7 +157,14 @@ class CanvasVersioningService:
         """The `canvas_versioning_enabled=False` path — same real session/specialist/kind the
         source element already carries, but a genuinely NEW, independent element (its own id,
         v1, no version history linking it back), never a mutation of `element` itself. `element`
-        is left completely untouched on disk."""
+        is left completely untouched on disk.
+
+        Carries `product_id`/`product_name` forward from the source element and records
+        `parent_element_id` — otherwise every edit of an already-grouped element (e.g. an S26
+        reference image) silently drops into the canvas's "Unassigned" bucket despite the
+        source being correctly grouped, since nothing else in this constructor ever copied
+        those fields (real, live-found bug: referencing a grouped element and asking for a
+        change put the result in Unassigned)."""
         new_element = CanvasElementModel(
             id=uuid.uuid4().hex,
             session_id=element.session_id,
@@ -165,6 +172,9 @@ class CanvasVersioningService:
             produced_by_specialist=element.produced_by_specialist,
             storage_ref=storage_ref,
             metadata_json=metadata,
+            product_id=element.product_id,
+            product_name=element.product_name,
+            parent_element_id=element.id,
         )
         created = await self._canvas.add_element(new_element)
         log.info(

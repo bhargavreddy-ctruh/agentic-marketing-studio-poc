@@ -69,6 +69,7 @@ def load_all_tools() -> None:
         logo_compositor,
         photorealistic_image_generator,
         product_lookup,
+        recall,
         text_card_writer,
         text_overlay,
         text_to_speech,

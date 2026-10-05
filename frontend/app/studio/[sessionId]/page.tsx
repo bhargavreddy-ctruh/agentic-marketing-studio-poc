@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import ChatPanel, { ChatPanelHandle } from "@/components/ChatPanel";
 import CanvasView, { ReferencedElement } from "@/components/CanvasView";
 import NodeGraphView from "@/components/NodeGraphView";
 import GuardrailsSection from "@/components/GuardrailsSection";
 import DNASection from "@/components/DNASection";
 import StyleLockModal from "@/components/StyleLockModal";
-import { LiveEvent } from "@/lib/events";
+import { LiveEvent, openEventStream } from "@/lib/events";
 import { ApiError, User, me } from "@/lib/auth";
 import { Spinner } from "@/components/Spinner";
 import { CloseButton } from "@/components/CloseButton";
@@ -58,6 +58,7 @@ function Modal({
 export default function StudioPage() {
   const params = useParams<{ sessionId: string }>();
   const router = useRouter();
+  const searchParams = useSearchParams();
   const sessionId = params.sessionId;
 
   const [authChecked, setAuthChecked] = useState(false);
@@ -104,6 +105,70 @@ export default function StudioPage() {
 
   useEffect(() => {
     checkAuth();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Real, live-found gap (2026-10-05, explicit user report: "when i gave product and brand url
+  // while creating workflow/session... it was showing empty, not even 'scraping etc', which will
+  // confuse user") — the DNA modal (the only place crawl status ever showed) isn't open yet right
+  // after creation. `?crawling=brand,product` (set by the dashboard's create-workflow form) tells
+  // this page to show a real status banner for exactly the kinds that were actually kicked off.
+  // Safe to open its own SSE subscription here: this is a BRAND NEW session with no chat turn
+  // possibly running yet, so there's no risk of stealing events from a concurrent turn's own
+  // stream (the backend's per-session event queue has only one consumer at a time).
+  //
+  // Captured ONCE via a lazy useState initializer, not read fresh inside the effect below — a
+  // real, live-found bug caught testing this live: React 18 Strict Mode (dev only) double-invokes
+  // effects (mount → cleanup → mount again); the effect's own `router.replace` strips the query
+  // param after its FIRST invocation, so re-reading `searchParams` on the Strict-Mode replay saw an
+  // already-empty param and silently no-op'd, leaving the banner stuck on "Starting…" forever with
+  // an aborted SSE connection. Reading it once here makes the effect's behavior stable regardless
+  // of how many times React (re-)runs it.
+  const [initialCrawlingKinds] = useState<string[]>(() =>
+    (searchParams.get("crawling") || "").split(",").filter(Boolean)
+  );
+  const [creationCrawlStatus, setCreationCrawlStatus] = useState<Record<string, string> | null>(null);
+  useEffect(() => {
+    const kinds = initialCrawlingKinds;
+    if (kinds.length === 0) return;
+    const pending = new Set(kinds);
+    setCreationCrawlStatus(Object.fromEntries(kinds.map((k) => [k, "Starting…"])));
+    router.replace(`/studio/${sessionId}`); // strip the query param so a refresh doesn't re-trigger this
+
+    const STAGE_TEXT: Record<string, string> = {
+      scraping_page: "Fetching the page…",
+      extracting_facts: "Extracting DNA from the page…",
+      downloading_images: "Downloading product images…",
+      downloading_logo: "Downloading the brand logo…",
+      downloading_fonts: "Downloading brand fonts…",
+    };
+    const timeout = setTimeout(() => close(), 45_000); // bounded — never a permanently-open stream
+    const close = openEventStream(sessionId, (event) => {
+      const kind = typeof event.url_type === "string" ? event.url_type : null;
+      if (!kind || !pending.has(kind)) return;
+      if (event.type === "crawler_step" && typeof event.status === "string") {
+        const status: string = event.status;
+        if (status === "failed") {
+          setCreationCrawlStatus((prev) => ({ ...prev, [kind]: "Couldn't extract DNA from that link." }));
+          pending.delete(kind);
+        } else if (STAGE_TEXT[status]) {
+          setCreationCrawlStatus((prev) => ({ ...prev, [kind]: STAGE_TEXT[status] }));
+        }
+      } else if (event.type === "crawler_completed") {
+        setCreationCrawlStatus((prev) => ({ ...prev, [kind]: "DNA extracted!" }));
+        pending.delete(kind);
+      }
+      if (pending.size === 0) {
+        clearTimeout(timeout);
+        close();
+        setRefreshSignal((n) => n + 1); // a product crawl may have just added canvas images
+        setTimeout(() => setCreationCrawlStatus(null), 4000); // auto-dismiss once done
+      }
+    });
+    return () => {
+      clearTimeout(timeout);
+      close();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -180,6 +245,22 @@ export default function StudioPage() {
       {generating && (
         <div className="absolute inset-x-0 top-0 z-50 h-0.5 overflow-hidden">
           <div className="h-full w-1/3 animate-shimmer bg-gradient-to-r from-transparent via-brand-500 to-transparent" />
+        </div>
+      )}
+
+      {/* Real, live-found gap (2026-10-05): a brand/product URL given at workflow-creation time
+          used to crawl with zero visible feedback until the user happened to open the DNA modal —
+          looked like nothing was happening at all. A real status banner, live-updated via SSE,
+          right on first load. */}
+      {creationCrawlStatus && Object.keys(creationCrawlStatus).length > 0 && (
+        <div className="absolute left-1/2 top-3 z-50 flex -translate-x-1/2 flex-col gap-1 rounded-xl border border-surface-700/60 bg-surface-900/90 px-4 py-2 text-xs text-surface-200 shadow-lg backdrop-blur">
+          {Object.entries(creationCrawlStatus).map(([kind, message]) => (
+            <div key={kind} className="flex items-center gap-2">
+              {message !== "DNA extracted!" && !message.startsWith("Couldn't") && <Spinner size={3} />}
+              <span className="font-medium capitalize">{kind} DNA:</span>
+              <span className="text-surface-400">{message}</span>
+            </div>
+          ))}
         </div>
       )}
 
@@ -329,7 +410,7 @@ export default function StudioPage() {
       </Modal>
 
       <Modal isOpen={showDna} onClose={() => setShowDna(false)} maxWidth="max-w-2xl" height="h-[60vh]">
-        <DNASection sessionId={sessionId} />
+        <DNASection sessionId={sessionId} onProductCrawled={() => setRefreshSignal((n) => n + 1)} />
       </Modal>
 
       {/* ── PromptModal for right-click canvas generate (replaces window.prompt — 8c) ── */}
@@ -361,6 +442,7 @@ export default function StudioPage() {
             onGenerated={() => setRefreshSignal((n) => n + 1)}
             referencedElements={referencedElements}
             onClearReference={(id) => setReferencedElements(prev => id ? prev.filter(e => e.id !== id) : [])}
+            onAddReferenceElement={(el) => setReferencedElements(prev => prev.some(p => p.id === el.id) ? prev : [...prev, el])}
             onTurnEvent={handleTurnEvent}
             onRestoreEvents={handleRestoreEvents}
             isMaximized={isChatMaximized}

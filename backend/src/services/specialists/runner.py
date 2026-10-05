@@ -21,6 +21,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Coroutine
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -216,6 +217,36 @@ class AgenticStepResult:
         return None
 
 
+# Turn-level specialist-call budget (Part 8, fidelity audit 2026-10-05): each specialist already
+# has its own `max_iterations` cap on its OWN tool-calling loop, and `run_specialist_with_review`
+# already bounds its own one-retry pattern — but nothing capped the TOTAL number of specialist
+# calls across a whole turn, across Leads, retries, and resumed/paused turns. A pathological case
+# (a specialist that keeps "deciding" without executing, or a Lead re-invoked repeatedly across
+# resumes) could burn real LLM/provider spend with no circuit breaker. Same ContextVar pattern
+# `core/events.py`'s `_current_session_id` already uses — set once per turn
+# (`session_service.py`), decremented on every real specialist call, isolated per-request since
+# each asyncio task gets its own context. `-1` (the default) means "no budget set" — existing
+# tests/call sites that never call `start_turn_budget` are unaffected.
+_turn_call_budget: ContextVar[int] = ContextVar("_turn_call_budget", default=-1)
+
+
+def start_turn_budget(max_calls: int) -> None:
+    """Call once at the start of a turn (`session_service.py`), before the graph runs."""
+    _turn_call_budget.set(max_calls)
+
+
+def _consume_turn_budget(specialist_name: str) -> None:
+    remaining = _turn_call_budget.get()
+    if remaining < 0:
+        return  # no budget set for this context — unbounded, as before
+    if remaining == 0:
+        raise SpecialistFailed(
+            specialist_name,
+            "turn-level specialist-call budget exhausted — too many specialist calls in this turn",
+        )
+    _turn_call_budget.set(remaining - 1)
+
+
 async def run_specialist_agentic(
     specialist_name: str, *, context: str | list[dict[str, Any]], max_iterations: int = 6, brief: dict | None = None
 ) -> AgenticStepResult:
@@ -237,6 +268,7 @@ async def run_specialist_agentic(
     dump in the context. Without real message history, the model has no reliable way to detect that
     the user already confirmed proceeding past a guardrail conflict.
     """
+    _consume_turn_budget(specialist_name)
     spec = get_specialist(specialist_name)
     system_prompt = spec.load_prompt()
     
@@ -403,6 +435,9 @@ async def run_specialist_agentic(
                                     tool_context = {
                                         k: v for k, v in {
                                             "user_id": brief.get("user_id"),
+                                            # Scopes the `recall` tool (2026-10-05) to this
+                                            # session's own chat history — never another session's.
+                                            "session_id": brief.get("session_id"),
                                             # Scopes product_lookup's own semantic search to THIS
                                             # turn's resolved product only (2026-09-30, real bug:
                                             # an unscoped search across a user's whole product

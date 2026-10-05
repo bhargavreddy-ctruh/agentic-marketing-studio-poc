@@ -16,8 +16,18 @@ current schema confirmed live against api.replicate.com/v1/models/bytedance/seed
 `resolution`, and `aspect_ratio` input fields (confirmed enums: resolution in {480p, 720p},
 aspect_ratio in {16:9, 4:3, 1:1, 3:4, 9:16, 21:9, 9:21, adaptive}) — what the user asked for is now
 honored directly as a request parameter, not indirectly via the input image's own dimensions.
-Native synchronized audio generation (`generate_audio`) is left at the model's own default (on) —
-a genuine capability upgrade, not something this provider should silently suppress.
+Native synchronized audio generation (`generate_audio`) is now a real, explicit parameter — left at
+the model's own default (on) when the caller doesn't say, but controllable when the chosen video
+model's native audio is NOT what's wanted (e.g. a scripted voiceover will be muxed in separately).
+
+`model` can also select Google Veo (confirmed live-available on Replicate as of late 2025/2026, per
+third-party reseller/pricing pages — but the EXACT model slug and its own valid resolution/
+aspect_ratio/audio schema have NOT been independently re-verified against Replicate's own
+`/v1/models` endpoint from this environment, the same "don't trust an unverified name" lesson
+`core/config.py` already states for Groq/OpenRouter. The Seedance-specific resolution/aspect_ratio
+clamp below is therefore only applied when the Seedance model is actually selected — a non-Seedance
+model's own values are passed through as given rather than silently forced into Seedance's narrower
+set, but re-verify Veo's real schema before relying on this in production.
 """
 from __future__ import annotations
 
@@ -55,6 +65,8 @@ class ReplicateVideoProvider(VideoGenProvider):
         camera_motion: str | None = None,
         first_frame_bytes: bytes | None = None,
         last_frame_bytes: bytes | None = None,
+        model: str | None = None,
+        generate_audio: bool | None = None,
     ) -> VideoResult:
         if not self._api_key:
             raise ProviderUnavailable("replicate", "REPLICATE_API_KEY is not set")
@@ -76,18 +88,27 @@ class ReplicateVideoProvider(VideoGenProvider):
         # picks) or an integer 1-15; anything outside that range would be rejected by the API, so
         # clamp defensively rather than let an upstream caller's arbitrary value 400.
         effective_duration = duration_seconds if duration_seconds == -1 else max(1, min(15, duration_seconds))
-        effective_resolution = resolution if resolution in _VALID_RESOLUTIONS else "720p"
-        effective_aspect_ratio = aspect_ratio if aspect_ratio in _VALID_ASPECT_RATIOS else "16:9"
-        if resolution not in _VALID_RESOLUTIONS or aspect_ratio not in _VALID_ASPECT_RATIOS:
-            log.warning(
-                "replicate_invalid_video_param_fallback",
-                extra={
-                    "_extra_requested_resolution": resolution,
-                    "_extra_requested_aspect_ratio": aspect_ratio,
-                    "_extra_used_resolution": effective_resolution,
-                    "_extra_used_aspect_ratio": effective_aspect_ratio,
-                },
-            )
+        effective_model = model or self._model
+
+        # The resolution/aspect_ratio validation below is Seedance-specific (confirmed live against
+        # its own schema) — only applied when Seedance is actually the chosen model, so selecting a
+        # different model (e.g. Veo) isn't silently forced into Seedance's narrower set.
+        if effective_model == self._model:
+            effective_resolution = resolution if resolution in _VALID_RESOLUTIONS else "720p"
+            effective_aspect_ratio = aspect_ratio if aspect_ratio in _VALID_ASPECT_RATIOS else "16:9"
+            if resolution not in _VALID_RESOLUTIONS or aspect_ratio not in _VALID_ASPECT_RATIOS:
+                log.warning(
+                    "replicate_invalid_video_param_fallback",
+                    extra={
+                        "_extra_requested_resolution": resolution,
+                        "_extra_requested_aspect_ratio": aspect_ratio,
+                        "_extra_used_resolution": effective_resolution,
+                        "_extra_used_aspect_ratio": effective_aspect_ratio,
+                    },
+                )
+        else:
+            effective_resolution = resolution
+            effective_aspect_ratio = aspect_ratio
 
         input_payload = {
             "image": io.BytesIO(effective_image_bytes),
@@ -98,10 +119,12 @@ class ReplicateVideoProvider(VideoGenProvider):
         }
         if last_frame_bytes:
             input_payload["last_frame_image"] = io.BytesIO(last_frame_bytes)
+        if generate_audio is not None:
+            input_payload["generate_audio"] = generate_audio
 
         start = time.monotonic()
         try:
-            model_info = await client.models.async_get(self._model)
+            model_info = await client.models.async_get(effective_model)
             version = model_info.latest_version
 
             prediction = await client.predictions.async_create(
@@ -136,7 +159,7 @@ class ReplicateVideoProvider(VideoGenProvider):
         log.info(
             "replicate_generate",
             extra={
-                "_extra_model": self._model,
+                "_extra_model": effective_model,
                 "_extra_bytes": len(video_bytes),
                 "_extra_ms": round((time.monotonic() - start) * 1000, 1),
             },

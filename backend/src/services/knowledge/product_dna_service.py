@@ -52,12 +52,18 @@ Return ONLY JSON:
   "price": number or null,
   "discount_percent": number or null,
   "color": "the product's real, physical color if actually stated/shown (e.g. 'red'), empty string if unclear — this is a genuine product fact, distinct from any brand color guideline",
+  "currency": "the real currency symbol or code actually shown on the page (e.g. '₹', '$', 'INR', 'USD'), empty string if unclear — never assume a currency the page doesn't actually show",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
   "claims_disallowed": ["short phrases"],
   "label_visibility": "a short instruction, or empty string if not applicable"
 }
+
+Real, live-found bug this closes (2026-10-05): a real scrape showed "₹164900.00, ₹26316.00/mo."
+(an EMI line) copied verbatim into `must_show` alongside the SAME price already captured in the
+numeric `price` field. Price/EMI/currency text belongs ONLY in `price`/`currency` above — never
+duplicate it into `must_show` as if it were an ordinary descriptive phrase.
 """
 
 
@@ -88,7 +94,7 @@ async def _extract_product_facts(page: ScrapedPage) -> dict:
 def _build_index_text(name: str, attributes: dict) -> str:
     return (
         f"Product: {name}\nSummary: {attributes.get('summary', '')}\n"
-        f"Price: {attributes.get('price')}\nDiscount: {attributes.get('discount_percent')}%\n"
+        f"Price: {attributes.get('currency', '')}{attributes.get('price')}\nDiscount: {attributes.get('discount_percent')}%\n"
         f"Color: {attributes.get('color', '')}\n"
         f"Must show: {attributes.get('must_show', [])}\nNever show: {attributes.get('never_show', [])}\n"
         f"Claims allowed: {attributes.get('claims_allowed', [])}\n"
@@ -110,12 +116,17 @@ Return ONLY JSON:
 {
   "summary": "one or two sentences describing the product for generation purposes",
   "color": "the product's real, physical color if actually stated, empty string if unclear",
+  "currency": "the real currency symbol or code actually given (e.g. '₹', '$', 'INR', 'USD'), empty string if no price/currency was actually stated",
   "must_show": ["short phrases"],
   "never_show": ["short phrases"],
   "claims_allowed": ["short phrases"],
   "claims_disallowed": ["short phrases"],
   "label_visibility": "a short instruction, or empty string if not applicable"
 }
+
+Real, live-found bug this closes (2026-10-05): never duplicate a price/EMI/currency string (e.g.
+"₹164900.00, ₹26316.00/mo.") into `must_show` as if it were a generic phrase — a real price belongs
+ONLY in the numeric `price`/`currency` fields above, never copy-pasted as raw text into `must_show`.
 """
 
 # Real requirement (2026-09-25, explicit user ask): a session's chat can describe several DISTINCT
@@ -236,6 +247,11 @@ def _build_attributes(
         "price": price if price is not None else existing.get("price"),
         "discount_percent": discount_percent if discount_percent is not None else existing.get("discount_percent"),
         "color": str(color or parsed.get("color") or existing.get("color", "")),
+        # Real, live-found bug (2026-10-05): the frontend used to hardcode a "$" prefix on every
+        # displayed price regardless of the product's real currency — a real scrape of an Indian
+        # site showed both "$164900" (hardcoded) and "₹164900.00..." (the real currency, leaked
+        # into `must_show` instead). Stored as a real fact now, same fallback chain as `color`.
+        "currency": str(parsed.get("currency") or existing.get("currency", "")),
         "must_show": _str_list(parsed.get("must_show")) or existing.get("must_show", []),
         "never_show": _str_list(parsed.get("never_show")) or existing.get("never_show", []),
         "claims_allowed": _str_list(parsed.get("claims_allowed")) or existing.get("claims_allowed", []),
@@ -469,7 +485,12 @@ class ProductDnaService:
         product's id/name (same construction pattern `canvas/routes.py`'s `create_element` uses)."""
         emit("crawler_started", session_id=session.id, url=url, url_type="product")
         try:
+            # Real per-stage progress (2026-10-05, explicit user ask: "show what's being
+            # extracted so the user doesn't feel left out") — `crawler_step` used to only ever
+            # fire on failure; these are the real stages this function actually goes through.
+            emit("crawler_step", session_id=session.id, url=url, url_type="product", status="scraping_page")
             page = await _scrape_with_fallback(url)
+            emit("crawler_step", session_id=session.id, url=url, url_type="product", status="extracting_facts")
             facts = await _extract_product_facts(page)
             name = str(facts.get("name") or "Unnamed product").strip()[:255] or "Unnamed product"
             attributes = _build_attributes(
@@ -481,14 +502,33 @@ class ProductDnaService:
                 attributes=attributes, indexed=False,
             )
             product = await self._products.add(product)
-            await get_knowledge_provider().index_document(
-                collection=f"product_{session.user_id}", doc_id=product.id,
-                text=_build_index_text(name, attributes),
-            )
-            product.indexed = True
-            product = await self._products.add(product)
+            # Real, live-found bug (2026-10-05, fidelity audit): this call used to be inside the
+            # same unguarded try/except as everything else in this method — if it raised (a
+            # transient embedding/vector-store failure), the exception propagated all the way out
+            # to `crawl_runner.py`, which never got to run its own session-linking step. The
+            # product row above was ALREADY committed, so the result was a real, permanently
+            # orphaned row: it exists in `product_profiles` but is never added to
+            # `session.brief["product_profile_ids"]`, making it invisible everywhere in the UI —
+            # functionally "gone" from the user's point of view. Indexing is a genuinely secondary
+            # enrichment step (search/retrieval), not required for the product to exist or be
+            # usable — its failure must never block the session link, same resilience pattern the
+            # brand path already uses for its own logo/font downloads.
+            try:
+                await get_knowledge_provider().index_document(
+                    collection=f"product_{session.user_id}", doc_id=product.id,
+                    text=_build_index_text(name, attributes),
+                )
+                product.indexed = True
+                product = await self._products.add(product)
+            except Exception as exc:
+                log.warning(
+                    "product_crawl_indexing_failed",
+                    extra={"_extra_product_id": product.id, "_extra_error": str(exc)},
+                )
 
             element_ids: list[str] = []
+            if page.image_urls[:_MAX_CRAWLED_IMAGES]:
+                emit("crawler_step", session_id=session.id, url=url, url_type="product", status="downloading_images")
             for image_url in page.image_urls[:_MAX_CRAWLED_IMAGES]:
                 try:
                     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -527,7 +567,7 @@ class ProductDnaService:
             emit("crawler_completed", session_id=session.id, url=url, url_type="product", product_profile_id=product.id)
             return product, element_ids
         except Exception as exc:
-            emit("crawler_step", session_id=session.id, url=url, status="failed", error=str(exc))
+            emit("crawler_step", session_id=session.id, url=url, url_type="product", status="failed", error=str(exc))
             raise
 
     async def update_product_attributes(

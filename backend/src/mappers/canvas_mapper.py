@@ -51,7 +51,17 @@ _DESCRIPTION_FIELDS = (
 )
 
 
-def _description(entity: CanvasElementModel) -> str | None:
+# Real, live-found performance bug (2026-10-05, fidelity audit): `verified_description` is a
+# vision-model essay (`session_service.py`'s `_describe_uploaded_image` asks for "detail", capped
+# at 700 tokens) — several hundred words per image element, sent in FULL on every single canvas
+# list fetch for every image element. Server-side LLM grounding reads the full, untruncated text
+# directly from `metadata_json`/`core/element_context.py` (bypassing this mapper entirely) — this
+# cap only shrinks the hot, frequently-polled HTTP list response, it changes nothing about what the
+# backend itself uses for grounding.
+_LIST_DESCRIPTION_MAX_CHARS = 300
+
+
+def _description(entity: CanvasElementModel, *, truncate: bool = False) -> str | None:
     """A real, short, honest label for what this element actually IS (2026-09-22, per an explicit
     user ask: "label everything properly and relative to what's generated") — canvas tiles and the
     Elements panel previously showed only a generic `element_type` ("image"/"video") with no
@@ -61,20 +71,25 @@ def _description(entity: CanvasElementModel) -> str | None:
     of the element's own real recorded metadata fields actually has content, in priority order —
     never fabricated, never guessed; returns None only if genuinely nothing was ever recorded."""
     meta = entity.metadata_json or {}
+    value: str | None = None
     for field in _DESCRIPTION_FIELDS:
-        value = meta.get(field)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    label = meta.get("label")
-    if isinstance(label, str) and label.strip():
-        return label.strip().replace("_", " ")
-    return None
+        candidate = meta.get(field)
+        if isinstance(candidate, str) and candidate.strip():
+            value = candidate.strip()
+            break
+    if value is None:
+        label = meta.get("label")
+        if isinstance(label, str) and label.strip():
+            value = label.strip().replace("_", " ")
+    if value is not None and truncate and len(value) > _LIST_DESCRIPTION_MAX_CHARS:
+        value = value[:_LIST_DESCRIPTION_MAX_CHARS].rstrip() + "…"
+    return value
 
 
 class CanvasMapper:
     @staticmethod
     async def _build_response(
-        entity: CanvasElementModel, meta_by_ref: dict[str, AssetMetadataModel]
+        entity: CanvasElementModel, meta_by_ref: dict[str, AssetMetadataModel], *, truncate_description: bool = False
     ) -> CanvasElementResponse:
         meta = meta_by_ref.get(entity.storage_ref) if entity.storage_ref else None
         return CanvasElementResponse(
@@ -92,7 +107,7 @@ class CanvasMapper:
             last_comment=(entity.metadata_json or {}).get("comment"),
             compliance_status=entity.compliance_status,
             text_content=await _text_content(entity, meta),
-            description=_description(entity),
+            description=_description(entity, truncate=truncate_description),
             alignment_warning=(entity.metadata_json or {}).get("alignment_warning"),
             product_id=entity.product_id,
             product_name=entity.product_name,
@@ -115,9 +130,15 @@ class CanvasMapper:
         # instead — `asyncio.gather` below is now safe: building each response from the shared
         # dict involves no further DB connections at all, only an occasional Cloudinary bytes
         # fetch (httpx, not a DB session) for the rare genuine text-asset element.
+        #
+        # `truncate_description=True` (2026-10-05, fidelity audit): this is the hot, frequently-
+        # polled list endpoint (every canvas load, every 4s DNA-tab poll, every compliance-status
+        # poll) — a multi-hundred-word vision-model essay per image element, repeated on every one
+        # of those fetches, was real, measured payload bloat. `to_response` (single-element fetch)
+        # keeps the full text; nothing server-side reads descriptions through this mapper anyway.
         refs = [e.storage_ref for e in entities if e.storage_ref]
         meta_by_ref = await get_metadata_batch(refs)
         elements = await asyncio.gather(
-            *(CanvasMapper._build_response(e, meta_by_ref) for e in entities)
+            *(CanvasMapper._build_response(e, meta_by_ref, truncate_description=True) for e in entities)
         )
         return CanvasStateResponse(session_id=session_id, elements=list(elements))

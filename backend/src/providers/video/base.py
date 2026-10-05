@@ -27,6 +27,7 @@ class VideoGenProvider(Protocol):
         camera_motion: str | None = None,
         first_frame_bytes: bytes | None = None,
         last_frame_bytes: bytes | None = None,
+        model: str | None = None,
     ) -> VideoResult:
         """
         aspect_ratio and resolution are real, requested parameters — never decoration — but

@@ -10,6 +10,7 @@ from typing import ClassVar
 
 from ...core.element_descriptions import is_real_description
 from ...core.exceptions import ProviderUnavailable
+from ...core.image_quality import merge_negative_prompt
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.replicate_provider import get_image_gen_provider
 from .base import Tool, ToolResult
@@ -19,7 +20,14 @@ from .registry import register_tool
 @register_tool("base_image_generator")
 class BaseImageGeneratorTool(Tool):
     name = "base_image_generator"
-    description = "Generates a still image from a text prompt. Pass reference_storage_ref when a referenced element exists and the new image should be visually grounded in it (image-to-image), instead of only describing it in the prompt."
+    description = (
+        "The default: generates a NEW still image from a text prompt (stylized, illustrated, or "
+        "plain photographic). Use collab_image_generator instead when combining 2+ real reference "
+        "images into one scene; photorealistic_image_generator/high_resolution_image_generator "
+        "instead for an explicitly photorealistic result; image_editor instead for editing an "
+        "EXISTING image. Pass reference_storage_ref to ground this generation in one existing image "
+        "(image-to-image) instead of only describing it in the prompt."
+    )
     input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -27,12 +35,16 @@ class BaseImageGeneratorTool(Tool):
             "aspect_ratio": {
                 "type": "string",
                 "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2"],
-                "default": "1:1",
+                "default": "16:9",
                 "description": "Output aspect ratio.",
             },
             "negative_prompt": {
                 "type": "string",
-                "description": "Elements to avoid in the generated image.",
+                "description": (
+                    "Elements to avoid in the generated image. A quality-baseline exclusion list is "
+                    "applied automatically (see DEFAULT_NEGATIVE_PROMPT) — use this field to add "
+                    "request-specific exclusions on top, not to restate the baseline."
+                ),
             },
             "enable_prompt_expansion": {
                 "type": "boolean",
@@ -155,7 +167,7 @@ class BaseImageGeneratorTool(Tool):
             result = await provider.generate(
                 prompt=prompt,
                 aspect_ratio=aspect_ratio,
-                negative_prompt=str(args["negative_prompt"]).strip() or None if args.get("negative_prompt") else None,
+                negative_prompt=merge_negative_prompt(args.get("negative_prompt")),
                 enable_prompt_expansion=bool(args.get("enable_prompt_expansion", True)),
                 seed=seed,
                 reference_image_bytes=reference_image_bytes,

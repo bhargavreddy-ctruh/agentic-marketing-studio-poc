@@ -176,6 +176,18 @@ class SessionService:
         session = await self._sessions.update(session)
         return SessionMapper.to_response(session)
 
+    async def select_brand(self, session_id: str, *, user_id: str, brand_id: str) -> SessionResponse:
+        """New (2026-10-05, explicit user ask: a brand picker dropdown in the Brand DNA tab) —
+        switches this session to one of the user's own already-scraped/saved brands without
+        re-crawling. Brand ownership itself is verified by the route handler (`BrandDnaService.
+        get_brand`, which already raises Forbidden/NotFound on another user's brand) BEFORE this is
+        ever called — this method only applies an already-verified id, same division of
+        responsibility as every other owned-session mutation here."""
+        session = await self._get_owned_session(session_id, user_id=user_id)
+        session.brand_profile_id = brand_id
+        session = await self._sessions.update(session)
+        return SessionMapper.to_response(session)
+
     async def update_guardrails_enabled(
         self, session_id: str, *, user_id: str, guardrails_enabled: bool
     ) -> SessionResponse:
@@ -217,13 +229,25 @@ class SessionService:
         sessions = await self._sessions.list_for_user(user_id)
         return [SessionMapper.to_response(s) for s in sessions]
 
-    async def list_turns(self, session_id: str, *, user_id: str) -> list[ChatTurnResponse]:
+    async def list_turns(
+        self,
+        session_id: str,
+        *,
+        user_id: str,
+        limit: int | None = None,
+        before_id: str | None = None,
+    ) -> list[ChatTurnResponse]:
         """Real, persisted chat history (2026-09-22) — the actual fix for "the chat forgets
         everything on refresh": every prior turn's real user message, the real accumulated
         "thinking" text streamed live during it, and the real final response, not just the
-        session's current status. Ownership-checked the same way every other session route is."""
+        session's current status. Ownership-checked the same way every other session route is.
+
+        `limit`/`before_id` (2026-10-05, chat lazy-load) — the chat panel's initial render now
+        asks for only the most recent handful of turns instead of the whole history, then pages
+        further back on demand (see `ChatTurnRepository.list_for_session`'s own docstring). Both
+        default to None/unset so every other caller is unaffected."""
         await self._get_owned_session(session_id, user_id=user_id)
-        turns = await self._chat_turns.list_for_session(session_id)
+        turns = await self._chat_turns.list_for_session(session_id, limit=limit, before_id=before_id)
         
         referenced_ids = set()
         for t in turns:
@@ -503,12 +527,17 @@ class SessionService:
         self, session: SessionModel, *, user_message: str, referenced_element_ids: list[str] | None = None,
         target_product_id: str | None = None, start_new_product: bool = False,
     ) -> SessionResponse:
-        # The direct_fix route needs something to act on — the most recently produced element by
-        # default (Memory.md, Phase 3 conformance audit), or the one the user explicitly picked in
-        # the UI ("reference an element in chat") when they named one that's still real — a stale
-        # or unknown id just falls back to the default rather than erroring the whole turn.
+        # The direct_fix route needs something to act on. Prefer the one the user explicitly picked
+        # in the UI ("reference an element in chat") — a stale or unknown id just falls back rather
+        # than erroring the whole turn. Real, live-found bug (user report): silently defaulting to
+        # "the most recently produced element" whenever NOTHING was explicitly referenced caused a
+        # referenced-but-wrong product to be silently edited (cross-product confusion) once more than
+        # one element existed on the canvas. Only auto-pick a target when there's no real ambiguity —
+        # exactly one existing element — otherwise leave it unset so Ideation's own
+        # "MULTIPLE ELEMENTS ON CANVAS" prompt (`ideation_service.py`) asks which one, instead of
+        # guessing.
         existing_elements = await self._canvas.list_for_session(session.id)
-        latest_element = existing_elements[-1] if existing_elements else None
+        latest_element = existing_elements[-1] if len(existing_elements) == 1 else None
         referenced_elements = []
         if referenced_element_ids:
             for rid in referenced_element_ids:
@@ -571,35 +600,43 @@ class SessionService:
 
         brief_for_graph = dict(session.brief)
         brief_for_graph["user_id"] = session.user_id
-        # Real conversation history (2026-09-22, per an explicit user ask: "make sure the llm has
-        # chat history context cache, so it can work in a session") — a real, live-found gap: this
-        # app already persists every real turn verbatim (`ChatTurnModel`, `self._chat_turns`), but
-        # NOTHING ever fed it back into an actual LLM call — every ideation/orchestrator call was a
-        # single stateless message built from `brief.idea`, a summary the model itself re-writes
-        # every turn. `brief.idea` staying lossy was a deliberate, documented tradeoff (the
-        # "numeric erosion" bug — resummarizing repeatedly lost real figures like "$1500/12% off")
-        # but the fix for THAT bug never replaced real memory with something better, it just
-        # accepted losing it. Real, VERBATIM past turns (never re-summarized, so they can't erode
-        # the same way) are read here and handed to `ideation_service.py`/`orchestrator.py` as a
-        # real scratch field — capped to the most recent 6 turns to bound token growth on a
-        # long-lived session (`test_set`'s real 26-element session made this a genuine concern, not
-        # a hypothetical one). Read-only and never persisted into `session.brief` (recomputed fresh
-        # from the real `chat_turns` table every turn, same treatment as `approval_mode` above).
-        recent_turns = await self._chat_turns.list_for_session(session.id)
-        if recent_turns:
-            brief_for_graph["_recent_chat_history"] = [
-                {"user": t.user_text, "assistant": t.assistant_text or ""}
-                for t in recent_turns[-6:]
-            ]
-        
-        # Real, semantic LLM context caching (2026-09-23) — retrieves older, relevant turns from LlamaIndex
-        # so the LLM doesn't lose long-term memory beyond the strict 6-turn rolling window above.
+        # Scratch, read-only — threaded through so the `recall` tool (`services/tools/recall.py`,
+        # 2026-10-05) can scope its lookup to this session; `runner.py`'s shared tool-context
+        # builder reads it the same way it already reads `user_id`/`product_id`.
+        brief_for_graph["session_id"] = session.id
+        # Tiered conversation memory (2026-10-05, explicit user design — Ledger/Window/Digests/
+        # Recall/caching) — replaces the old flat, UNCAPPED "last 6 turns" slice (no token budget,
+        # no masking of old long text) plus an UNCONDITIONAL semantic-memory call on every single
+        # turn regardless of whether anything needed recalling. `brief.idea` staying lossy —
+        # resummarized every turn, eroding real figures like "$1500/12% off" — is the exact bug
+        # Digests fix: a span of turns is summarized ONCE, from the real turns it covers, not
+        # re-derived from an already-lossy prior summary. See `conversation_memory.py`'s own module
+        # docstring for the full design; `available_context_block` (`leads/base.py`) is what
+        # actually renders the Ledger/Digests into a specialist's context — this block only
+        # computes and persists the data.
+        from ..knowledge.conversation_memory import build_ledger, build_window, update_digests
+
+        all_turns = await self._chat_turns.list_for_session(session.id)
+        window, dropped = build_window(all_turns)
+        if window:
+            brief_for_graph["_recent_chat_history"] = window
+
+        existing_digests = session.brief.get("memory_digests") or []
+        updated_digests = await update_digests(existing_digests, dropped)
+        ledger = build_ledger(existing_elements, current_focus_id=latest_element.id if latest_element else None)
+        # Explicit dict reassignment, not in-place mutation (`session.brief["x"] = y`) — a plain
+        # JSON column (not `MutableDict.as_mutable`), so SQLAlchemy's dirty-tracking doesn't
+        # reliably pick up an in-place change (the exact class of bug already documented/fixed
+        # elsewhere in this file for other session.brief writes).
+        session.brief = {**session.brief, "memory_digests": updated_digests, "ledger": ledger}
+        brief_for_graph["memory_digests"] = updated_digests
+        brief_for_graph["ledger"] = ledger
+
+        # `recall` (`services/tools/recall.py`) replaces the old unconditional semantic-memory
+        # call above — a real on-demand tool a specialist calls only when the Ledger/Window/
+        # Digests it already has don't answer the question, not something paid for every turn.
         from ..knowledge.chat_memory_service import ChatMemoryService
         chat_memory = ChatMemoryService()
-        if user_message:
-            retrieved_memory = await chat_memory.get_relevant_history(session.id, user_message)
-            if retrieved_memory:
-                brief_for_graph["_retrieved_memory"] = retrieved_memory
         # Read-only, sourced from the session's own column, never persisted back into brief JSON
         # (Memory.md, Phase 4: "approve" mode's per-stage pipeline gates).
         brief_for_graph["approval_mode"] = session.approval_mode
@@ -790,6 +827,15 @@ class SessionService:
         # the full, persisted, UI-editable set above is untouched.
         turn_guardrails = scope_to_product(guardrail_set, resolved_product_id)
         set_current_guardrails_xml(turn_guardrails.render() if session.guardrails_enabled else "")
+
+        # Turn-level specialist-call budget (Part 8, fidelity audit 2026-10-05) — a circuit breaker
+        # across every entry point below (direct resume, full_video resume, dynamic-executor
+        # resume, or a fresh `graph.ainvoke`), generous enough for the real pipeline depth after
+        # this session's hop reductions (happy path ~2-6 calls; a full multi-shot video with
+        # retries is the worst real case, comfortably under this) but real enough to stop a
+        # pathological loop from silently burning spend across resumed turns.
+        from ..specialists.runner import start_turn_budget
+        start_turn_budget(40)
 
         # Resuming a paused clarification question (2026-09-30, explicit user ask: "multi step
         # plans can also stop and ask, doesn't have to be restart") — invokes the SAME paused node
@@ -1061,6 +1107,25 @@ class SessionService:
                     style_note = (result.get("metadata") or {}).get("style_note")
                     if style_note:
                         prompt = IdeationPrompt(message=style_note, options=[], allow_free_text=True)
+                    else:
+                        # Partner-style narration (Part 7, fidelity audit 2026-10-05): a plain
+                        # successful generation used to surface nothing beyond the frontend's own
+                        # flat fallback ("Generated — check the canvas") — no record of what was
+                        # actually decided. Build a short, real summary from whatever creative-
+                        # decision fields this result's metadata actually has (varies by Lead) —
+                        # same "real next_prompt even on completed" pattern as the notes above,
+                        # kept to one short line, never a long narrative.
+                        meta = result.get("metadata") or {}
+                        decision_bits = [
+                            b for b in (meta.get("aesthetic_direction"), meta.get("palette_direction"))
+                            if b
+                        ]
+                        if meta.get("shot_count_rendered", 1) > 1:
+                            decision_bits.append(f"{meta['shot_count_rendered']} shots, stitched into one video")
+                        if decision_bits:
+                            prompt = IdeationPrompt(
+                                message=" · ".join(decision_bits), options=[], allow_free_text=True
+                            )
         elif result:
             # A placeholder or error result — surface the message, nothing to persist yet.
             session.status = "error" if result_state.get("error") else "pending"
@@ -1191,12 +1256,22 @@ class SessionService:
             if loaded is None:
                 return None
             image_bytes, mime_type = loaded
-        question = "Describe this image in detail, focusing on the main visual subjects, objects, colors, and setting."
+        # Real, live-found performance bug (2026-10-05, fidelity audit): this result becomes
+        # `verified_description` (`canvas_mapper.py`'s own priority-1 description field) — asking
+        # for "detail" at the shared 700-token default produced several-hundred-word essays per
+        # image, sent in full on every canvas list fetch. Asking for a short, grounded summary
+        # instead (not every other `complete_with_vision` caller — compliance checkers genuinely
+        # need the longer, more exhaustive default; only this one call site, whose output is a
+        # stored, repeatedly-served description, not a one-off QA judgment).
+        question = (
+            "In 2-3 sentences, describe this image's main subject, objects, colors, and setting — "
+            "concise, not exhaustive."
+        )
         if product_name:
             question = (
-                f"This image is expected to show the product '{product_name}'. Describe what you "
-                f"actually see in detail — the main visual subjects, objects, colors, and setting — "
-                f"and note explicitly whether it does or doesn't look like '{product_name}'."
+                f"This image is expected to show the product '{product_name}'. In 2-3 sentences, "
+                f"describe what you actually see — concise, not exhaustive — and state explicitly "
+                f"whether it does or doesn't look like '{product_name}'."
             )
         try:
             result = await complete_with_vision(
@@ -1205,6 +1280,7 @@ class SessionService:
                 image_url=image_url,
                 system="You are a meticulous visual analyzer for a marketing team.",
                 question=question,
+                max_tokens=200,
             )
             return result.text
         except Exception as exc:

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ...core.exceptions import ProviderUnavailable
+from ...core.image_quality import merge_negative_prompt
 from ...core.local_storage import load_asset, save_asset
 from ...core.middleware.logging import get_logger
 from ...providers.image.replicate_provider import get_image_edit_provider
@@ -31,7 +32,11 @@ log = get_logger(__name__)
 @register_tool("image_editor")
 class ImageEditorTool(Tool):
     name = "image_editor"
-    description = "Applies a targeted edit to an existing image, given its storage_ref."
+    description = (
+        "Applies a targeted edit to an EXISTING image (color/lighting/object change, price strike, "
+        "logo correction) — never for generating a new image from scratch (use base_image_generator "
+        "for that) or for drawing legible text onto an image (use text_overlay for that)."
+    )
     input_schema: ClassVar[dict] = {
         "type": "object",
         "properties": {
@@ -94,7 +99,7 @@ class ImageEditorTool(Tool):
                 instruction=instruction,
                 aspect_ratio=requested_aspect_ratio,
                 match_input_image=requested_aspect_ratio is None,
-                negative_prompt=str(args["negative_prompt"]).strip() or None if args.get("negative_prompt") else None,
+                negative_prompt=merge_negative_prompt(args.get("negative_prompt")),
                 enable_prompt_expansion=bool(args.get("enable_prompt_expansion", True)),
                 seed=int(args["seed"]) if args.get("seed") is not None else None,
             )

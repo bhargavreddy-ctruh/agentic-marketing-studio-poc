@@ -143,3 +143,30 @@ async def test_thumbnail_request_with_reference_accepts_dynamic_illustrator_rout
         result = await route(state)
     assert result["route"] == "dynamic"
     assert result["dynamic_plan"][0]["specialist"] == "illustrator"
+
+
+@pytest.mark.asyncio
+async def test_video_request_with_reference_accepts_dynamic_camera_director_route():
+    """Same regression shape as the thumbnail test above, applied to video (Rule 7b-video,
+    2026-10-05): 'make an unboxing video of this' referencing an existing product photo must not
+    be impossible to route to dynamic/camera_director (a single-shot animation of the referenced
+    element), nor forced toward 'full_video' (the heavier multi-shot narrative pipeline, which
+    asks an unrelated duration-clarification question this single-shot ask never needed). Same
+    plumbing-only caveat as above: the real judgment call lives in the orchestrator's prompt."""
+    state = {
+        "user_message": "make an exciting unboxing video of this phone photo",
+        "session_id": "s1",
+        "brief": {
+            "referenced_elements_context": [
+                {"id": "el1", "element_type": "image", "description": "Nothing Phone product shot on white background", "storage_ref": "ref123"}
+            ]
+        },
+    }
+    plan = [{"specialist": "camera_director", "instruction": "Use storage_ref ref123 as source_image_storage_ref to animate it into a single dynamic clip."}]
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "dynamic", "target_specialist": None, "plan": plan})),
+    ):
+        result = await route(state)
+    assert result["route"] == "dynamic"
+    assert result["dynamic_plan"][0]["specialist"] == "camera_director"

@@ -25,7 +25,13 @@ import re
 
 from ...core.exceptions import SpecialistFailed, SpecialistNeedsClarification
 from ..specialists.runner import run_concurrent_specialists, run_specialist_agentic
-from .base import LeadSpec, NarrativePlan, referenced_element_block, stale_campaign_context_block
+from .base import (
+    LeadSpec,
+    NarrativePlan,
+    available_context_block,
+    referenced_element_block,
+    stale_campaign_context_block,
+)
 
 NARRATIVE_LEAD = LeadSpec(
     name="narrative_lead",
@@ -59,22 +65,32 @@ async def run_narrative_lead(*, brief: dict, user_message: str = "") -> Narrativ
 
     planning = await run_specialist_agentic(
         "shot_planner",
-        context=f"Campaign idea:\n{idea}{referenced_element_block(brief)}\n\nBrief so far:\n{json.dumps(brief)}",
+        context=f"Campaign idea:\n{idea}{referenced_element_block(brief)}{available_context_block(brief)}",
     )
     shots = tuple(s for s in (planning.get("shots") or []) if isinstance(s, str) and s.strip())
     if not shots:
         raise SpecialistFailed("shot_planner", "did not produce any shots")
     overall_story = planning.get("overall_story", "")
 
-    results = await run_concurrent_specialists({
-        "script_writer": run_specialist_agentic(
-            "script_writer",
-            context=f"Shot list:\n{json.dumps(shots)}\n\nOverall story:\n{overall_story}",
-        ),
-        "pacing_editor": run_specialist_agentic("pacing_editor", context=f"Shot list:\n{json.dumps(shots)}"),
-    })
-    script, pacing = results["script_writer"], results["pacing_editor"]
-    script_line = script.get("script_line") if script.get("has_script") else None
+    # Real, live-found gap (2026-10-05 fidelity audit): a script the user already approved on a
+    # prior turn ("turn this into a video") used to be silently regenerated from scratch by
+    # Script Writer here — a different script than the one the user actually saw and approved.
+    # Reuse it verbatim when present, same way `illustrator` reuses an already-resolved product
+    # photo rather than re-deriving it.
+    approved_script = (brief.get("approved_script") or "").strip()
+    if approved_script:
+        pacing = await run_specialist_agentic("pacing_editor", context=f"Shot list:\n{json.dumps(shots)}")
+        script_line = approved_script
+    else:
+        results = await run_concurrent_specialists({
+            "script_writer": run_specialist_agentic(
+                "script_writer",
+                context=f"Shot list:\n{json.dumps(shots)}\n\nOverall story:\n{overall_story}",
+            ),
+            "pacing_editor": run_specialist_agentic("pacing_editor", context=f"Shot list:\n{json.dumps(shots)}"),
+        })
+        script, pacing = results["script_writer"], results["pacing_editor"]
+        script_line = script.get("script_line") if script.get("has_script") else None
 
     # The real `text_card_writer` call Shot Planner's own prompt now requires (2026-09-22) — None
     # only if the specialist genuinely skipped it; `motion_lead.py` falls back honestly.

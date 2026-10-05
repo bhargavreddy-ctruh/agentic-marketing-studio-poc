@@ -36,3 +36,19 @@ These inputs are synchronized via `PUT /api/v1/sessions/{session_id}/dna` and ar
 ## Rule Granularity (2026-09-25)
 - The LLM extraction process within `GuardrailService` now generates an array of distinct, atomic rules instead of a single, monolithic rule, ensuring that Brand colors, tone, and campaign goals are tracked independently by agents.
 
+## Real-Time Scraping, Currency, Per-User Brand Selection (2026-10-05)
+
+- Crawling a URL now requires (or infers) an explicit `url_type: "brand" | "product"` rather than
+  relying purely on `detect_url_type()` guessing — brand and product can be crawled simultaneously,
+  each with its own independent live progress bar, each stage (`scraping_page`, `extracting_facts`,
+  `downloading_images`/`downloading_logo`/`downloading_fonts`) surfaced as a real SSE event.
+- `ProductProfileModel.attributes` gained a real `currency` field (e.g. `"INR"`/`"USD"`), extracted
+  by the same LLM pass as `price`/`must_show`/etc. — fixes mixed `$`/`₹` symbols appearing on the
+  same product; `product_lookup` now returns these real structured `attributes` directly, not only
+  a lossy RAG summary string.
+- A session can now be pointed at any of the current user's own previously-scraped brands via
+  `PUT /{session_id}/brand` (`SessionService.select_brand()`), surfaced as a dropdown in the Brand
+  DNA tab — strictly scoped to that user's own brands, never cross-user.
+- Full root-cause detail (the SSE-drop bug, the concurrent-crawl race, and the Strict Mode UI bug
+  found along the way) is in `Memory.md`'s "Brand/Product DNA Scraping" entry, not repeated here.
+

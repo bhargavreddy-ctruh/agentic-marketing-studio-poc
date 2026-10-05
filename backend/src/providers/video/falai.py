@@ -39,6 +39,7 @@ class FalAiVideoProvider(VideoGenProvider):
         camera_motion: str | None = None,
         first_frame_bytes: bytes | None = None,
         last_frame_bytes: bytes | None = None,
+        model: str | None = None,
     ) -> VideoResult:
         if not self._api_key:
             raise ProviderUnavailable("falai", "FALAI_API_KEY is not set")

@@ -69,8 +69,8 @@ export interface CanvasState {
   elements: CanvasElement[];
 }
 
-export async function getCanvasState(sessionId: string): Promise<CanvasState> {
-  return request<CanvasState>(`/api/v1/canvas/${sessionId}`);
+export async function getCanvasState(sessionId: string, signal?: AbortSignal): Promise<CanvasState> {
+  return request<CanvasState>(`/api/v1/canvas/${sessionId}`, signal ? { signal } : undefined);
 }
 
 export async function regenerateElement(elementId: string, instruction?: string): Promise<CanvasElement> {

@@ -38,7 +38,9 @@ class SessionRepository(Protocol):
 
 class ChatTurnRepository(Protocol):
     async def add(self, turn: ChatTurnModel) -> ChatTurnModel: ...
-    async def list_for_session(self, session_id: str) -> list[ChatTurnModel]: ...
+    async def list_for_session(
+        self, session_id: str, *, limit: int | None = None, before_id: str | None = None
+    ) -> list[ChatTurnModel]: ...
 
 
 class CanvasRepository(Protocol):

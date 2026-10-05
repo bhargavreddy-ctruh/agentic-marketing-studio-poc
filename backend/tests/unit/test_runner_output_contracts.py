@@ -31,12 +31,14 @@ def _fake_llm(*responses: str) -> AsyncMock:
 
 @pytest.mark.asyncio
 async def test_missing_required_field_triggers_one_bounded_retry_then_succeeds():
-    # reference_curator requires ("reference_summary",) — first reply omits it, second supplies it.
+    # reference_curator requires ("reference_summary", "text_card_storage_ref") — first reply
+    # omits both, second supplies them.
     with patch(
         "src.services.specialists.runner.get_llm_provider",
         return_value=_fake_llm(
             '{"foo": "bar"}',
-            '{"reference_summary": "a real summary of gathered references"}',
+            '{"reference_summary": "a real summary of gathered references", '
+            '"text_card_storage_ref": "storage://card.txt"}',
         ),
     ):
         result = await run_specialist_agentic("reference_curator", context="find references")

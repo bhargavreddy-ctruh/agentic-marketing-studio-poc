@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ...core.exceptions import ProviderUnavailable
+from ...core.image_quality import merge_negative_prompt
 from ...core.local_storage import load_asset, save_asset
 from ...providers.image.qwen_edit_plus_provider import get_collab_image_provider
 from .base import Tool, ToolResult
@@ -51,6 +52,13 @@ class CollabImageGeneratorTool(Tool):
                 "type": "string",
                 "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "2:1", "1:2"],
                 "description": "Output aspect ratio. Defaults to matching the first reference image if not set.",
+            },
+            "negative_prompt": {
+                "type": "string",
+                "description": (
+                    "Elements to avoid in the combined image. A quality-baseline exclusion list is "
+                    "applied automatically — use this field for request-specific exclusions on top."
+                ),
             },
             "seed": {
                 "type": "integer",
@@ -88,6 +96,7 @@ class CollabImageGeneratorTool(Tool):
                 prompt=prompt,
                 reference_images=reference_images,
                 aspect_ratio=str(args["aspect_ratio"]).strip() if args.get("aspect_ratio") else None,
+                negative_prompt=merge_negative_prompt(args.get("negative_prompt")),
                 seed=int(args["seed"]) if args.get("seed") is not None else None,
             )
         except ProviderUnavailable as exc:

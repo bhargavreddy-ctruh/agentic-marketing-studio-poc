@@ -211,7 +211,7 @@ def load_all_specialists() -> None:
         # needs the same real grounding every other product-facing specialist already has.
         allowed_tools=("base_video_generator", "brand_kit_lookup", "product_lookup"),
         tier=ModelTier.TIER_3,
-        description="Generates NEW raw video footage/clips from scratch (full_video pipeline's Motion Lead step) — this is the specialist for 'make a video of X', not video_editor_cutter.",
+        description="Generates NEW raw video footage/clips — this is the specialist for 'make a video of X', not video_editor_cutter. Runs as the full_video pipeline's Motion Lead step (animating a Scene-Lead-built frame), AND can be used standalone as the sole step of a 'dynamic' plan to animate an existing referenced element directly into a single clip (e.g. 'make an unboxing video of this photo') — see orchestrator.py Rule 7b-video.",
         required_output_fields=("motion_prompt", "camera_motion", "aspect_ratio"),
     ))
     register_specialist(SpecialistSpec(
@@ -263,7 +263,9 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="script_writer",
         prompt_file="script_writer.md",
-        allowed_tools=("brand_kit_lookup", "product_lookup", "text_card_writer"),
+        # recall added 2026-10-05 (tiered conversation memory) — an on-demand lookup for an exact
+        # earlier decision/number the current window+digests summary doesn't already carry.
+        allowed_tools=("brand_kit_lookup", "product_lookup", "text_card_writer", "recall"),
         tier=ModelTier.TIER_1,
         description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio) — as a real canvas text card.",
         required_output_fields=("has_script", "script_line", "text_card_storage_ref"),
@@ -381,7 +383,9 @@ def load_all_specialists() -> None:
         # (words, pace, acoustic mood) when asked to describe one, not just a guess from its label.
         # product_lookup added 2026-10-05 (fidelity audit) — narration/description of a linked
         # product should state real facts, not an invented guess.
-        allowed_tools=("text_card_writer", "brand_kit_lookup", "audio_transcriber", "product_lookup"),
+        # recall added 2026-10-05 (tiered conversation memory) — an on-demand lookup for an exact
+        # earlier decision/number the current window+digests summary doesn't already carry.
+        allowed_tools=("text_card_writer", "brand_kit_lookup", "audio_transcriber", "product_lookup", "recall"),
         tier=ModelTier.TIER_2,
         description="Writes a real text card describing an existing image/video/audio element, or a narrative/summary in writing — never generates or edits an image/video/audio asset itself. The right target whenever the user asks for something to be DESCRIBED, narrated, or summarized in text, not generated/edited as a new media asset.",
         required_output_fields=("narration_text", "text_card_storage_ref"),

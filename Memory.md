@@ -5025,3 +5025,289 @@ Overhauled `ChatPanel.tsx` to match the target modern, sleek dark mode aesthetic
 - Verified: `pytest tests/unit tests/integration -q` (44 passed), `ruff check` clean, both tools
   confirmed to register and produce valid OpenAI-style tool schemas via a live import check.
 
+
+## Brand/Product DNA Scraping — Real-Time Visibility, Concurrency, Currency (2026-10-05)
+
+- User reports, in order: DNA was "scraping but not visible real-time to save or edit"; brand and
+  product shared a single progress bar so they couldn't scrape simultaneously; no preview before
+  save; data vanished on reload; a product/brand link entered during workflow CREATION never
+  reflected in the resulting session; mixed `$`/`₹` currency symbols on the same product; and doubt
+  about whether product facts actually reached the LLM ("i asked it to create product ads, it
+  didnt show any of those").
+- **Root cause 1 — SSE events for every crawl were silently dropped, entirely.**
+  `services/crawlers/crawl_runner.py` never called `core/events.py`'s `set_current_session()`
+  before emitting — every `crawler_step`/`crawler_started`/`crawler_completed` event was emitted
+  into a session_id-less void (`emit()` no-ops without it). A one-line fix with a huge effect: it's
+  why nothing ever appeared to "scrape in real-time" no matter what the frontend did.
+- **Root cause 2 — brand and product crawls raced on the same session brief.** Two independently
+  opened `async_session_factory()` contexts doing a read-mutate-commit on `session.brief` is a
+  classic lost-update race; one crawl's write silently clobbered the other's. Fixed with a
+  per-session `asyncio.Lock` (`_session_locks: dict[str, asyncio.Lock]`) plus `await
+  db.refresh(session)` inside the lock — the refresh forces a true fresh read past SQLAlchemy's
+  own identity-map cache, not just a re-query that could still return stale cached state.
+- **Root cause 3 — URL-type misclassification.** `apple.com/airpods-pro/` crawled as a "brand," not
+  a "product," because nothing told the backend which the user meant. Added `url_type: Literal
+  ["brand", "product"] | None` to `CrawlRequest`/the route, threaded through to
+  `run_crawl_and_ingest(..., url_type=...)`; `page.tsx`'s workflow-creation form and
+  `DNASection.tsx`'s per-tab crawl bars now both pass it explicitly instead of relying on
+  `detect_url_type()` guessing.
+- **Single shared progress bar → per-kind state.** `DNASection.tsx` rewritten: `crawlUrlInput`/
+  `crawling` (singular) became `Record<"brand" | "product", ...>`-keyed state
+  (`crawlUrlInputs`/`crawling`/`crawlStatus`), each with its own crawl-scoped SSE subscription
+  filtered by `event.url`, so brand and product can genuinely run at once with independent bars.
+- **Real extraction-stage progress, not silence.** Added real `crawler_step` emits at each actual
+  stage (`scraping_page`, `extracting_facts`, `downloading_images`/`downloading_logo`/
+  `downloading_fonts`) in both `product_dna_service.py` and `brand_dna_service.py` — a Python regex
+  script added `url_type="brand"`/`"product"` to all 9 call sites in one pass (the frontend's
+  `kind` filter silently discarded any event missing it — a second, independent bug on top of the
+  first, caught only by checking backend logs against what the UI showed).
+- **Mixed currency, two independent causes.** The extraction LLM was dumping raw EMI/price text
+  into `must_show` instead of the structured `price` field; separately, the frontend hardcoded a
+  literal `$` in a couple of places (`DNASection.tsx`, `discount_math_calculator.py`'s overlay
+  text). Added a real `currency` field to both DNA services' extraction schema and
+  `_build_attributes()` output, wired through `product.ts`'s `ProductAttributes`, and replaced
+  every hardcoded `$` with `p.attributes.currency || ""`.
+- **`product_lookup` only ever returned lossy RAG prose, never real structured facts.** Added a
+  direct DB fetch (`SqliteProductRepository(db).get(product_id)`) alongside the existing semantic
+  summary, returning real `attributes` (price/must_show/currency/etc.) when `product_id` resolves
+  — and made the call MANDATORY (not advisory) in `illustrator.md`/`overlay_artist.md` first, later
+  generalized to every product-facing specialist (see the next section).
+- **Brand picker.** Explicit user ask: a dropdown in Brand DNA to pick from the user's own
+  previously-scraped brands, strictly per-user (ownership-checked the same way every other session
+  route is) — `PUT /{session_id}/brand` + `SessionService.select_brand()` +
+  `DNASection.tsx`'s brand `<select>`.
+- **Two React Strict Mode double-invoke bugs, both caught via live browser testing, not by
+  reasoning about the code:**
+  - `app/studio/[sessionId]/page.tsx`'s `?crawling=brand,product` banner effect called
+    `router.replace()` to strip its own query param — Strict Mode's second invocation then read an
+    already-empty `searchParams`, leaving an aborted SSE connection and a banner stuck on
+    "Starting…" forever. Fixed by capturing `searchParams.get("crawling")` ONCE via a lazy
+    `useState` initializer, so the second invocation reads the captured value, not `searchParams`
+    again.
+  - (Documented for completeness — same root cause class, found separately in the canvas
+    performance work below.)
+- Canvas images from a completed crawl required a manual page reload to appear — no refresh signal
+  was ever wired from `DNASection.tsx` to the canvas. Fixed by calling the existing
+  `onProductCrawled?.()`/canvas-refresh callback on crawl completion.
+- Verified live throughout: `apple.com/airpods-pro/` crawling as "product" not "brand" after the
+  url_type fix; both bars progressing independently with real stage text; canvas tiles appearing
+  without a reload; a product's price rendering in its own real currency; `pytest tests/unit
+  tests/integration -q` green after every step.
+
+## Canvas/Assets Load Performance + Precise, Non-Bloated LLM Context Everywhere (2026-10-05)
+
+- User report: `studio/efbbc66e246449f6a5eb6dd9ae094d98`'s elements/assets took a long time to
+  load, plus a broader ask — every LLM should know exactly what parameters/images/facts it has
+  available for the linked product, and every prompt should stay precise rather than bloated, so
+  output actually reflects what's available instead of generating "useless stuff."
+- **Performance — three confirmed, independent causes, no N+1 query pattern involved (the list
+  route was already one batched query plus one batched metadata fetch):**
+  1. Canvas element descriptions are uncapped, multi-paragraph vision-model essays (the
+     `_describe_uploaded_image` prompt asked for a full detailed description at `max_tokens=700`),
+     shipped in FULL on every single canvas list fetch with no truncation path anywhere in
+     `CanvasMapper`. Fixed: `canvas_mapper.py` gained a `_LIST_DESCRIPTION_MAX_CHARS = 300` cap
+     applied only in `to_state_response()` (the hot, frequently-polled list path) — the single-
+     element `to_response()` path stays untruncated, since server-side grounding reads straight
+     from `metadata_json` anyway, bypassing the HTTP mapper entirely. Also shortened the vision
+     prompt itself (now asks for 2-3 sentences) and dropped its `max_tokens` to 200.
+  2. React Strict Mode double-invoking `CanvasView.tsx`'s mount effect raced two fetches against
+     each other (the exact `net::ERR_FAILED` pairs seen live) — fixed with a real
+     `AbortController`, aborted on unmount/re-invoke, matching the same class of bug already found
+     and fixed in `DNASection.tsx`'s crawl-status effect.
+  3. Every canvas tile loaded full original Cloudinary resolution eagerly, no `loading="lazy"`.
+     Added `canvasTileImageUrl()` (`lib/http.ts`) — the same `w_<n>,q_<n>,f_<fmt>` on-the-fly
+     Cloudinary transform `vision.py` already proved out, applied to tile `src` — plus
+     `loading="lazy"` on the tile `<img>`.
+- **Context precision — the structural cause, fixed once instead of per-specialist:** four call
+  sites (`narrative_lead.py`, `motion_lead.py`, `visual_design_lead.py`, `graph.py`'s direct_fix and
+  dynamic-executor paths) were dumping the ENTIRE session `brief` dict verbatim — 20+ keys,
+  including internal scratch fields (`_error`, `_resume_*`, `_element_disambiguation_needed`) —
+  into a specialist's context, uncurated. Added `leads/base.py::available_context_block(brief)`: a
+  short, structured "what's actually available this turn" bulleted summary (is a product resolved
+  and its id for `product_lookup`, up to 3 referenced-element previews with truncated descriptions
+  plus a "...and N more" note, the current deliverable, whether an approved script exists) —
+  explicitly excludes scratch keys. All 4 `json.dumps(brief)` tails replaced with this block.
+  `referenced_element_block()` also now truncates its own long description (same 300-char cap as
+  the canvas fix above) before interpolating it into a prompt — the only other place a long raw
+  vision essay was reaching a specialist uncapped.
+- **Closed the remaining "advisory, not mandatory" grounding gaps** — same proven shape as the
+  illustrator/overlay_artist fix from the DNA-currency round above, generalized everywhere:
+  `script_writer.md` (tightened from conditional to unconditional-first-step), `caption_writer.md`/
+  `headline_writer.md` (new mandatory rule; `headline_writer` also needed `product_lookup` actually
+  added to `registry.py`'s `allowed_tools` — it had none before), `composition_artist.md`/
+  `camera_director.md` (their own prompt text already assumed they could call `product_lookup` —
+  a dangling reference to a tool neither had been granted; fixed both the registry grant and the
+  wording), `tone_calibrator.md` (`brand_kit_lookup` tightened from descriptive to mandatory),
+  `narrator.md` (new mandatory rule + `product_lookup` added to its allowed tools).
+- Verified: `test_canvas_mapper_description_truncation.py` (new, 3 tests) and
+  `test_available_context_block.py` (new, 6 tests) both green; `test_specialist_schema_consistency.py`
+  (21 tests) confirms the `allowed_tools` additions didn't break registry/prompt consistency; full
+  `pytest tests/unit tests/integration -q` green throughout (75, then 78 after the chat-pagination
+  round below); `tsc --noEmit` clean; live in the browser — canvas `/canvas` payload visibly
+  smaller, exactly one successful fetch on mount (no aborted duplicate), tile images requesting the
+  transformed/smaller variant.
+
+## Chat History Lazy-Load (2026-10-05)
+
+- Explicit user ask: "add lazy loading to chat box, but load initial things immidiately" — the
+  same shape of fix as the canvas round above, applied to `ChatPanel.tsx`'s own mount-time
+  `listTurns()` call, which previously fetched a session's ENTIRE chat history unconditionally
+  (confirmed live against a real 92-turn session).
+- **Backend — cursor-based pagination, opt-in only.** `ChatTurnRepository.list_for_session()`
+  gained optional `limit`/`before_id` kwargs — both default `None`, so every other caller (brief/
+  memory-building code elsewhere in `session_service.py`) is completely unaffected and still gets
+  the full ascending history. `limit` alone orders newest-first, takes the limit, then reverses
+  back to ascending — the only way to get "the most recent N" out of a SQL `LIMIT`. `before_id` is
+  a real cursor (looks up that turn's own `created_at`, filters strictly older) rather than an
+  offset — irrelevant for a classic "page 2 skips a row" race here since history being paged
+  backward can't change, but just as cheap and one less thing to get wrong. Threaded through
+  `SessionService.list_turns()` and the `GET /{session_id}/turns?limit=&before_id=` route
+  (`Query(gt=0, le=200)` bounds on `limit`).
+- **Frontend.** `ChatPanel.tsx`'s initial mount now requests `listTurns(sessionId, { limit: 20 })`
+  instead of everything. A new `loadEarlierHistory()` pages in the next batch from
+  `oldestTurnIdRef.current`, triggered either by the explicit "Load earlier messages" button or by
+  scrolling near the top of the message list (`handleHistoryScroll`, `scrollTop < 80`). Scroll
+  position is preserved across the prepend (`scrollTop += scrollHeight_after - scrollHeight_before`)
+  — otherwise the container's natural behavior would yank the view back down right as older content
+  appears above it. The existing "always scroll to the latest message" effect is suppressed for
+  exactly that one prepend (`suppressAutoScrollRef`) so it doesn't fight the restored position.
+- Verified: 3 new integration tests for the repository's pagination (`limit` alone, `before_id`
+  paging, no-args unchanged-full-history), full backend suite green (78 passed), `tsc --noEmit`
+  clean, and live against a real 92-turn session — confirmed via direct SQLite rank lookups that
+  `?limit=20` returned exactly turns 73-92 (the true most recent 20), scrolling to the top fired a
+  real `?limit=20&before_id=...` request, and the container's `scrollHeight`/`scrollTop` both grew
+  by the same amount after the prepend (no visual jump).
+
+## Tiered Conversation Memory — Ledger / Window / Digests / Recall (2026-10-05)
+
+- Explicit user design: a sliding window of raw turns, rolling digests of whatever overflows it,
+  a structured "ledger" of session artifacts, an on-demand `recall` tool instead of blind semantic
+  injection, and prompt-caching-friendly ordering. Evolves this app's own existing, disclosed-weak
+  memory rather than replacing it wholesale: a flat, UNCAPPED "last 6 turns" slice
+  (`session_service.py`) plus an UNCONDITIONAL semantic pull via `ChatMemoryService` on every single
+  turn, regardless of whether anything needed recalling — and the long-documented "numeric erosion"
+  bug, where `brief.idea` is resummarized every turn and loses real figures like "$1500/12% off"
+  along the way.
+- **New `services/knowledge/conversation_memory.py`**: `build_window()` — walks turns newest-first,
+  stops at whichever of `max_messages`(10)/`max_tokens`(8000, ~4 chars/token estimate — no
+  tokenizer dependency added) hits first; the most recent 2 turns stay full-text, older ones in the
+  window get masked to a bounded 300-char form (same cap `leads/base.py`'s own
+  `_truncate_description` already uses for a long description) — never the full `thinking_text`
+  that's often a turn's single longest field. `build_ledger()` — structured working memory built
+  straight from real `CanvasElementModel` rows (id/kind/label/status/last-producing-specialist),
+  deliberately CODE-derived, never LLM-authored, so it can't drift the way re-summarizing "what
+  exists so far" every turn eventually does. `update_digests()` — folds turns that fall out of the
+  window into a currently-open digest, closes it with one real TIER_1 summarization call once it
+  covers 10 turns (written ONCE from the real turns it covers — the actual fix for the erosion bug,
+  since a digest is never re-derived from an already-lossy prior summary the way `brief.idea` is),
+  and merges the oldest closed digests into one "epoch summary" once more than 3 accumulate.
+- **Real, live-found bug caught by its own test, before shipping**: the first version of
+  `update_digests` tried to cache pending turn OBJECTS across calls under a key
+  (`_pending_turns_cache`) that was never actually the key written (`_pending_turns`) — every call
+  silently lost whichever turns an EARLIER call had accumulated for a still-open digest, so a
+  digest that finally closed would summarize only its last incoming batch, not the full span its
+  own `covered_turn_ids` claimed to cover. Fixed by recognizing `dropped_turns` is already the
+  FULL out-of-window history, re-derived fresh from the complete turn list every single call (never
+  an incremental delta) — so every turn a digest might ever need is always already present in that
+  call's own `dropped_turns`, no cross-call turn-object cache needed at all (turns aren't JSON-
+  serializable anyway, and `existing_digests` round-trips through `session.brief`, a plain JSON
+  column — only the turn ids needed to persist, not the objects). Caught by
+  `test_digest_closes_once_threshold_reached_and_summarizes_real_turns`, which asserts the exact
+  turns passed to the summarization call match the digest's full covered span, not just the final
+  batch.
+- **`recall` tool** (`services/tools/recall.py`) replaces the old unconditional semantic call:
+  keyword-first (new `ChatMemoryService.keyword_search()`, a plain SQL `ILIKE` over `chat_turns` —
+  cheap, exact, no index to go stale), falling back to the existing LlamaIndex semantic search only
+  when keyword search comes up empty. Added to `script_writer`/`narrator`'s `allowed_tools`, with an
+  explicitly ADVISORY prompt rule ("only if you genuinely need it... not a step to do by default")
+  — a deliberate choice per the user's own explicit feedback earlier this session ("ai has to use
+  its brain... cannot pre-specify what to do, since its agentic"): recall is on-demand by design,
+  never a forced/mandatory call the way `product_lookup` is for fact-grounding.
+- `session_service.py`'s `_run_turn_inner` persists `memory_digests`/`ledger` into `session.brief`
+  via explicit dict reassignment (`session.brief = {**session.brief, ...}`), not in-place mutation
+  — `SessionModel.brief` is a plain `JSON` column (not `MutableDict.as_mutable`), so an in-place
+  `session.brief["x"] = y` isn't reliably picked up by SQLAlchemy's dirty-tracking, the same lesson
+  already documented for this file's other `session.brief` writes. `session_id` threaded into
+  `brief_for_graph` and `runner.py`'s shared tool-context dict so `recall` can scope itself to the
+  right session.
+- `available_context_block` (`leads/base.py`) renders the Ledger/Digests into the same short,
+  structured "what's available this turn" summary it already builds — a local import of
+  `ledger_block`/`digests_block` from `conversation_memory.py` to avoid a circular import (that
+  module duplicates, rather than imports, `leads/base.py`'s own `_truncate_description` for the
+  same reason).
+- Prompt caching (the fifth design piece) needed no new mechanism: Groq/OpenRouter cache a byte-
+  identical prefix server-side with no client-side `cache_control` markup to write (unlike
+  Anthropic's API) — confirmed by reading the existing call sites that the static system prompt/
+  tool schema already comes before all dynamic context in every specialist call; documented as an
+  ordering discipline in the new module's own docstring rather than built as code.
+- Verified: 16 new tests (`test_conversation_memory.py`) covering window budgeting/masking, ledger
+  determinism, digest open/close/merge (including the regression test for the bug above), and the
+  summarization/merge LLM calls (mocked) plus their honest non-LLM fallback on failure; 4 new tests
+  (`test_recall_tool.py`, real in-memory SQLite for the keyword path) covering a keyword hit never
+  falling through to the semantic path, and both "no session_id"/"no query" degrading honestly
+  instead of erroring. Full suite: `pytest tests/unit tests/integration -q` — 99 passed (up from
+  79), `ruff check`/`py_compile` clean on all touched/new files.
+
+## Video Generation Gets the Same Fixes as Image Generation (2026-10-05)
+
+- Explicit user ask: apply the same routing/reliability fixes already shipped for image generation
+  (the youtube-thumbnail bug) to video generation too — the same shape of problem existed there,
+  just not yet reported.
+- **Routing gap, same root cause as the thumbnail bug, found before it was ever hit live:** Rule
+  7b (the fix that lets "make a youtube thumbnail of this" route to `dynamic`→`illustrator` instead
+  of being forced into `direct_fix`) only ever mentioned `illustrator`/image tools — a request like
+  "make an exciting unboxing video of this photo" would hit the exact same unconditional "any
+  referenced element means edit-in-place" bias Rule 7 used to have for images, with no equivalent
+  escape hatch for video. Added Rule **7b-video**: a single-shot video animating a referenced
+  element routes to `dynamic`→`camera_director` (passing the reference as `source_image_storage_ref`
+  on `base_video_generator`), deliberately lighter than `full_video` (skips the duration-
+  clarification question and multi-shot script/pacing work a quick single clip never needed).
+  Corrected an initial draft of this rule that incorrectly claimed `full_video`'s own pipeline
+  "has no path for grounding on an existing referenced element" — `scene_lead.py`'s `scene_builder`
+  already supports `use_existing_image_as_scene`, so the real distinction is which pipeline fits
+  the request's actual complexity (one clip vs. a genuine multi-shot story), not whether a
+  reference exists at all; the rule's final wording states this correctly.
+- **`camera_director.md`** updated to match `illustrator.md`'s own two fixes from the thumbnail
+  round: a new rule making explicit it can be handed a referenced element directly (not only ever
+  a Scene-Lead-produced frame) when it's the sole step of a `dynamic` plan, a "real creative
+  judgment, not a fixed motion template" rule for an "exciting"/"clickable" ask (mirroring
+  illustrator's own rule 2b — same explicit user feedback this session: "ai has to use its brain...
+  cannot pre-specify what to do, since its agentic"), and the same "Element-block storage_ref is
+  authoritative over a conflicting one in your own instruction text" defense-in-depth line that
+  fixed the hallucinated-storage_ref bug for illustrator.
+- **A real, independently-found bug in `graph.py`'s dynamic executor, directly relevant to both
+  illustrator's and camera_director's reliability as standalone `dynamic`-plan steps:**
+  `generating_specialists` (the set gating the self-correction retry — "did this specialist
+  actually produce an asset?") contained `base_image_generator`/`image_animator`/`upscaler`/
+  `outpainter` — none of which are real registered specialist names (confirmed against
+  `SPECIALIST_REGISTRY` — two are tool names, two don't exist at all) — so `specialist in
+  generating_specialists` could never match `illustrator` or `camera_director`, meaning a real
+  image/video generation that silently produced no asset never triggered the retry this check
+  exists for. Fixed to the actual registered asset-producing specialist names (`illustrator`,
+  `composition_artist`, `camera_director`, `video_editor_cutter`, `sound_designer`,
+  `overlay_artist`, `scene_builder`, `brand_asset_applier`).
+- Verified: `pytest tests/unit tests/integration -q` — 100 passed (new regression test
+  `test_video_request_with_reference_accepts_dynamic_camera_director_route`, mirroring the existing
+  thumbnail test exactly); `ruff check`/`py_compile` clean on every touched file (one pre-existing,
+  unrelated import-order lint issue in `graph.py` confirmed via `git stash` to predate this round —
+  left untouched). No paid generation call was made to verify this live, per explicit instruction
+  this round — a live check (confirm "make an exciting unboxing video of this" routes to
+  `camera_director` and produces a real, non-flat clip) is still worth doing before considering this
+  closed.
+
+## Cross-Check Fixes on the Video Routing Round (2026-10-05)
+
+- User asked to cross-check today's image/video routing work before pushing. An independent
+  Explore pass found 4 real gaps (not caught by the earlier implementation): Rule 6b
+  (orchestrator.py) still only named `illustrator`/`reference_storage_ref`, with no equivalent for
+  `camera_director`/`source_image_storage_ref` even though 7b-video now lets camera_director be
+  "the first generating specialist" too; `illustrator.md`'s own role block never stated it can be
+  the SOLE step of a `dynamic` plan directly handed a referenced element (camera_director.md's did,
+  asymmetrically); `camera_director`'s `registry.py` description still said "full_video pipeline's
+  Motion Lead step" only, not reflecting its new standalone-`dynamic`-step capability (misleading,
+  since this exact string is what the Orchestrator's own `describe_specialists()` shows the
+  model); and `generating_specialists` (`graph.py`) was missing `environment_designer`/
+  `prop_stylist`/`lighting_designer` — all three call the same asset-producing tools
+  (`image_editor`/`base_image_generator`) as `composition_artist`/`scene_builder`, which WERE
+  already in the set. All 4 fixed. Full suite re-verified: 100 passed, no change in count (prompt/
+  description/set-membership fixes only, no new test needed beyond what already covers routing).
