@@ -9,8 +9,8 @@ from ...models.base import async_session_factory
 from ...models.session import SessionModel
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
 from ...repositories.base import SessionRepository
-from ...repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
-from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from ...repositories.postgres.postgres_brand_repository import PostgresBrandRepository
+from ...repositories.postgres.postgres_product_repository import PostgresProductRepository
 
 log = get_logger(__name__)
 
@@ -49,8 +49,8 @@ class GuardrailService:
         brand_json: dict = {}
         products_json: list[dict] = []
         async with async_session_factory() as db:
-            brand_repo = SqliteBrandRepository(db)
-            product_repo = SqliteProductRepository(db)
+            brand_repo = PostgresBrandRepository(db)
+            product_repo = PostgresProductRepository(db)
 
             # Brand: explicit link wins, else first user brand
             brand = None
@@ -68,6 +68,10 @@ class GuardrailService:
             product_ids = list(session.brief.get("product_profile_ids") or [])
             if not product_ids and session.product_profile_id:
                 product_ids = [session.product_profile_id]
+            if not product_ids and session.user_id:
+                user_prods = await product_repo.list_for_user(session.user_id)
+                if user_prods:
+                    product_ids = [user_prods[0].id]
 
             products: list = []
             for pid in product_ids:
@@ -91,7 +95,7 @@ class GuardrailService:
         nothing anywhere ever surfaced `BrandProfileModel.logo_storage_ref` to a specialist — only
         prose brand facts (colors/voice) reached them via `brand_kit_lookup`."""
         async with async_session_factory() as db:
-            brand_repo = SqliteBrandRepository(db)
+            brand_repo = PostgresBrandRepository(db)
             brand = None
             if session.brand_profile_id:
                 brand = await brand_repo.get(session.brand_profile_id)

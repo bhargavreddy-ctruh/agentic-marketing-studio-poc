@@ -6,6 +6,8 @@ since indexing brand/product docs can involve many embedding calls (Architecture
 """
 from __future__ import annotations
 
+import asyncio
+
 from llama_index.core.base.embeddings.base import BaseEmbedding
 from pydantic import PrivateAttr
 
@@ -30,7 +32,13 @@ class LocalEmbedding(BaseEmbedding):
         return self._get_text_embedding(query)
 
     async def _aget_query_embedding(self, query: str) -> list[float]:
-        return self._get_query_embedding(query)
+        # Real, confirmed bug (2026-10-06): this called the synchronous `_get_query_embedding`
+        # (ultimately `SentenceTransformer.encode()`, genuine CPU-bound work) directly on the event
+        # loop despite being declared `async def` — every concurrent request on this single-process
+        # server (other sessions' turns, open SSE streams) paused for however long encoding took,
+        # every single time any turn's chat memory got indexed or recalled. `asyncio.to_thread`
+        # actually offloads it to a worker thread instead of just pretending to be async.
+        return await asyncio.to_thread(self._get_query_embedding, query)
 
     async def _aget_text_embedding(self, text: str) -> list[float]:
-        return self._get_text_embedding(text)
+        return await asyncio.to_thread(self._get_text_embedding, text)

@@ -23,7 +23,7 @@ from ...core.middleware.logging import get_logger
 from ...models.base import async_session_factory
 from ...providers.observability.langsmith import trace, traceable
 from ...repositories.base import CanvasRepository
-from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from ...repositories.postgres.postgres_product_repository import PostgresProductRepository
 from ..tools.registry import get_tool
 from .alignment_checker import check_alignment
 from .brand_consistency_checker import check_brand_consistency
@@ -70,15 +70,17 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
     user_message = ""
     user_id: str | None = None
     async with async_session_factory() as db:
-        from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
-        from ...repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
-        from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
-        element = await SqliteCanvasRepository(db).get_element_by_storage_ref(storage_ref)
+        from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
+        from ...repositories.postgres.postgres_chat_turn_repository import (
+            PostgresChatTurnRepository,
+        )
+        from ...repositories.postgres.postgres_session_repository import PostgresSessionRepository
+        element = await PostgresCanvasRepository(db).get_element_by_storage_ref(storage_ref)
         if element:
-            turns = await SqliteChatTurnRepository(db).list_for_session(element.session_id)
+            turns = await PostgresChatTurnRepository(db).list_for_session(element.session_id)
             if turns:
                 user_message = turns[-1].user_text
-            session = await SqliteSessionRepository(db).get(element.session_id)
+            session = await PostgresSessionRepository(db).get(element.session_id)
             if session:
                 user_id = session.user_id
 
@@ -90,9 +92,21 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
         generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
         image_url=image_url, user_id=user_id,
     )
-    format_qa = await check_format_technical(
-        storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")
-    )
+    # Real, live-found bug (2026-10-06, prompt-engineering cross-check): `check_format_technical`
+    # only ever understands image/video dimensions — for a text element (every headline/caption/
+    # tone/claims card this app produces via `text_card_writer`) it always returned
+    # `{"passed": False, "reason": "unsupported mime type 'text/plain'"}`, which `worst_of` then
+    # treated as a REAL compliance failure. Every single piece of copy this pipeline ever produced
+    # was permanently stamped `compliance_status: "failed"` — not because anything was actually
+    # wrong with it, but because this checker was never built to look at text at all. Format/
+    # dimension checks are genuinely not applicable to text, so skip the check entirely rather than
+    # asking a mechanical image/video checker to render a verdict on content it can't evaluate.
+    if element_type in ("image", "video"):
+        format_qa = await check_format_technical(
+            storage_ref=storage_ref, expected_aspect_ratio=metadata.get("aspect_ratio")
+        )
+    else:
+        format_qa = {"passed": True, "reason": "format/dimension check not applicable to text elements"}
     
     alignment = await check_alignment(
         user_message=user_message, generation_prompt_text=generation_prompt_text
@@ -128,7 +142,7 @@ async def _real_overlay_text() -> str | None:
     from SQL — never a guess. Returns None if no product is onboarded or it has no price/discount
     at all, so callers know there's nothing real to draw."""
     async with async_session_factory() as db:
-        products = await SqliteProductRepository(db).list_all()
+        products = await PostgresProductRepository(db).list_all()
     if not products:
         return None
     attrs = products[0].attributes

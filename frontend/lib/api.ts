@@ -192,6 +192,10 @@ export interface ChatTurn {
   // Real, persisted Node Mode run history for this turn (2026-09-22, per an explicit user ask:
   // "show all the runs even after a refresh") — see backend `models/chat_turn.py`'s own docstring.
   events: Record<string, unknown>[];
+  // The plan-preview bubble's own data (2026-10-06) — see backend `models/chat_turn.py`'s
+  // `plan_json` docstring. `null` only for a turn that errored before routing ever decided
+  // anything.
+  plan: { specialist: string; instruction: string | null; parallel_group: number | null }[] | null;
   referenced_elements?: {
     id: string;
     kind: "image" | "video" | "audio" | "text";

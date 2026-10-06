@@ -101,10 +101,10 @@ async def get_verified_image_description(element: dict[str, Any]) -> str | None:
     if element_id:
         try:
             from ..models.base import async_session_factory
-            from ..repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+            from ..repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
 
             async with async_session_factory() as db:
-                repo = SqliteCanvasRepository(db)
+                repo = PostgresCanvasRepository(db)
                 entity = await repo.get_element(element_id)
                 if entity is not None:
                     entity.metadata_json = {**(entity.metadata_json or {}), "verified_description": description}

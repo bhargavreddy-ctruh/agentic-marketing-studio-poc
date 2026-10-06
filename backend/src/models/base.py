@@ -40,8 +40,20 @@ _engine = create_async_engine(
     # (a redeploy whose old container's connections weren't cleanly released) pegged it there for
     # 15+ hours, breaking every real request (`canvas`/`sessions` routes) with a raw
     # `asyncpg.exceptions.InternalServerError: max clients reached`.
-    pool_size=3,
-    max_overflow=2,
+    #
+    # Real, live-found incident #2 (2026-10-06): that original 5-connection cap (pool_size=3 +
+    # max_overflow=2) turned out to be too small for normal operation, not just leak protection —
+    # one long, retry-heavy turn (Groq rate-limiting forcing a slower provider fallback, each retry
+    # making its own product_lookup/guardrail DB call) alone occupied all 5 connections for 80+
+    # real seconds, starving a completely unrelated concurrent request (the frontend's own
+    # canvas-state refresh) until it hit its own 30s pool-checkout timeout and crashed — see
+    # `core/middleware/error_handler.py`'s dedicated handler for that failure mode. Raised to
+    # pool_size=5 + max_overflow=5 = 10 total: still well under Supabase's 15-connection
+    # project-wide cap (leaves headroom for a concurrently-running deployed instance), while
+    # roughly doubling this process's own capacity to absorb one slow turn without starving a
+    # concurrent read.
+    pool_size=5,
+    max_overflow=5,
     # Detects a stale/dead connection (the far end silently closed it) before handing it to a
     # request, transparently reconnecting instead of the app holding a broken connection open
     # indefinitely — a real contributor to how connections accumulated unused for hours.
@@ -50,6 +62,20 @@ _engine = create_async_engine(
     # ceiling on how long any single connection can sit in the pool, so a future leak of this same
     # shape can no longer hold a slot for 15+ hours the way this incident's did.
     pool_recycle=300,
+    # Real, live-found incident #3 (2026-10-06): none of the settings above protect a connection
+    # that's already checked out and IN USE — `pool_pre_ping` only validates a connection before
+    # handing it out on a fresh checkout. If Supabase's pooler silently drops the TCP connection
+    # while a query is mid-flight (no FIN/RST the app ever sees), asyncpg's read on that socket has
+    # no timeout at any layer and blocks forever: zero CPU, zero further log output, the exact
+    # shape of a real hang reproduced live (a turn stuck forever right where the DB commit/close
+    # that follows `chat_memory.add_turn`'s own logging would run). `command_timeout` is asyncpg's
+    # own per-query timeout (not SQLAlchemy's `pool_timeout`, which only bounds waiting for a free
+    # *connection*, not a query already running on one) — this is the one knob that actually bounds
+    # that specific class of silent hang, turning it into a real, loud `asyncio.TimeoutError`
+    # instead. Also closes off the slow secondary failure mode: a connection stuck like this before
+    # was never returned to the pool either, permanently shrinking the 10-connection budget a
+    # little more with every recurrence until a restart cleared it.
+    connect_args={"command_timeout": 30},
 )
 async_session_factory = async_sessionmaker(_engine, expire_on_commit=False)
 
@@ -102,6 +128,11 @@ async def init_models() -> None:
             ("canvas_elements", "product_name", "VARCHAR(255)"),
             ("canvas_elements", "parent_element_id", "VARCHAR(36)"),
             ("canvas_element_versions", "element_type", "VARCHAR(32)"),
+            # 2026-10-06, plan-preview feature — `chat_turns` already existed in the live DB
+            # before this column was added to the model, so (unlike a brand-new table)
+            # `create_all()` alone never creates it; needs the same real migration every other
+            # post-hoc column addition to an existing table already gets here.
+            ("chat_turns", "plan_json", "JSON"),
         ]
         from sqlalchemy import text
 

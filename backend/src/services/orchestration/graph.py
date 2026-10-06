@@ -79,15 +79,16 @@ async def _emit_intermediate_element(
     product_id: str | None = None,
     parent_element_id: str | None = None,
 ):
-    from ...models.base import async_session_factory
-    from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
-    from ...repositories.models import CanvasElementModel
-    from .session_service import _run_compliance_background
     import asyncio
     import uuid
 
+    from ...models.base import async_session_factory
+    from ...repositories.models import CanvasElementModel
+    from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
+    from .session_service import _run_compliance_background
+
     async with async_session_factory() as db:
-        canvas = SqliteCanvasRepository(db)
+        canvas = PostgresCanvasRepository(db)
         el = await canvas.add_element(CanvasElementModel(
             id=uuid.uuid4().hex,
             session_id=session_id,
@@ -148,6 +149,22 @@ _ANNOTATION_ONLY_TOOLS = {"text_card_writer"}
 # already proved out (independent GENERATION branches, never independent EDITS of the same thing).
 _ASSET_MUTATING_SPECIALISTS = frozenset(
     {"composition_artist", "prop_stylist", "lighting_designer", "overlay_artist", "brand_asset_applier"}
+)
+
+# A dynamic plan step's real JSON output fields worth surfacing to LATER steps in the same plan
+# (2026-10-06, prompt-engineering cross-check fix) — never the noisy/large fields (image_prompt,
+# storage refs, raw tool payloads), just the actual decisions a later specialist should build on
+# rather than silently re-derive or contradict: calibrated tone/voice, chosen palette, curated
+# references, the approved headline (so caption_writer stays consistent with it), the shot list,
+# and any claims/compliance notes already surfaced.
+_PLAN_CONTEXT_WORTHY_FIELDS = frozenset(
+    {
+        "tone_profile", "voice_guidelines", "target_segment",
+        "color_palette", "reference_summary",
+        "primary_headline", "alternative_headlines", "hook_strategy",
+        "overall_story", "shots", "pacing_target",
+        "verified", "flagged_claims", "verification_notes",
+    }
 )
 
 
@@ -1233,6 +1250,15 @@ async def _direct_fix_node(state: GraphState) -> GraphState:
                 "attempt made no tool call at all. If a real change is genuinely warranted, make "
                 "it now — only skip again if you have a concrete reason no change applies."
             ),
+            # Real, live-found bug (2026-10-06): every sibling call site passes `brief=brief` so
+            # `run_specialist_agentic`'s tool-execution loop can build a real `tool_context`
+            # (user_id/product_id/session_id) for `product_lookup`/`data_concierge`/
+            # `brand_kit_lookup` — this one didn't. With no brief, those tools always got
+            # `context=None` and correctly reported "not configured" regardless of what was
+            # actually onboarded, silently defeating grounding for the entire direct_fix route
+            # (confirmed live: "add a 15% discount" asked the user for the price that was already
+            # in Product DNA).
+            brief=brief,
         )
     except SpecialistFailed as exc:
         log.error("direct_fix_failed", extra={"_extra_specialist": target, "_extra_error": exc.message})
@@ -1503,6 +1529,27 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         # argues against): just repeat a short, fixed anchor at every step instead.
         goal_anchor = f"Overall collective goal (do not drift from this): {brief.get('idea') or user_message}"
         instruction_text = f"\n\n{goal_anchor}\n\nYOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n{instruction}"
+
+        # Real, live-found bug (2026-10-06, prompt-engineering cross-check): only `storage_ref`
+        # was ever threaded between dynamic-plan steps — a planning/strategy specialist's real
+        # JSON decision (tone_calibrator's `tone_profile`/`voice_guidelines`, palette_strategist's
+        # `color_palette`, headline_writer's `primary_headline`) was computed, stored in
+        # `all_metadata`, and then never actually shown to any LATER step — e.g. a calibrated
+        # brand voice had zero influence on the headline/caption writers that followed it in the
+        # same plan, even though they ran in that exact order on purpose. Surface every earlier
+        # step's informational fields here so later steps can genuinely use (not re-derive or
+        # contradict) decisions already made in this same plan.
+        prior_notes = []
+        for step_key in sorted(all_metadata.keys()):
+            worthy = {k: v for k, v in all_metadata[step_key].items() if k in _PLAN_CONTEXT_WORTHY_FIELDS and v}
+            if worthy:
+                prior_notes.append(f"- {step_key}: {json.dumps(worthy, ensure_ascii=False)}")
+        if prior_notes:
+            instruction_text += (
+                "\n\nReal decisions already made by earlier steps in this plan — use them, do not "
+                "re-derive or contradict them:\n" + "\n".join(prior_notes)
+            )
+
         if latest_ref_snapshot:
             instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_ref_snapshot}. Use this asset as your source image/video if applicable."
         elif not referenced_elements:

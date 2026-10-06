@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
 from src.models.product_profile import ProductProfileModel
-from src.repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from src.repositories.postgres.postgres_product_repository import PostgresProductRepository
 from src.services.tools.discount_claims_calculator import DiscountClaimsCalculatorTool
 from src.services.tools.discount_math_calculator import DiscountMathCalculatorTool
 
@@ -44,7 +44,7 @@ async def test_discount_claims_calculator_uses_products_real_currency(monkeypatc
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with session_factory() as db:
-        product = await SqliteProductRepository(db).add(ProductProfileModel(
+        product = await PostgresProductRepository(db).add(ProductProfileModel(
             id=uuid.uuid4().hex, user_id=uuid.uuid4().hex, name="Test Watch",
             attributes={"price": 164900, "discount_percent": 16, "currency": "₹"},
         ))

@@ -174,6 +174,20 @@ async def group_element(
     return await CanvasMapper.to_response(updated)
 
 
+@router.delete("/elements/{element_id}", status_code=204)
+async def delete_element(element_id: str, canvas: CanvasRepositoryDep) -> Response:
+    """Permanently removes one canvas element and its version history (per-element delete, not
+    the whole session) — same shape as `DELETE /sessions/{id}` (`api/v1/sessions/routes.py`):
+    404 if it never existed, bare 204 on success. No ownership check here, matching every other
+    route in this file today (a disclosed, pre-existing gap — `create_element`'s own docstring
+    already notes canvas routes have no auth dependency yet)."""
+    element = await canvas.get_element(element_id)
+    if element is None:
+        raise NotFoundError("CanvasElement", element_id)
+    await canvas.delete_element(element_id)
+    return Response(status_code=204)
+
+
 @router.get("/assets/{storage_ref}")
 async def get_asset(storage_ref: str) -> Response:
     """Streams the real bytes behind a storage_ref (Phase 4b) — every other endpoint here returns

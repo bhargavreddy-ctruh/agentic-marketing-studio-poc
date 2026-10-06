@@ -10,6 +10,7 @@ import {
   approveEdit,
   assetUrl,
   commentOnElement,
+  deleteElement,
   directEdit,
   getCanvasState,
   listVersions,
@@ -328,7 +329,7 @@ function CanvasView({
     return () => clearInterval(interval);
   }, [elements, refresh]);
 
-  async function withBusy(elementId: string, fn: () => Promise<CanvasElement>) {
+  async function withBusy(elementId: string, fn: () => Promise<CanvasElement | void>) {
     setBusyId(elementId);
     try {
       await fn();
@@ -358,6 +359,17 @@ function CanvasView({
         withBusy(el.id, () => commentOnElement(el.id, text));
       },
     });
+  }
+
+  /** Same `window.confirm` pattern this app already uses for every other permanent delete
+   * (`app/page.tsx`'s workflow delete, `DNASection.tsx`'s product delete) — no custom confirm
+   * modal component exists anywhere in the codebase, so this matches rather than introducing a
+   * new one. */
+  function handleDelete(el: CanvasElement) {
+    if (!window.confirm("Delete this element? This permanently removes it and its version history — this cannot be undone.")) {
+      return;
+    }
+    withBusy(el.id, () => deleteElement(el.id));
   }
 
   function handleUndo(elementId: string) {
@@ -519,6 +531,14 @@ function CanvasView({
         onRedo={handleRedo}
         onSelectTile={handleSelectTile}
         referencedTileIds={referencedElementIds}
+        onCommentTile={(tileId) => {
+          const el = elements.find((e) => e.id === tileId);
+          if (el) handleComment(el);
+        }}
+        onDeleteTile={(tileId) => {
+          const el = elements.find((e) => e.id === tileId);
+          if (el) handleDelete(el);
+        }}
         onContextMenu={(at) => setContextMenu({ x: at.clientX, y: at.clientY })}
         pendingGeneration={pendingGeneration}
         activeSpecialist={activeSpecialist}
@@ -658,6 +678,13 @@ function CanvasView({
                         Edit
                       </button>
                     )}
+                    <button
+                      onClick={() => handleDelete(el)}
+                      disabled={busyId === el.id}
+                      className="rounded-lg border border-red-900/50 px-2.5 py-1.5 text-xs text-red-300 transition-colors hover:bg-red-900/30 hover:text-red-200 disabled:opacity-50"
+                    >
+                      Delete
+                    </button>
                   </div>
                 )}
               </div>

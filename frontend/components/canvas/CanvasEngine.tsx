@@ -89,6 +89,13 @@ export interface CanvasEngineProps {
    * dragging by the same real-movement threshold the pan gesture already uses for itself. */
   onSelectTile?: (tileId: string) => void;
   referencedTileIds?: string[];
+  /** Hover-on-tile affordances (2026-10-06, explicit user ask: "like in Luma — hover on element
+   * and it shows comment option," plus a delete option right next to it). Both fire from a small
+   * toolbar that fades in on hover (CSS `group-hover`, no extra JS hover-tracking state needed) —
+   * neither function here actually calls the backend; `CanvasView` owns that, same division of
+   * responsibility as `onUndo`/`onRedo` above (this engine only reports WHAT was clicked). */
+  onCommentTile?: (tileId: string) => void;
+  onDeleteTile?: (tileId: string) => void;
   /** A real right-click on empty canvas — the owner (`CanvasView`) renders its own context menu
    * overlay from this; this engine only reports WHERE, since it has no idea what actions (upload,
    * paste, etc.) exist upstream, keeping this file's own "just the mechanism" scope intact. */
@@ -420,6 +427,8 @@ function CanvasEngine({
   onRedo,
   onSelectTile,
   referencedTileIds = [],
+  onCommentTile,
+  onDeleteTile,
   onContextMenu,
   pendingGeneration,
   activeSpecialist,
@@ -837,12 +846,49 @@ function CanvasEngine({
         {laidOut.map(({ tile, pos }) => (
           <div
             key={tile.id}
-            className={`absolute overflow-hidden rounded-2xl border border-surface-700/60 bg-surface-900/90 shadow-xl backdrop-blur-xl transition-shadow ${
+            className={`group absolute overflow-hidden rounded-2xl border border-surface-700/60 bg-surface-900/90 shadow-xl backdrop-blur-xl transition-shadow ${
               referencedTileIds.includes(tile.id) ? "ring-4 ring-brand-500 shadow-[0_0_20px_rgba(99,102,241,0.4)]" : ""
             }`}
             style={{ left: pos.x, top: pos.y, width: TILE_SIZE, cursor: mode === "pan" ? "grab" : undefined }}
             onPointerDown={(e) => handleTileDown(e, tile.id, pos)}
           >
+            {/* Hover toolbar (2026-10-06, "like in Luma" — explicit user ask) — fades in via
+             * `group-hover` on the tile wrapper above, no extra hover-tracking state. Both
+             * buttons are real `<button>` elements, already excluded from the tile's own
+             * drag/select/context-menu handling (same selector `handleTileDown`/`handlePointerDown`
+             * already use to skip interactive children), and `stopPropagation` on top so a click
+             * here never also toggles the tile's chat-reference selection underneath it. */}
+            {(onCommentTile || onDeleteTile) && (
+              // `top-10`, not `top-2` — avoids sitting directly on top of the always-visible
+              // `hasComment`/compliance/alignment badges below, which share the same corners.
+              <div className="absolute right-2 top-10 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                {onCommentTile && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onCommentTile(tile.id);
+                    }}
+                    title="Leave a comment"
+                    className="flex h-7 w-7 items-center justify-center rounded-full bg-surface-900/90 text-sm text-surface-200 shadow backdrop-blur-sm hover:bg-surface-800"
+                  >
+                    💬
+                  </button>
+                )}
+                {onDeleteTile && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteTile(tile.id);
+                    }}
+                    title="Delete this element"
+                    className="flex h-7 w-7 items-center justify-center rounded-full bg-surface-900/90 text-sm text-red-300 shadow backdrop-blur-sm hover:bg-red-900/60 hover:text-red-200"
+                  >
+                    🗑
+                  </button>
+                )}
+              </div>
+            )}
+
             {tile.kind === "video" ? (
               <video src={tile.url} controls className="w-full" />
             ) : tile.kind === "audio" ? (

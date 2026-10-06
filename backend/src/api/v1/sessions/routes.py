@@ -160,14 +160,14 @@ async def update_dna(
     session_model.brief = new_brief
 
     from ....models.base import async_session_factory
-    from ....repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
-    from ....repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+    from ....repositories.postgres.postgres_brand_repository import PostgresBrandRepository
+    from ....repositories.postgres.postgres_product_repository import PostgresProductRepository
     from ....services.knowledge.brand_dna_service import BrandDnaService
     from ....services.knowledge.product_dna_service import ProductDnaService
 
     async with async_session_factory() as db:
-        brand_repo = SqliteBrandRepository(db)
-        product_repo = SqliteProductRepository(db)
+        brand_repo = PostgresBrandRepository(db)
+        product_repo = PostgresProductRepository(db)
         brand_svc = BrandDnaService(brand_repo)
         product_svc = ProductDnaService(product_repo)
 
@@ -267,7 +267,13 @@ async def update_session_style(
 async def post_turn(
     session_id: str, body: PostTurnRequest, svc: SessionServiceDep, current_user: CurrentUserDep
 ) -> SessionResponse:
-    return await svc.post_turn(
+    """Fire-and-forget turn dispatch (2026-10-06) — validates, marks status='generating', and
+    returns immediately (milliseconds).  The actual generation runs as a detached asyncio task
+    with its own DB session via `begin_turn` / `_run_turn_bg`.  Progress is streamed live over
+    SSE (`GET /{session_id}/events`); the frontend fetches `GET /{session_id}` once the
+    `turn_completed` event arrives to read the final SessionResponse.  This eliminates the
+    30-second Next.js dev-proxy timeout entirely."""
+    return await svc.begin_turn(
         session_id,
         user_id=current_user.id,
         picked_option_id=body.picked_option_id,
@@ -285,8 +291,23 @@ from ....services.orchestration.session_service import cancel_running_turn
 async def cancel_turn(
     session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
 ):
-    await svc.get_session(session_id, user_id=current_user.id)
+    session_model = await svc.get_session(session_id, user_id=current_user.id)
     cancelled = cancel_running_turn(session_id)
+    
+    # If the database thinks it's generating but there is no running task
+    # (e.g. because of a server restart), forcefully reset it.
+    if session_model.status == "generating":
+        session_model.status = "error"
+        session_model.next_prompt_json = {
+            "message": "Generation cancelled by user.",
+            "options": [],
+            "allow_free_text": True,
+        }
+        await svc._sessions.update(session_model)
+        from ....core.events import mark_turn_done
+        await mark_turn_done(session_id)
+        cancelled = True
+
     return {"cancelled": cancelled}
 
 

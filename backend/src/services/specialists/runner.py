@@ -103,6 +103,36 @@ def _extract_balanced_call_args(text: str, open_paren_idx: int) -> str | None:
     return None
 
 
+_STEP_INSTRUCTION_MARKER = "YOUR SPECIFIC INSTRUCTION FOR THIS STEP:\n"
+
+
+def _context_to_text(context: str | list[dict[str, Any]]) -> str:
+    """Plain text out of a specialist's own `context` parameter, whatever shape it's in — a plain
+    string for most calls, or the list-of-content-parts shape (text + image_url entries) built for
+    a vision-attached call. Used by the aspect-ratio enforcement block (2026-10-06) to infer format
+    from THIS STEP'S OWN instruction text, correctly scoped per dynamic-plan step, rather than the
+    shared, turn-wide message that collides across steps in a multi-deliverable request.
+
+    For a dynamic-plan step, `context` is `current_context` (a shared "Campaign idea so far: ..."
+    preamble built once from the WHOLE turn's message, `graph.py:1420`) PLUS this one step's own
+    instruction appended after the `_STEP_INSTRUCTION_MARKER` (`graph.py:1530`) — the preamble
+    alone still carries every deliverable the turn ever mentioned, so a naive full-text scan would
+    reintroduce the exact collision this fix exists to prevent. When the marker is present, only
+    the text AFTER it (this step's own, real, specific instruction) is considered; the shared
+    preamble is deliberately excluded. Falls back to the whole text when the marker is absent (a
+    non-dynamic-plan route, e.g. `direct_fix`, where `context` already IS the one real instruction)."""
+    if isinstance(context, str):
+        text = context
+    else:
+        text = "\n".join(
+            part.get("text", "") for part in context if isinstance(part, dict) and part.get("type") == "text"
+        )
+    marker_idx = text.find(_STEP_INSTRUCTION_MARKER)
+    if marker_idx != -1:
+        return text[marker_idx + len(_STEP_INSTRUCTION_MARKER):]
+    return text
+
+
 def _recover_pseudo_tool_call(text: str, allowed_tools: tuple[str, ...]) -> tuple[str, dict[str, Any]] | None:
     """
     Real, live-found recovery (2026-09-26, live-reproduced against `illustrator`): a provider with
@@ -229,6 +259,29 @@ class AgenticStepResult:
 # tests/call sites that never call `start_turn_budget` are unaffected.
 _turn_call_budget: ContextVar[int] = ContextVar("_turn_call_budget", default=-1)
 
+# Tools that call a real, metered third-party generation API (Replicate) — a second call is a
+# second real charge, not a free retry. `text_to_speech` is deliberately excluded: it runs a local
+# Kokoro model (`providers/audio/local_kokoro.py`), genuinely free, so re-synthesizing audio on
+# retry costs nothing and needs no guard. Used by `run_specialist_with_review`'s idempotency check
+# (2026-10-06, Ctruh Agent Engine cross-check: retries had no guard against re-billing a paid call
+# that already succeeded on the first attempt).
+_PAID_TOOLS = frozenset(
+    {
+        "base_image_generator", "collab_image_generator", "photorealistic_image_generator",
+        "high_resolution_image_generator", "image_editor", "base_video_generator",
+    }
+)
+
+# Fencing (2026-10-06, Ctruh Agent Engine cross-check): the step cap (`max_iterations`) already
+# bounds how many ROUNDS a specialist can loop, but nothing bounded a single round's real wall-clock
+# time or the cumulative token spend across a whole run — a hung provider call could block a turn
+# indefinitely, and a model that keeps "thinking" at length every iteration had no cost ceiling
+# beyond the per-call `max_tokens=2048` output cap. Both are generous on purpose (a real creative
+# generation call can legitimately take a while) — this is a circuit breaker for a genuinely stuck
+# or runaway call, not a tight budget meant to bind in normal operation.
+_SPECIALIST_CALL_TIMEOUT_SECONDS = 90
+_MAX_TOKENS_PER_SPECIALIST_RUN = 60_000
+
 
 def start_turn_budget(max_calls: int) -> None:
     """Call once at the start of a turn (`session_service.py`), before the graph runs."""
@@ -280,6 +333,7 @@ async def run_specialist_agentic(
     system_prompt += (
         "\n\n<MASTER_DIRECTIVE>\n"
         "You are creating top-tier, crazy, eye-catching, bold marketing material. "
+        "CRITICAL RULE 0 — Think Before Acting: You MUST write down your step-by-step reasoning inside a <thought>...</thought> block BEFORE outputting your final JSON response. Always plan your work for the overall goal.\n"
         "CRITICAL RULE 1 — Referenced elements: If a single referenced element "
         "(a storage_ref, 'referenced image', or element pointed to) is provided, "
         "use it directly as the subject/grounding. If MULTIPLE elements exist on canvas and it is ambiguous "
@@ -324,10 +378,34 @@ async def run_specialist_agentic(
     # This is the mechanism that makes "go ahead" / user confirmations visible to the LLM — they
     # exist as real user/assistant message pairs, not just as text inside a JSON blob.
     from ...core.chat_history import build_history_messages
+    
+    # Auto-inject actual image pixels (multimodal vision) so agents can SEE what they are editing/referencing
+    final_content = context
+    if isinstance(context, str):
+        import base64
+        import re
+
+        from ...core.local_storage import load_asset
+        
+        # Extract all storage refs mentioned in the context (like "storage_ref: 1234abcd")
+        refs = list(set(re.findall(r"storage_ref:\s*([a-zA-Z0-9_-]+)", context)))
+        if refs:
+            final_content = [{"type": "text", "text": context}]
+            for ref in refs:
+                loaded = await load_asset(ref)
+                if loaded:
+                    img_bytes, mime = loaded
+                    if mime.startswith("image/"):
+                        b64 = base64.b64encode(img_bytes).decode('utf-8')
+                        final_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{b64}"}
+                        })
+                        
     if brief is not None:
-        messages: list[dict[str, Any]] = build_history_messages(brief, context)
+        messages: list[dict[str, Any]] = build_history_messages(brief, final_content)
     else:
-        messages = [{"role": "user", "content": context}]
+        messages = [{"role": "user", "content": final_content}]
     tool_calls: list[ToolCallRecord] = []
     # Real, live-found bug (2026-09-24, per a real user report — `reference_curator` failed twice
     # in a row with "could not parse JSON from model response: Expecting value: line 1 column 1
@@ -348,31 +426,69 @@ async def run_specialist_agentic(
     # real, live-found gap (2026-09-21): most graph-level nodes were already traced, but individual
     # specialists and the tool calls underneath them were invisible, collapsed into whichever Lead
     # node called them.
+    total_tokens_used = 0
     async with trace(
         name=f"specialist:{specialist_name}", run_type="chain", inputs={"context": context}
     ) as specialist_run:
         for iteration in range(max_iterations):
             try:
-                result = await llm.complete(
-                    tier=spec.tier,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=tool_schemas or None,
-                    # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
-                    # finding as ideation_service.py, and again with Groq's gpt-oss models.
-                    max_tokens=2048,
-                    # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
-                    # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
-                    # streams (see base.py's own docstring on this parameter).
-                    on_delta=lambda delta: emit("llm_delta", node=specialist_name, text=delta),
+                result = await asyncio.wait_for(
+                    llm.complete(
+                        tier=spec.tier,
+                        system=system_prompt,
+                        messages=messages,
+                        tools=tool_schemas or None,
+                        # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
+                        # finding as ideation_service.py, and again with Groq's gpt-oss models.
+                        max_tokens=2048,
+                        # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
+                        # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
+                        # streams (see base.py's own docstring on this parameter).
+                        on_delta=lambda delta: emit("llm_delta", node=specialist_name, text=delta),
+                    ),
+                    timeout=_SPECIALIST_CALL_TIMEOUT_SECONDS,
                 )
             except ProviderUnavailable as exc:
                 emit("specialist_failed", specialist=specialist_name, reason=exc.message)
                 raise SpecialistFailed(specialist_name, exc.message) from exc
+            except TimeoutError as exc:
+                emit("specialist_failed", specialist=specialist_name, reason="timed out")
+                raise SpecialistFailed(
+                    specialist_name, f"timed out after {_SPECIALIST_CALL_TIMEOUT_SECONDS}s"
+                ) from exc
+
+            total_tokens_used += result.input_tokens + result.output_tokens
+            if total_tokens_used > _MAX_TOKENS_PER_SPECIALIST_RUN:
+                emit("specialist_failed", specialist=specialist_name, reason="token budget exceeded")
+                raise SpecialistFailed(
+                    specialist_name,
+                    f"exceeded the {_MAX_TOKENS_PER_SPECIALIST_RUN}-token budget for a single run "
+                    f"({total_tokens_used} tokens used across {iteration + 1} iteration(s))",
+                )
 
             effective_tool_calls = result.tool_calls
             if not effective_tool_calls and result.text:
                 recovered = _recover_pseudo_tool_call(result.text, spec.allowed_tools)
+                # Real, live-found bug (2026-10-06): a weak fallback model (Replicate's Gemini,
+                # or Groq under provider stress) that already made one successful PAID generation
+                # earlier in THIS SAME run can still ramble something later that happens to look
+                # like a different tool call — e.g. after a malformed-JSON retry, instead of just
+                # fixing its JSON it mentions a different generator by name, which this recovery
+                # mechanism then dutifully executes as a SECOND real, paid generation (confirmed
+                # live: one illustrator run produced two real images — high_resolution_image_
+                # generator, then, after a missing-fields retry, base_image_generator — both real
+                # Replicate charges). Deliberately scoped to ONLY this recovery path, never to a
+                # real, natively-structured tool call: illustrator.md's own rule 3b legitimately
+                # self-refines with `image_editor` after a real generation, via a genuine
+                # `tool_calls` response, not this text-scraping fallback — that flow is untouched.
+                if recovered is not None and recovered[0] in _PAID_TOOLS and any(
+                    c.ok and c.tool_name in _PAID_TOOLS for c in tool_calls
+                ):
+                    log.warning(
+                        "recovered_pseudo_tool_call_suppressed_already_paid",
+                        extra={"_extra_specialist": specialist_name, "_extra_tool": recovered[0]},
+                    )
+                    recovered = None
                 if recovered is not None:
                     rec_name, rec_args = recovered
                     log.warning(
@@ -418,6 +534,24 @@ async def run_specialist_agentic(
                                 d = get_deliverable(brief["deliverable"])
                                 if d:
                                     detected_ratio = d.aspect_ratio
+                            # Real, live-found bug (2026-10-06): the fix above — leaving
+                            # `brief["deliverable"]` unset when a message names 2+ DIFFERENT
+                            # deliverables, so no single turn-global spec collides across steps —
+                            # was necessary but not sufficient. This fallback used to infer from
+                            # `brief["_current_turn_message"]`/`idea`, the WHOLE shared turn
+                            # message ("make a youtube thumbnail... and also an instagram 9:16
+                            # post") — `infer_aspect_ratio_from_text` still only returns ONE match,
+                            # so it resolved 9:16 for EVERY image step, including the thumbnail's
+                            # (confirmed live: the real Replicate input for a prompt explicitly
+                            # titled "YouTube thumbnail" showed `aspect_ratio: "9:16"`). `context`
+                            # (this function's own parameter) is the right signal instead — for a
+                            # dynamic-plan step it's THIS STEP'S OWN real instruction text (e.g.
+                            # the thumbnail step's instruction only ever mentions the thumbnail,
+                            # never the Instagram post), correctly scoped per step rather than
+                            # shared across the whole turn.
+                            if not detected_ratio:
+                                from ..leads.base import infer_aspect_ratio_from_text
+                                detected_ratio = infer_aspect_ratio_from_text(_context_to_text(context))
                             if not detected_ratio:
                                 from ..leads.base import infer_aspect_ratio_from_text
                                 detected_ratio = infer_aspect_ratio_from_text(
@@ -610,27 +744,44 @@ async def run_specialist_agentic(
             # hatch above — verified by reading every specialist's own <output_format> block
             # directly, not assumed. KEY PRESENCE only, matching that real schema shape.
             missing_fields = [f for f in spec.required_output_fields if f not in parsed]
-            if missing_fields:
+            # Type/shape check (2026-10-06, Ctruh Agent Engine cross-check) — additive, opt-in via
+            # `output_field_types`: presence alone lets a field through with the wrong shape (e.g.
+            # a string where a list was expected), which the rest of this codebase then has to
+            # handle defensively everywhere it's read instead of catching it once, here.
+            wrong_type_fields = [
+                f for f, expected in spec.output_field_types.items()
+                if f in parsed and not isinstance(parsed[f], expected)
+            ]
+            if missing_fields or wrong_type_fields:
                 if _missing_fields_retries_left > 0:
                     _missing_fields_retries_left -= 1
                     log.warning(
                         "specialist_missing_required_output_fields",
-                        extra={"_extra_specialist": specialist_name, "_extra_missing": missing_fields},
+                        extra={
+                            "_extra_specialist": specialist_name, "_extra_missing": missing_fields,
+                            "_extra_wrong_type": wrong_type_fields,
+                        },
                     )
+                    problems = [f"missing required field(s): {', '.join(missing_fields)}"] if missing_fields else []
+                    problems += [
+                        f"field(s) with the wrong type, expected {spec.output_field_types[f].__name__}: {f}"
+                        for f in wrong_type_fields
+                    ]
                     messages.append({"role": "assistant", "content": result.text or ""})
                     messages.append({
                         "role": "user",
                         "content": (
-                            f"Your final JSON is missing required field(s): {', '.join(missing_fields)}. "
-                            "Return your final JSON again with ALL required fields present (or call a "
-                            "tool if you're not actually done yet, or return ONLY {\"error\": \"...\"} "
-                            "if you genuinely cannot fulfill the request)."
+                            f"Your final JSON has a problem: {'; '.join(problems)}. "
+                            "Return your final JSON again, fully correct (or call a tool if you're "
+                            "not actually done yet, or return ONLY {\"error\": \"...\"} if you "
+                            "genuinely cannot fulfill the request)."
                         ),
                     })
                     continue
                 raise SpecialistFailed(
                     specialist_name,
-                    f"final response missing required field(s) after retry: {', '.join(missing_fields)}",
+                    f"final response invalid after retry — missing: {missing_fields or 'none'}, "
+                    f"wrong type: {wrong_type_fields or 'none'}",
                 )
 
             log.info(
@@ -702,6 +853,25 @@ async def run_specialist_with_review(
     # retry's second `specialist_started`/`_completed` pair just silently overwrote the same
     # card, with no sign a review/correction ever happened.
     emit("specialist_review_retry", specialist=specialist_name)
+
+    # Idempotency guard (2026-10-06, Ctruh Agent Engine cross-check): a retry used to unconditionally
+    # re-run the FULL agentic loop with no awareness that the first attempt may have already made a
+    # real, successful, metered generation call — a model that calls `base_image_generator`
+    # successfully but then fumbles something else (e.g. a malformed final JSON) could trigger a
+    # retry that calls `base_image_generator` AGAIN, a second real charge for work already done and
+    # already paid for. Check for a prior successful paid call and, if found, tell the retry to
+    # reuse it rather than leaving that to the model's own judgment.
+    already_paid_call = result.latest_call(*_PAID_TOOLS)
+    if already_paid_call and already_paid_call.ok:
+        existing_ref = already_paid_call.data.get("storage_ref")
+        reminder = (
+            f"REMINDER: your previous attempt already made a real, successful "
+            f"{already_paid_call.tool_name} call — the result is at storage_ref '{existing_ref}'. "
+            f"Do NOT call {already_paid_call.tool_name} (or any other generation tool) again; that "
+            f"would be a second real charge for work already done. Reuse that existing result and "
+            f"only fix whatever caused this retry (e.g. your final JSON output).\n\n{reminder}"
+        )
+
     return await run_specialist_agentic(
         specialist_name, context=f"{context}\n\n{reminder}", max_iterations=max_iterations, brief=brief
     )

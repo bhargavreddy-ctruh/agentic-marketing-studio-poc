@@ -38,11 +38,54 @@ from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import traceable
+from ..leads.motion_lead import MOTION_LEAD
+from ..leads.narrative_lead import NARRATIVE_LEAD
+from ..leads.scene_lead import SCENE_LEAD
+from ..leads.visual_design_lead import VISUAL_DESIGN_LEAD
 from ..specialists.registry import SPECIALIST_REGISTRY
 from .specialist_classifier import describe_specialists
 from .state import GraphState
 
 log = get_logger(__name__)
+
+
+def _build_plan_preview(
+    chosen_route: str,
+    target_specialist: str | None,
+    dynamic_plan: list[dict] | None,
+    user_message: str,
+) -> list[dict]:
+    """A normalized `{specialist, instruction, parallel_group}` list for EVERY route (2026-10-06,
+    explicit user ask: "shows in chat box (like in luma)... then follow them parallely or
+    sequentially"), emitted once right after a route is decided, purely informational — no
+    execution logic anywhere is touched by this function or its caller.
+
+    `dynamic` reuses its own real, LLM-authored, per-request plan verbatim — the only route with
+    genuine `parallel_group` data. Every fixed-pipeline route reports its own real, declared
+    `LeadSpec.specialist_sequence` (Architecture.md's own framing: "a Lead is just an ordered list
+    of specialist names") as a SEQUENTIAL list — deliberately never claims a parallel grouping for
+    these, since the real concurrency inside them (e.g. Narrative Lead's script_writer/
+    pacing_editor running concurrently unless `approved_script` already exists) is conditional,
+    code-driven control flow, not static data; a wrong parallel claim here would be actively
+    misleading, whereas "sequential" is always a safe, correct (if coarser) statement."""
+    if chosen_route == "dynamic" and dynamic_plan:
+        return dynamic_plan
+    if chosen_route == "direct_fix" and target_specialist:
+        return [{"specialist": target_specialist, "instruction": user_message, "parallel_group": None}]
+    if chosen_route == "full_image":
+        sequence = VISUAL_DESIGN_LEAD.specialist_sequence
+    elif chosen_route == "full_video":
+        sequence = (
+            NARRATIVE_LEAD.specialist_sequence + SCENE_LEAD.specialist_sequence
+            + MOTION_LEAD.specialist_sequence
+        )
+    elif chosen_route == "full_audio":
+        # No dedicated LeadSpec exists for full_audio (`graph.py`'s `_full_audio_node`) — it's a
+        # direct single-specialist call, same shape as `direct_fix`.
+        sequence = ("sound_designer",)
+    else:
+        return []
+    return [{"specialist": s, "instruction": None, "parallel_group": None} for s in sequence]
 
 _VIDEO_KEYWORDS = ("video", "clip", "motion", "reel")
 _AUDIO_KEYWORDS = ("audio", "voiceover", "voice over", "narration", "spoken", "sound clip")
@@ -55,11 +98,13 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 </role>
 
 <rules>
+0. **Think Before Acting:** You MUST write down your step-by-step reasoning inside a <thought>...</thought> block BEFORE outputting your final JSON response. Always think before making decisions.
 1. **Dynamic Assembly:** You do NOT use hardcoded pipelines. Instead, you select EXACTLY the specialists needed to fulfill the request, in the exact order they should run, and provide a clear instruction for each step.
 2. **Efficiency & Autonomy:** Do not waste steps, but DO autonomously include planning and strategy specialists (like 'reference_curator' or 'palette_strategist') if the task is complex, broad, or requires a cohesive brand style (e.g., a "campaign" or "brand refresh"). Do not rely on the user to explicitly ask for them.
 3. **Valid Specialists Only:** You can only use the specialists listed below.
 4. **NO ASSUMPTIONS ON VAGUE INPUTS:** Never assume anything that is not strictly allowed. Never make a decision on vague inputs or assumptions. If the user attaches an image but does not specify how it should be used (e.g. as a product to composite, a style reference, or a base for image-to-image), or if their request is too vague to safely route, you MUST return a plan that instructs the first specialist to fail and explicitly ask the user for clarification.
 5. **Campaign Defaults (CRAZY & BOLD):** We are making this for elite marketing and creating campaigns. Image and video generations should be CRAZY, striking, and visually incredible. If the request is for a broad "campaign", autonomously build a robust plan (e.g. style/palette planning, generating 1-2 base images via illustrator, and applying promotional text via overlay_artist). Push the creative boundaries.
+5b. **Text Overlays on New Images:** If the user asks for a price, discount, or promotional text to be displayed on a new image, you MUST add `overlay_artist` as a step AFTER `illustrator`. Image generators (like illustrator) cannot reliably draw text, so `overlay_artist` is required to actually write the price/text on the generated image.
 6. **Context Guardrail:** If the request and the brief entirely lack a specific subject or product, do NOT invent or guess a generic product. Instead, return a plan instructing the first specialist to fail and ask the user for clarification. ALWAYS prioritize building guardrails based on user inputs.
 6b. **Reference Image Handling:** If the user provided a reference image and their instruction is clear on how to use it, you MUST explicitly tell the first generating specialist (e.g., `illustrator` for an IMAGE deliverable, `camera_director` for a VIDEO deliverable — see Rule 7b-video) how to use it. For example, if it's an image-to-image base for illustrator, add to the instruction: "You MUST use the provided referenced element as your image-to-image reference_storage_ref"; for camera_director animating it into a clip, add: "You MUST use the provided referenced element as your source_image_storage_ref".
 7. **Editing Existing Assets vs. Using One as Reference Material:** A referenced element being present does NOT always mean "edit it in place" — distinguish the two cases below before choosing a route.
@@ -71,6 +116,7 @@ Examples: "strike out the old price on this" -> 7a, direct_fix -> composition_ar
 8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
 9. **Element Disambiguation:** When several existing elements are shown as candidates rather than one confirmed reference, determine which ONE (if any) the message explicitly targets. If the request is an edit or tweak but genuinely ambiguous about which element to modify (e.g., "make it pop", "recolor it" with 2+ candidates and no target specified), do NOT guess or default blindly to the latest tile. Set `resolved_element_id` to `null` and instruct the first specialist in your plan to ask the user for clarification via options. Only set `resolved_element_id` when the user's message or context makes the target element unambiguous.
 10. **Parallel Steps (only in a 'dynamic' plan, only when genuinely independent):** If two or more steps each generate a completely FRESH, independent asset from scratch that do NOT depend on each other's output (e.g. two separate illustrator variants for A/B options, or an illustrator image alongside an unrelated sound_designer voiceover) — no need for one to have finished before the other starts — give them the SAME `parallel_group` number so they can run concurrently. NEVER put a step that EDITS an existing asset (composition_artist, prop_stylist, lighting_designer, overlay_artist) in a group with anything else, and NEVER group a step that needs another step's own not-yet-produced storage_ref — those must stay ungrouped (omit `parallel_group`, or give it a number no other step shares) so they run in your intended order. When genuinely unsure whether two steps are independent, leave `parallel_group` unset — sequential is always correct, grouping wrongly is not.
+11. **Sticky Focus:** If context states which specialist handled the PREVIOUS turn, and the user's current message is a short follow-up tweak with no new subject/domain named (e.g. "make it bigger", "a bit more to the left", "try that again but bolder") — prefer `direct_fix` straight back to that SAME specialist rather than reclassifying from scratch. Only move away from it when the message clearly names a different deliverable type, a different subject, or a new piece of work entirely — this is your own judgment call, not a hard rule to apply blindly when the intent has genuinely shifted.
 </rules>
 
 <specialists>
@@ -221,6 +267,18 @@ async def route(state: GraphState) -> GraphState:
     else:
         classification_context.append("An existing generated element is available to fix: no")
 
+    # Sticky focus (2026-10-06, Ctruh Agent Engine cross-check): a signal the classifier never had
+    # before — which specialist handled the immediately preceding turn. Purely informational, read
+    # by rule 11 above; the model still decides, this never bypasses classification outright (per
+    # this app's own standing preference: routing stays model-driven, fix the prompt, not a
+    # deterministic override).
+    last_specialist = brief.get("last_specialist")
+    if last_specialist:
+        classification_context.append(
+            f"The specialist that handled the PREVIOUS turn in this session was: '{last_specialist}' "
+            f"— see rule 11 (Sticky Focus)."
+        )
+
     llm = get_llm_provider()
     
     import asyncio
@@ -347,7 +405,24 @@ async def route(state: GraphState) -> GraphState:
         state["route"] = chosen_route
         state["target_specialist"] = target_specialist
         state["dynamic_plan"] = dynamic_plan
-        
+
+        # Persist for the NEXT turn's rule 11 (Sticky Focus) — only meaningful for direct_fix,
+        # since that's the single-specialist "quick edit" shape a short follow-up like "make it
+        # bigger" actually targets; a broader route (full_image/full_video/dynamic/full_audio) has
+        # no one specialist that obviously owns the next tweak, so reset rather than carry forward.
+        brief["last_specialist"] = target_specialist if chosen_route == "direct_fix" else None
+        brief["last_route"] = chosen_route
+        state["brief"] = brief
+
+        # Plan preview (2026-10-06, explicit user ask: show what will run BEFORE it runs, like
+        # Luma, then auto-proceed — not a blocking gate, purely informational). Persisted onto
+        # `state` (not just emitted) so `session_service.py` can save it onto the turn's own row —
+        # same treatment `dynamic_plan` already gets.
+        plan_preview = _build_plan_preview(chosen_route, target_specialist, dynamic_plan, user_message)
+        state["plan_preview"] = plan_preview
+        if plan_preview:
+            emit("plan_proposed", route=chosen_route, plan=plan_preview)
+
         # Shadow mode mismatch check
         laya_route = await laya_task
         if laya_route and laya_route != chosen_route:

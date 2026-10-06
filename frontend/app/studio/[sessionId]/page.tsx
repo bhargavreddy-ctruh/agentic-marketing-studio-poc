@@ -519,6 +519,7 @@ export default function StudioPage() {
             onRestoreEvents={handleRestoreEvents}
             isMaximized={isChatMaximized}
             onToggleMaximize={handleToggleMaximize}
+            pipelineNodes={pipelineNodes}
           />
         </div>
       </div>

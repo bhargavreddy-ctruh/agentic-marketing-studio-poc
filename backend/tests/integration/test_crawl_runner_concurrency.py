@@ -22,7 +22,7 @@ from src.models.base import Base
 from src.models.brand_profile import BrandProfileModel
 from src.models.product_profile import ProductProfileModel
 from src.models.session import SessionModel
-from src.repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
+from src.repositories.postgres.postgres_session_repository import PostgresSessionRepository
 from src.services.crawlers import crawl_runner
 
 
@@ -36,7 +36,7 @@ async def session_factory():
 
 async def _make_session(session_factory, user_id: str) -> str:
     async with session_factory() as db:
-        repo = SqliteSessionRepository(db)
+        repo = PostgresSessionRepository(db)
         created = await repo.add(SessionModel(id=uuid.uuid4().hex, user_id=user_id, status="ideating", brief={}))
         return created.id
 
@@ -68,7 +68,7 @@ async def test_explicit_url_type_overrides_heuristic_guess(session_factory, monk
     brand_crawl.assert_not_awaited()
 
     async with session_factory() as db:
-        session = await SqliteSessionRepository(db).get(session_id)
+        session = await PostgresSessionRepository(db).get(session_id)
         assert session.brief.get("product_profile_ids") == [fake_product.id]
 
 
@@ -109,7 +109,7 @@ async def test_concurrent_brand_and_product_crawls_do_not_clobber_each_other(ses
         )
 
     async with session_factory() as db:
-        session = await SqliteSessionRepository(db).get(session_id)
+        session = await PostgresSessionRepository(db).get(session_id)
         # Both fields must survive — neither crawl's commit may have reverted the other's.
         assert session.brief.get("product_profile_ids") == [fake_product.id]
         assert session.brand_profile_id == fake_brand.id

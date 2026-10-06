@@ -170,3 +170,87 @@ async def test_video_request_with_reference_accepts_dynamic_camera_director_rout
         result = await route(state)
     assert result["route"] == "dynamic"
     assert result["dynamic_plan"][0]["specialist"] == "camera_director"
+
+
+# --- Plan preview (2026-10-06, explicit user ask: show what will run before it runs, like Luma,
+# for EVERY route, then auto-proceed — not a blocking gate) ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_dynamic_route_emits_plan_proposed_with_the_real_llm_plan():
+    plan = [
+        {"specialist": "headline_writer", "instruction": "Write 3 headline options", "parallel_group": 1},
+        {"specialist": "illustrator", "instruction": "Generate hero image", "parallel_group": 1},
+        {"specialist": "composition_artist", "instruction": "Compose final layout", "parallel_group": None},
+    ]
+    state = {"user_message": "make a campaign for my sneaker brand", "session_id": "s1"}
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "dynamic", "target_specialist": None, "plan": plan})),
+    ), patch("src.services.orchestration.orchestrator.emit") as mock_emit:
+        result = await route(state)
+
+    assert result["plan_preview"] == plan
+    mock_emit.assert_any_call("plan_proposed", route="dynamic", plan=plan)
+
+
+@pytest.mark.asyncio
+async def test_direct_fix_route_emits_a_single_step_plan_using_the_real_message():
+    state = {"user_message": "fix the overlay text on this", "session_id": "s1"}
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "direct_fix", "target_specialist": "overlay_artist"})),
+    ), patch("src.services.orchestration.orchestrator.emit") as mock_emit:
+        result = await route(state)
+
+    expected_plan = [{"specialist": "overlay_artist", "instruction": "fix the overlay text on this", "parallel_group": None}]
+    assert result["plan_preview"] == expected_plan
+    mock_emit.assert_any_call("plan_proposed", route="direct_fix", plan=expected_plan)
+
+
+@pytest.mark.asyncio
+async def test_full_image_route_emits_the_visual_design_leads_own_sequence():
+    state = {"user_message": "make me a poster for my new sneaker", "session_id": "s1"}
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "full_image", "target_specialist": ""})),
+    ), patch("src.services.orchestration.orchestrator.emit") as mock_emit:
+        result = await route(state)
+
+    expected_plan = [
+        {"specialist": "illustrator", "instruction": None, "parallel_group": None},
+        {"specialist": "composition_artist", "instruction": None, "parallel_group": None},
+    ]
+    assert result["plan_preview"] == expected_plan
+    mock_emit.assert_any_call("plan_proposed", route="full_image", plan=expected_plan)
+
+
+@pytest.mark.asyncio
+async def test_full_video_route_emits_the_concatenated_lead_sequence():
+    state = {"user_message": "I want a video ad for my sneaker", "session_id": "s1"}
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "full_video", "target_specialist": ""})),
+    ), patch("src.services.orchestration.orchestrator.emit") as mock_emit:
+        result = await route(state)
+
+    expected_specialists = [
+        "shot_planner", "script_writer", "pacing_editor", "scene_builder",
+        "camera_director", "video_editor_cutter", "sound_designer", "overlay_artist",
+    ]
+    assert [s["specialist"] for s in result["plan_preview"]] == expected_specialists
+    assert all(s["instruction"] is None and s["parallel_group"] is None for s in result["plan_preview"])
+    mock_emit.assert_any_call("plan_proposed", route="full_video", plan=result["plan_preview"])
+
+
+@pytest.mark.asyncio
+async def test_full_audio_route_emits_a_single_sound_designer_step():
+    state = {"user_message": "make a voiceover for this", "session_id": "s1"}
+    with patch(
+        "src.services.orchestration.orchestrator.get_llm_provider",
+        return_value=_fake_llm(json.dumps({"route": "full_audio", "target_specialist": ""})),
+    ), patch("src.services.orchestration.orchestrator.emit") as mock_emit:
+        result = await route(state)
+
+    expected_plan = [{"specialist": "sound_designer", "instruction": None, "parallel_group": None}]
+    assert result["plan_preview"] == expected_plan
+    mock_emit.assert_any_call("plan_proposed", route="full_audio", plan=expected_plan)

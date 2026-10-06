@@ -148,7 +148,7 @@ docker compose up -d --build backend ollama
 | Restart without a rebuild | `docker compose restart backend` |
 | Free disk space (old images) | `docker image prune -f` |
 
-Data survives restarts and redeploys: the SQLite DB (`backend/poc.db`) and generated assets
+Data survives restarts and redeploys: the Postgres DB (Supabase) and generated assets
 (`backend/var/`) are bind-mounted from the instance's own disk; the crawler's `gemma2:2b` weights
 live in the named `ollama_data` volume. Back up `backend/poc.db` and `backend/var/` periodically —
 nothing here does that automatically.

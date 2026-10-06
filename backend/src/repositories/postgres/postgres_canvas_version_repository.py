@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.canvas_element_version import CanvasElementVersionModel
 
 
-class SqliteCanvasVersionRepository:
+class PostgresCanvasVersionRepository:
     """Satisfies the CanvasVersionRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

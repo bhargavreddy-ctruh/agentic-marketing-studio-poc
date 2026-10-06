@@ -15,7 +15,7 @@ from typing import ClassVar
 
 from ...core.exceptions import ProviderUnavailable
 from ...models.base import async_session_factory
-from ...repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
+from ...repositories.postgres.postgres_mood_board_repository import PostgresMoodBoardRepository
 from ...services.knowledge.mood_board_service import MoodBoardService
 from .base import Tool, ToolResult
 from .registry import register_tool
@@ -33,7 +33,7 @@ class AssetMoodBoardSearchTool(Tool):
             return ToolResult(ok=False, data={}, error="query is required")
 
         async with async_session_factory() as db:
-            service = MoodBoardService(assets=SqliteMoodBoardRepository(db))
+            service = MoodBoardService(assets=PostgresMoodBoardRepository(db))
             try:
                 assets = await service.search(query=query)
             except ProviderUnavailable:

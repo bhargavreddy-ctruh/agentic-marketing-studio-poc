@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
 from src.models.product_profile import ProductProfileModel
-from src.repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from src.repositories.postgres.postgres_product_repository import PostgresProductRepository
 from src.services.tools.product_lookup import ProductLookupTool
 
 
@@ -34,7 +34,7 @@ async def test_returns_real_structured_attributes_not_just_rag_summary(monkeypat
         "claims_allowed": ["longest battery in its class"], "claims_disallowed": [], "color": "black",
     }
     async with session_factory() as db:
-        product = await SqliteProductRepository(db).add(ProductProfileModel(
+        product = await PostgresProductRepository(db).add(ProductProfileModel(
             id=uuid.uuid4().hex, user_id=user_id, name="Galaxy Watch", attributes=real_attributes,
         ))
 

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.brand_profile import BrandProfileModel
 
 
-class SqliteBrandRepository:
+class PostgresBrandRepository:
     """Satisfies the BrandRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

@@ -37,3 +37,11 @@ class ChatTurnModel(Base, TimestampMixin):
     # live SSE connection that happened to be open when it ran. `llm_delta` events are excluded (see
     # that file) — this is the run/pipeline structure, not a token-by-token replay.
     events_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # The normalized plan preview this turn's route decided on (2026-10-06, explicit user ask:
+    # show what will run BEFORE it runs, like Luma, then auto-proceed) —
+    # `[{specialist, instruction, parallel_group}, ...]`, built once by `orchestrator.py`'s
+    # `_build_plan_preview()` for every route, not just `dynamic`. Persisted so the plan-preview
+    # chat bubble survives a page refresh exactly as the live turn showed it. Null only if route()
+    # genuinely produced no steps (should not happen in practice — every route maps to at least
+    # one specialist).
+    plan_json: Mapped[list | None] = mapped_column(JSON, nullable=True)

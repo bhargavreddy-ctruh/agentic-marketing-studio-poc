@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.mood_board_asset import MoodBoardAssetModel
 
 
-class SqliteMoodBoardRepository:
+class PostgresMoodBoardRepository:
     """Satisfies the MoodBoardRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

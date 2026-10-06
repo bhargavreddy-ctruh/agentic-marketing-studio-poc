@@ -18,7 +18,7 @@ import {
 } from "@/lib/api";
 import { assetUrl } from "@/lib/http";
 import { ReferencedElement, elementKind } from "@/components/CanvasView";
-import { LiveEvent, describeEvent, openEventStream } from "@/lib/events";
+import { LiveEvent, PipelineNode, PlanStep, describeEvent, openEventStream } from "@/lib/events";
 import { CanvasElement, getCanvasState, uploadAndPlaceElement } from "@/lib/canvas";
 
 /** `video_stage` values a session's brief can carry while paused at a real pipeline gate
@@ -26,15 +26,39 @@ import { CanvasElement, getCanvasState, uploadAndPlaceElement } from "@/lib/canv
  * gate's actual message/options still come from the real `next_prompt`, same as ideation. */
 type GateStage = "narrative_pending" | "scene_pending" | "motion_pending";
 
+/** Real, live-found gap (2026-10-06): a proxy in front of the backend (Next.js's own dev-mode
+ * rewrite proxy, or Vercel's rewrite proxy in prod) can give up relaying a response — including
+ * the normally-instant `POST /turns` response, now that the backend's turn handling is
+ * fire-and-forget — well before the backend itself has failed or even finished. That shows up as
+ * a `fetch`-level network error (no real HTTP status at all) or a bare, non-JSON 500/502/503/504
+ * from the proxy. A GENUINE backend failure always returns a real JSON error body
+ * (`core/middleware/error_handler.py`'s own generic catch-all message is "Something went
+ * wrong.", never this exact phrase) — so an `ApiError` with status 500 and message EXACTLY
+ * "Internal Server Error" is an unambiguous proxy signature, never the real app. `withNarration`
+ * uses this to decide whether to swallow a `postTurn` rejection and keep waiting for the real
+ * `turn_completed` SSE event instead of surfacing a false "it failed" to the user. */
+function isGatewayTimeoutLikeError(err: unknown): boolean {
+  if (err instanceof ApiError) {
+    return [502, 503, 504].includes(err.status) || (err.status === 500 && err.message === "Internal Server Error");
+  }
+  return err instanceof Error && (err.message.includes("fetch failed") || err.message.includes("hang up"));
+}
+
 interface ChatMessage {
   id: string;
-  role: "user" | "assistant" | "error" | "gate";
+  role: "user" | "assistant" | "error" | "gate" | "plan";
   text: string;
   options?: IdeationOption[];
   allowFreeText?: boolean;
   gateStage?: GateStage;
   narrativePlan?: NarrativePlan;
   scenePlan?: ScenePlan;
+  /** The plan preview for this turn's route — every route gets one, not just `dynamic`
+   * (2026-10-06, explicit user ask: show what will run BEFORE it runs, like Luma, then
+   * auto-proceed; also: "update the progress also," per the same ask — see `pipelineNodes` usage
+   * in the render below, which reuses the SAME real node/status data `AgentHUD`/Node Mode already
+   * derive from the live event stream, rather than inventing a second progress mechanism). */
+  planSteps?: PlanStep[];
   /** The canvas element this user message referenced when it was sent, if any (2026-09-21, per
    * the user's explicit ask) — real, live-found gap: the "referencing this X" chip only showed
    * while composing, then vanished the instant the message sent (`onClearReference` is one-shot),
@@ -69,6 +93,53 @@ function newId(): string {
 function truncate(text: string, maxChars: number): string {
   const t = text.trim();
   return t.length > maxChars ? `${t.slice(0, maxChars - 1).trimEnd()}…` : t;
+}
+
+/** `headline_writer` -> "Headline Writer" — a plain client-side label transform, no new registry
+ * needed (2026-10-06, plan-preview cards). */
+function humanizeSpecialist(name: string): string {
+  return name
+    .split("_")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
+/** Groups plan steps by `parallel_group`, mirroring `graph.py`'s own `_group_plan_steps` semantics
+ * exactly: a missing/`null` group is its own singleton (never grouped with anything else), and a
+ * group's position in the output is its FIRST member's position in the input — so the preview's
+ * "run together" grouping visually matches exactly what `_dynamic_executor_node` will actually do,
+ * not an independently-invented grouping (2026-10-06). */
+function groupPlanSteps(plan: PlanStep[]): PlanStep[][] {
+  const groups: PlanStep[][] = [];
+  const indexByGroup = new Map<number, number>();
+  for (const step of plan) {
+    const gid = step.parallel_group;
+    if (gid == null) {
+      groups.push([step]);
+      continue;
+    }
+    const existing = indexByGroup.get(gid);
+    if (existing != null) {
+      groups[existing].push(step);
+    } else {
+      indexByGroup.set(gid, groups.length);
+      groups.push([step]);
+    }
+  }
+  return groups;
+}
+
+/** Live/restored status for one plan step — cross-referenced against `pipelineNodes` (the SAME
+ * real data `AgentHUD`/Node Mode already derive from the event stream via `buildPipelineNodes`,
+ * computed once in `page.tsx`) by exact specialist-name match (`nodeIdentity()` in `lib/events.ts`
+ * sets a specialist node's `label` to the raw specialist key verbatim). `undefined` — rendered as
+ * a neutral/no badge — when there's no matching node yet (the step hasn't started) or this isn't
+ * the turn `pipelineNodes` currently reflects. */
+function planStepStatus(
+  step: PlanStep,
+  pipelineNodes?: PipelineNode[],
+): PipelineNode["status"] | undefined {
+  return pipelineNodes?.find((n) => n.label === step.specialist)?.status;
 }
 
 /**
@@ -160,6 +231,11 @@ interface ChatPanelProps {
   onRestoreEvents?: (events: LiveEvent[]) => void;
   isMaximized?: boolean;
   onToggleMaximize?: () => void;
+  /** The SAME `pipelineNodes` (`buildPipelineNodes(turnEvents)`) `page.tsx` already computes once
+   * and passes to `AgentHUD` — reused here, not recomputed, so the plan-preview card's live
+   * per-step progress badges ("update the progress also," 2026-10-06) come from the exact same
+   * real event-derived data every other progress indicator in this app already uses. */
+  pipelineNodes?: PipelineNode[];
 }
 
 /** Imperative handle so a sibling (the canvas's right-click "New Image"/"New Video") can submit a
@@ -172,14 +248,16 @@ export interface ChatPanelHandle {
 }
 
 function ChatPanel(
-  { sessionId, onSessionId, onGenerated, referencedElements, onClearReference, onAddReferenceElement, onTurnEvent, onRestoreEvents, isMaximized, onToggleMaximize }: ChatPanelProps,
+  { sessionId, onSessionId, onGenerated, referencedElements, onClearReference, onAddReferenceElement, onTurnEvent, onRestoreEvents, isMaximized, onToggleMaximize, pipelineNodes }: ChatPanelProps,
   ref: React.ForwardedRef<ChatPanelHandle>,
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [approvalMode, setApprovalMode] = useState<"auto" | "approve">("auto");
   const [changingMode, setChangingMode] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoadingState] = useState(false);
+  const loadingRef = useRef(false);
+  function setLoading(v: boolean) { loadingRef.current = v; setLoadingState(v); }
   const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -289,21 +367,14 @@ function ChatPanel(
   // (e.g. answering a clarifying question) keep the same grouping as the turn that started it.
   const lastReferencedProductIdRef = useRef<string | null | undefined>(undefined);
 
-  // Real, live-found gap (2026-09-30): a long generation's `postTurn()` call sometimes fails with
-  // a 502 even though the backend is still genuinely working — confirmed live, the generation
-  // completes moments later and only reloading the page ever surfaced it. Root cause: Vercel's
-  // rewrite proxy to the EC2 backend has its own timeout for an external origin's response,
-  // materially shorter than this app's own generous backend-side timeouts, and independent of them
-  // — the backend was never told to stop, only the proxy gave up relaying its eventual response.
-  // `isUnmountedRef` lets the reconnect fallback below (which reuses `pollUntilResolved`, the same
-  // mechanism `loadHistory` already uses for the identical "still generating, catch me up" case on
-  // a page refresh) safely stop updating state if this panel unmounts mid-poll.
-  const isUnmountedRef = useRef(false);
-  useEffect(() => {
-    return () => {
-      isUnmountedRef.current = true;
-    };
-  }, []);
+  // Real, live-found bug (2026-10-06): the Stop button optimistically appends its own
+  // "Generation cancelled by user." bubble and unlocks the UI immediately, but `handleSend`/
+  // `handlePickOption` are still awaiting `withNarration` underneath — the backend's own real
+  // `CancelledError` handling (`session_service.py`'s `_run_turn`) still emits a genuine
+  // `turn_completed` event with that same message, which resolves the pending promise and
+  // appends a SECOND, duplicate bubble once it arrives. Set by Stop, checked (and cleared) right
+  // where that result would otherwise be appended, in both call sites.
+  const cancelledRef = useRef(false);
 
   // Phase 1 gap-close (2026-09-28, combined grouping plan) — the one real ChatPanel gap:
   // referencing an element always silently inherited its product, with no way to say "generate
@@ -354,31 +425,79 @@ function ChatPanel(
    * client-side copy is what the message will show immediately, matching what a later refresh
    * would restore. Returns it (plus elapsed seconds) alongside the call's own result — previously
    * this was thrown away the instant the turn finished, never part of the chat history at all. */
-  async function withNarration<T>(
+  async function withNarration(
     sid: string,
-    fn: () => Promise<T>,
-  ): Promise<{ result: T; thinking: string; seconds: number }> {
+    fn: () => Promise<SessionResponse>,
+  ): Promise<{ result: SessionResponse; thinking: string; seconds: number }> {
     setNarration([]);
     setLiveThinking("");
     const startedAt = Date.now();
     let thinking = "";
-    const close = openEventStream(sid, (event) => {
-      const line = describeEvent(event);
-      if (line) setNarration((n) => [...n, line]);
-      if (event.type === "llm_delta" && typeof event.text === "string") {
-        thinking += event.text;
-        setLiveThinking(thinking);
-      }
-      onTurnEvent?.(event);
+    // Real, live-found bug (2026-10-06): this function used to open a SECOND, separate
+    // `openEventStream` subscription right here, left over from before the backend's turn
+    // handling became fire-and-forget (the `new Promise` below, which resolves off a real
+    // `turn_completed` event, is the version that replaced it). That old subscription's own
+    // `close()` handle was never called anywhere — a leaked, never-closed SSE connection on every
+    // single turn, and every event (narration lines, streamed "thinking" text, the plan-preview
+    // bubble) got handled TWICE, once by each subscription — doubled/garbled streamed text and a
+    // duplicated plan-preview bubble. Removed; the subscription below already does everything the
+    // old one did, plus the real completion signal.
+    return new Promise<{ result: SessionResponse; thinking: string; seconds: number }>((resolve, reject) => {
+      let isDone = false;
+      const cleanup = () => {
+        if (isDone) return;
+        isDone = true;
+        close();
+        setNarration([]);
+        setLiveThinking("");
+      };
+
+      const close = openEventStream(sid, async (event) => {
+        const line = describeEvent(event);
+        if (line) setNarration((n) => [...n, line]);
+        if (event.type === "llm_delta" && typeof event.text === "string") {
+          thinking += event.text;
+          setLiveThinking(thinking);
+        }
+        // The plan-preview bubble (2026-10-06, explicit user ask) — appended the MOMENT the route
+        // decides, while `fn()` (the real `postTurn` promise) is still in flight, so it shows
+        // BEFORE the eventual result bubble, not after the turn completes. No gate/approval logic
+        // involved: execution just keeps running underneath this in the same turn.
+        if (event.type === "plan_proposed" && Array.isArray(event.plan)) {
+          setMessages((m) => [...m, { id: newId(), role: "plan", text: "", planSteps: event.plan as PlanStep[] }]);
+        }
+        onTurnEvent?.(event);
+
+        if (event.type === "turn_completed") {
+          try {
+            const finalSession = await getSession(sid);
+            cleanup();
+            resolve({ result: finalSession, thinking, seconds: Math.round((Date.now() - startedAt) / 1000) });
+          } catch (e) {
+            cleanup();
+            reject(e);
+          }
+        }
+      });
+
+      // The POST request is fire-and-forget. It returns status="generating" immediately, so a
+      // rejection here means the proxy in front of the backend gave up relaying the (fast) POST
+      // response — not that the turn itself failed. The real completion signal either way is the
+      // `turn_completed` SSE event above, so a timeout-shaped rejection is swallowed here, not
+      // surfaced. Real, live-found bug (2026-10-06): this used to also treat ANY bare HTTP 500 as
+      // timeout-shaped with no check on the error body — but the backend's own genuine failures
+      // ALSO return status 500 (just with a real JSON error body, never this exact literal
+      // proxy-only phrase — see `isGatewayTimeoutLikeError`'s own comment) — silently swallowing
+      // those left a real backend crash showing no error at all, stuck "loading" forever with no
+      // `turn_completed` ever coming. Reuses the same precise check `handleSend`'s own comment
+      // references, so a genuine failure is never mistaken for "still working."
+      fn().catch((err) => {
+        if (!isGatewayTimeoutLikeError(err)) {
+          cleanup();
+          reject(err);
+        }
+      });
     });
-    try {
-      const result = await fn();
-      return { result, thinking, seconds: Math.round((Date.now() - startedAt) / 1000) };
-    } finally {
-      close();
-      setNarration([]);
-      setLiveThinking("");
-    }
   }
 
   function appendUser(text: string, referencedElements?: ReferencedElement[]) {
@@ -417,15 +536,6 @@ function ChatPanel(
   function appendError(err: unknown) {
     const text = err instanceof ApiError ? `${err.message} (HTTP ${err.status})` : "Network error — is the backend running?";
     setMessages((m) => [...m, { id: newId(), role: "error", text }]);
-  }
-
-  /** Real, live-found gap (2026-09-30) — see `isUnmountedRef`'s own comment above for the full
-   * root cause. A 502/503/504 on the turn's own POST is exactly the shape of "a proxy in the
-   * middle gave up on us," never a real backend crash (a genuine failure returns 500 with a real
-   * error body, still handled by the normal `appendError` path below) — those three, and only
-   * those three, are worth automatically falling back to reconnect-and-poll for. */
-  function looksLikeGatewayTimeout(err: unknown): boolean {
-    return err instanceof ApiError && [502, 503, 504].includes(err.status);
   }
 
   async function handleSend(freeTextOverride?: string) {
@@ -484,16 +594,24 @@ function ChatPanel(
           startNewProduct: useStartNewProduct,
         }),
       );
-      setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
-      if (res.status === "completed") onGenerated?.();
-    } catch (err) {
-      if (sid && looksLikeGatewayTimeout(err)) {
-        // The backend is very likely still working (see isUnmountedRef's comment above) — the
-        // same reconnect-and-poll path `loadHistory` already uses for a page refresh mid-generation.
-        setMessages((m) => [...m, { id: newId(), role: "assistant", text: "Still working — reconnecting…" }]);
-        await pollUntilResolved(sid, () => isUnmountedRef.current);
-        return;
+      // See `cancelledRef`'s own comment above — a user-initiated Stop already appended its own
+      // cancellation bubble optimistically; skip appending this turn's real (duplicate) one.
+      if (cancelledRef.current) {
+        cancelledRef.current = false;
+      } else {
+        setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
+        if (res.status === "completed") onGenerated?.();
       }
+    } catch (err) {
+      // Real, live-found bug (2026-10-06): this used to special-case a gateway-timeout-shaped
+      // error here with its own separate reconnect-and-poll fallback (`pollUntilResolved`,
+      // `looksLikeGatewayTimeout`) — but `withNarration` above already owns that exact case
+      // internally now that the backend's turn handling is fire-and-forget: it swallows a
+      // timeout-shaped rejection from `fn()` and waits on the real `turn_completed` SSE event
+      // instead of ever rejecting here for that case. An error actually reaching this catch block
+      // is a genuine failure (the POST itself never even started the turn), not a slow backend
+      // still working — always surfaced directly, same as `loadHistory`'s own reconnect path
+      // already does for the equivalent "still generating" case on a page refresh.
       appendError(err);
     } finally {
       setLoading(false);
@@ -539,14 +657,17 @@ function ChatPanel(
           startNewProduct: useStartNewProduct,
         }),
       );
-      setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
-      if (res.status === "completed") onGenerated?.();
-    } catch (err) {
-      if (looksLikeGatewayTimeout(err)) {
-        setMessages((m) => [...m, { id: newId(), role: "assistant", text: "Still working — reconnecting…" }]);
-        await pollUntilResolved(sessionId, () => isUnmountedRef.current);
-        return;
+      // See `cancelledRef`'s own comment above — a user-initiated Stop already appended its own
+      // cancellation bubble optimistically; skip appending this turn's real (duplicate) one.
+      if (cancelledRef.current) {
+        cancelledRef.current = false;
+      } else {
+        setMessages((m) => [...m, describeResponse(res, thinking, seconds)]);
+        if (res.status === "completed") onGenerated?.();
       }
+    } catch (err) {
+      // See the matching comment in `handleSend`'s own catch block above — `withNarration`
+      // already owns the "proxy gave up but the backend is still working" case internally now.
       appendError(err);
     } finally {
       setLoading(false);
@@ -577,6 +698,12 @@ function ChatPanel(
       }
       const restored: ChatMessage[] = turns.flatMap((turn: ChatTurn) => [
         { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
+        // The plan-preview bubble, reconstructed from its own persisted field (2026-10-06) —
+        // reproduces the exact live ordering (user -> plan -> result) so a refresh shows the same
+        // conversation shape the live view did.
+        ...(turn.plan && turn.plan.length > 0
+          ? [{ id: newId(), role: "plan" as const, text: "", planSteps: turn.plan }]
+          : []),
         { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
       ]);
 
@@ -592,7 +719,6 @@ function ChatPanel(
       if (session.status === "generating") {
         restored.push({ id: newId(), role: "assistant", text: "Reconnecting — a generation is still in progress…" });
         setMessages(restored);
-        await pollUntilResolved(sessionId, () => isCancelled?.() ?? false);
         return;
       }
 
@@ -633,6 +759,9 @@ function ChatPanel(
       }
       const olderMessages: ChatMessage[] = older.flatMap((turn: ChatTurn) => [
         { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
+        ...(turn.plan && turn.plan.length > 0
+          ? [{ id: newId(), role: "plan" as const, text: "", planSteps: turn.plan }]
+          : []),
         { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
       ]);
       oldestTurnIdRef.current = older[0]?.id ?? oldestTurnIdRef.current;
@@ -684,52 +813,11 @@ function ChatPanel(
    * match exactly what a fresh restore would show later), tell the canvas to refresh
    * (`onGenerated`), and tell Node Mode the turn is over (`onTurnEvent`) since no live SSE events
    * for this turn were ever seen by this tab. */
-  async function pollUntilResolved(sid: string, isCancelled: () => boolean) {
-    setLoading(true);
-    setNarration([]);
-    setLiveThinking("");
-    let thinking = "";
-    const close = openEventStream(sid, (event) => {
-      const line = describeEvent(event);
-      if (line) setNarration((n) => [...n, line]);
-      if (event.type === "llm_delta" && typeof event.text === "string") {
-        thinking += event.text;
-        setLiveThinking(thinking);
-      }
-      onTurnEvent?.(event);
-    });
-
-    try {
-      while (!isCancelled()) {
-        await new Promise((r) => setTimeout(r, 2000));
-        if (isCancelled()) return;
-        let session: SessionResponse;
-        try {
-          session = await getSession(sid);
-        } catch {
-          continue; // a transient network hiccup — keep polling, don't give up on one failed check
-        }
-        if (session.status === "generating") continue;
-        const turns = await listTurns(sid).catch(() => [] as ChatTurn[]);
-        const lastTurn = turns[turns.length - 1];
-        setMessages((m) => [
-          ...m.slice(0, -1), // drop the "Reconnecting…" placeholder
-          describeResponse(session, lastTurn?.thinking_text ?? undefined),
-        ]);
-        if (session.status === "completed") onGenerated?.();
-        // The turn that just resolved has its own real persisted events now too — restore just
-        // THIS turn's (not the whole session's), matching the mount effect's own last-turn-only fix.
-        if (lastTurn) onRestoreEvents?.(lastTurn.events as LiveEvent[]);
-        onTurnEvent?.({ type: "turn_completed" } as LiveEvent);
-        return;
-      }
-    } finally {
-      close();
-      setNarration([]);
-      setLiveThinking("");
-      setLoading(false);
-    }
-  }
+  // Only the MOST RECENT plan bubble gets live/restored progress badges below — `pipelineNodes`
+  // always reflects whichever turn's events `page.tsx` currently has loaded (the live in-flight
+  // turn, or the last turn's restored events), never older turns', so applying it to an older
+  // plan bubble could show a stale/wrong status borrowed from an unrelated later turn.
+  const lastPlanMessageId = messages.filter((mm) => mm.role === "plan").at(-1)?.id;
 
   return (
     <div className={`flex h-full w-full flex-col bg-surface-900/95 backdrop-blur-2xl p-4 shadow-2xl overflow-hidden font-sans transition-all duration-300 ${
@@ -853,14 +941,62 @@ function ChatPanel(
                       ? m.gateStage === "motion_pending"
                         ? "bg-red-900/10 text-surface-200 border border-red-900/30"
                         : "bg-surface-800/50 text-surface-200 border border-surface-700/50"
-                      : "text-surface-200")
+                      : m.role === "plan"
+                        ? "bg-surface-800/50 text-surface-200 border border-surface-700/50"
+                        : "text-surface-200")
               }
             >
               {m.role === "gate" && (
                 <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">⏸</span> 
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">⏸</span>
                   {m.gateStage === "motion_pending" ? "Spend approval needed" : "Approval needed"}
                 </p>
+              )}
+              {/* Plan preview (2026-10-06, explicit user ask: show what will run BEFORE it runs,
+               * like Luma, then auto-proceed — every route, not just dynamic; "update the progress
+               * also" per the same ask, via live per-step status badges cross-referenced against
+               * `pipelineNodes`, the SAME real event-derived data AgentHUD/Node Mode already use —
+               * only for the most recent plan bubble, see `lastPlanMessageId` above). */}
+              {m.role === "plan" && m.planSteps && m.planSteps.length > 0 && (
+                <div>
+                  <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
+                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">📋</span>
+                    Here&apos;s the plan
+                  </p>
+                  <div className="space-y-2 rounded-xl border border-surface-700/50 bg-surface-900/50 p-3 text-xs shadow-inner">
+                    {groupPlanSteps(m.planSteps).map((group, gi) => (
+                      <div key={gi} className={group.length > 1 ? "rounded-lg border border-surface-700/40 p-2" : ""}>
+                        {group.length > 1 && (
+                          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-surface-500">
+                            ⚡ run together
+                          </p>
+                        )}
+                        <ul className="ml-4 space-y-1 list-disc text-surface-400">
+                          {group.map((step, si) => {
+                            const status = m.id === lastPlanMessageId ? planStepStatus(step, pipelineNodes) : undefined;
+                            return (
+                              <li key={si} className="flex items-start gap-1.5">
+                                <span className="flex-1">
+                                  <span className="font-medium text-surface-300">{humanizeSpecialist(step.specialist)}</span>
+                                  {step.instruction && <> — {truncate(step.instruction, 140)}</>}
+                                </span>
+                                {status === "running" && (
+                                  <span className="shrink-0 text-amber-400" title="Running">●</span>
+                                )}
+                                {status === "completed" && (
+                                  <span className="shrink-0 text-emerald-400" title="Completed">✓</span>
+                                )}
+                                {status === "failed" && (
+                                  <span className="shrink-0 text-red-400" title="Failed">✗</span>
+                                )}
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               )}
               {m.role === "user" && m.referencedElements && m.referencedElements.length > 0 && (
                 <div className="mb-2 flex flex-wrap gap-2">
@@ -1017,11 +1153,18 @@ function ChatPanel(
               <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
               <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
             </svg>
-            <div className="flex flex-col">
-              {narration.length === 0 ? (
-                <span className="italic">Imagining...</span>
-              ) : (
-                <span className="italic text-surface-400">{narration[narration.length - 1]}</span>
+            <div className="flex flex-col gap-1 w-full max-w-full">
+              <div className="flex items-center gap-2">
+                {narration.length === 0 ? (
+                  <span className="italic">Imagining...</span>
+                ) : (
+                  <span className="italic text-surface-400 font-medium">{narration[narration.length - 1]}</span>
+                )}
+              </div>
+              {liveThinking && (
+                <div className="text-[10px] text-surface-500 font-mono whitespace-pre-wrap max-h-48 overflow-y-auto pl-2 border-l-2 border-surface-700/50 mt-1">
+                  {liveThinking.replace(/<\/?thought>/g, '')}
+                </div>
               )}
             </div>
           </div>
@@ -1305,12 +1448,28 @@ function ChatPanel(
                 type="button"
                 onClick={async () => {
                   if (!sessionId) return;
+                  // Instantly optimistically unlock the UI so the user isn't trapped.
+                  // Also remove any pending "Reconnecting" / "Still working" placeholder
+                  // bubbles left over from a previous mid-turn page refresh — without this,
+                  // they'd stay visible forever since nothing else ever replaces them now.
+                  // `cancelledRef` (see its own comment above `handleSend`) tells the still-
+                  // in-flight `withNarration` call not to append its own, duplicate result
+                  // bubble once the backend's real cancellation confirms via `turn_completed`.
+                  cancelledRef.current = true;
+                  setLoading(false);
+                  setMessages((m) => [
+                    ...m.filter(
+                      (msg) =>
+                        !msg.text.startsWith("Reconnecting") &&
+                        !msg.text.startsWith("Still working"),
+                    ),
+                    { id: newId(), role: "assistant", text: "Generation cancelled by user." },
+                  ]);
                   try {
                     await cancelTurn(sessionId);
                   } catch (e) {
                     console.error("Failed to cancel", e);
                     appendError(e);
-                    setLoading(false);
                   }
                 }}
                 className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-200 text-surface-900 transition-transform hover:scale-105 shadow-sm"

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.tool_call_log import ToolCallLogModel
 
 
-class SqliteToolCallLogRepository:
+class PostgresToolCallLogRepository:
     """Satisfies the ToolCallLogRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

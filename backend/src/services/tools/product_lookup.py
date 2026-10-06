@@ -12,7 +12,7 @@ from typing import ClassVar
 from ...core.exceptions import ProviderUnavailable
 from ...models.base import async_session_factory
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
-from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from ...repositories.postgres.postgres_product_repository import PostgresProductRepository
 from .base import Tool, ToolResult
 from .registry import register_tool
 
@@ -52,7 +52,7 @@ class ProductLookupTool(Tool):
         attributes: dict | None = None
         if product_id:
             async with async_session_factory() as db:
-                product = await SqliteProductRepository(db).get(product_id)
+                product = await PostgresProductRepository(db).get(product_id)
             if product is not None:
                 attributes = product.attributes
 

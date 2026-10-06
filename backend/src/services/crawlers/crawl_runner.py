@@ -56,16 +56,16 @@ async def run_crawl_and_ingest(session_id: str, url: str, *, url_type: str | Non
     # frontend wiring gap, the events never left the backend. Setting it here, in this task's own
     # context, fixes every crawl emit at once.
     set_current_session(session_id)
-    from ...repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
-    from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
-    from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
-    from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
+    from ...repositories.postgres.postgres_brand_repository import PostgresBrandRepository
+    from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
+    from ...repositories.postgres.postgres_product_repository import PostgresProductRepository
+    from ...repositories.postgres.postgres_session_repository import PostgresSessionRepository
     from ..knowledge.brand_dna_service import BrandDnaService
     from ..knowledge.guardrail_service import GuardrailService
     from ..knowledge.product_dna_service import ProductDnaService
 
     async with async_session_factory() as db:
-        sessions = SqliteSessionRepository(db)
+        sessions = PostgresSessionRepository(db)
         session = await sessions.get(session_id)
         if session is None:
             log.warning("crawl_background_session_not_found", extra={"_extra_session_id": session_id})
@@ -78,14 +78,14 @@ async def run_crawl_and_ingest(session_id: str, url: str, *, url_type: str | Non
             # `session` read above (only its id/user_id are actually used by these calls) — two
             # concurrent crawls for the same session still do their real work in parallel.
             if resolved_url_type == "product":
-                product_svc = ProductDnaService(SqliteProductRepository(db))
+                product_svc = ProductDnaService(PostgresProductRepository(db))
                 product, _element_ids = await product_svc.crawl_product_from_url(
-                    url=url, session=session, canvas=SqliteCanvasRepository(db)
+                    url=url, session=session, canvas=PostgresCanvasRepository(db)
                 )
                 guardrail_scope = "product"
                 guardrail_text = f"Guardrails derived from crawling {url}: {product.attributes.get('summary', '')}"
             else:
-                brand_svc = BrandDnaService(SqliteBrandRepository(db))
+                brand_svc = BrandDnaService(PostgresBrandRepository(db))
                 brand = await brand_svc.crawl_brand_from_url(url=url, session=session)
                 guardrail_scope = "brand"
                 guardrail_text = f"Guardrails derived from crawling {url}: {brand.raw_profile.get('raw_facts', {})}"

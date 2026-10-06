@@ -122,6 +122,25 @@ def detect_deliverable_key(text: str) -> str | None:
             return key
     return None
 
+def detect_deliverable_keys(text: str) -> list[str]:
+    """Every DISTINCT deliverable key the message plausibly names, in first-match order — unlike
+    `detect_deliverable_key` (which returns only the first match, correct for the common
+    single-deliverable case), this is used to detect when a message names 2+ DIFFERENT
+    deliverables in one turn (2026-10-06, live-found bug: "make a youtube thumbnail... and also
+    generate an instagram 9:16 image post" matched `instagram_story`'s pattern before
+    `youtube_thumbnail`'s, so the single global `brief["deliverable"]` this function's sibling
+    returns collided both image steps onto one wrong aspect ratio). Callers use this to detect the
+    multi-deliverable case and deliberately NOT set a single turn-global spec when it fires."""
+    if not text:
+        return []
+    lower_text = text.lower()
+    seen: list[str] = []
+    for pattern, key in _REGEX_MAPPINGS:
+        if key not in seen and re.search(pattern, lower_text):
+            seen.append(key)
+    return seen
+
+
 def detect_deliverable(text: str) -> DeliverableSpec | None:
     key = detect_deliverable_key(text)
     return DELIVERABLES.get(key) if key else None

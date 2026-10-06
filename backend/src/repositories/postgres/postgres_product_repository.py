@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.product_profile import ProductProfileModel
 
 
-class SqliteProductRepository:
+class PostgresProductRepository:
     """Satisfies the ProductRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

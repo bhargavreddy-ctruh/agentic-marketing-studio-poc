@@ -5416,3 +5416,211 @@ Overhauled `ChatPanel.tsx` to match the target modern, sleek dark mode aesthetic
   rapid navigation) can still exhaust it; the user explicitly deferred options (b)/(c) above.
 - Per explicit instruction, this round (frontend-only, no backend/schema changes) was pushed to
   `origin` only, not `ctruh`.
+
+## Plan Preview for Every Route — "announce the plan, then auto-execute" (2026-10-06)
+
+- Explicit user ask: like Luma, show a plan preview in chat (what will run, parallel vs.
+  sequential) BEFORE execution, then auto-proceed — not a blocking approval gate. Corrected once
+  mid-design: scoped first to the `dynamic` route only, then explicitly widened by the user to
+  **every** route, then further extended ("the workflow should follow the same pattern and update
+  the progress also") to include LIVE per-step progress badges, reusing the exact same
+  `pipelineNodes` data `AgentHUD`/Node Mode already derive from the event stream — not a second,
+  parallel progress mechanism.
+- **Execution engine untouched.** The `dynamic` route's parallel/sequential executor
+  (`_dynamic_executor_node`/`_group_plan_steps`, `graph.py`) was already fully correct; this
+  feature is a pure side-effect inserted upstream of it. `orchestrator.py` gained
+  `_build_plan_preview()`: for `dynamic`, reuses the LLM's own real per-request plan verbatim (the
+  only route with genuine `parallel_group` data); for `direct_fix`, a single step using the user's
+  own message as its instruction; for `full_image`/`full_video`/`full_audio` (no LLM-authored plan
+  at all), the relevant `LeadSpec.specialist_sequence`(s) concatenated in pipeline order — shown as
+  SEQUENTIAL, deliberately never claiming a parallel grouping for these, since their real
+  concurrency (e.g. Narrative Lead's script_writer/pacing_editor) is conditional, code-driven
+  control flow, not static data — a false parallel claim would be actively misleading; "sequential"
+  is always a safe, correct (if coarser) statement. Emitted once via a new `plan_proposed` event,
+  right after `route()` finalizes the route (distinct from the existing narrow `route_decided`
+  event, which isn't widened).
+- **Two real bugs found only by testing live, not by static review** — both now covered by what
+  they broke:
+  1. **Migration precedent misapplied.** The plan's own design (and this doc's established
+     convention) said "just add a column, `Base.metadata.create_all()` handles it, same precedent
+     as `events_json`" — true ONLY for a brand-new table. `chat_turns` already existed in the live
+     Supabase DB (created when the table was first introduced), and `create_all()` only creates
+     tables that don't exist yet — it never alters an existing one. The real mechanism this
+     codebase already has for exactly this case is `models/base.py`'s own `init_models()`
+     migrations list (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, already used for a dozen other
+     post-hoc columns on `sessions`/`canvas_elements`/etc.) — `plan_json` needed an entry there,
+     not just a new `mapped_column`. Caught live: every turn errored with
+     `asyncpg.exceptions.UndefinedColumnError: column chat_turns.plan_json does not exist`.
+  2. **`GraphState` TypedDict omission.** `route()` set `state["plan_preview"] = plan_preview`
+     (mirroring the already-working `dynamic_plan` pattern exactly) and the `plan_proposed` SSE
+     event correctly carried the real plan — confirmed live, visible in the persisted
+     `events_json`. But `session_service.py`'s `result_state.get("plan_preview")` still came back
+     `None` at turn-completion time. Root cause: `state.py`'s `GraphState` is the TypedDict schema
+     LangGraph introspects to set up its own internal state channels when merging one node's
+     partial update into the next — `dynamic_plan` is declared there (why it already worked);
+     `plan_preview` wasn't, so it never reliably survived the `orchestrator` → `direct_fix`/
+     `dynamic_executor` node transition inside the compiled graph, even though it was a perfectly
+     valid Python dict key within `route()`'s own local execution. Fixed by declaring
+     `plan_preview: list[dict[str, Any]] | None` in `GraphState`, same as `dynamic_plan`.
+- **Live progress badges.** `page.tsx`'s already-existing `pipelineNodes` (`buildPipelineNodes
+  (turnEvents)`, the same data `AgentHUD` uses) is now also passed to `ChatPanel` as a prop; the
+  plan card looks up each step's status by exact specialist-name match against `pipelineNodes`
+  (`nodeIdentity()` in `lib/events.ts` already sets a specialist node's `label` to the raw
+  specialist key verbatim) — only for the MOST RECENT plan bubble (`lastPlanMessageId`), since
+  `pipelineNodes` always reflects whichever turn's events are currently loaded; applying it to an
+  older bubble could show a stale status borrowed from an unrelated later turn.
+- Verified: 5 new backend unit tests (one per route, asserting the exact normalized plan shape and
+  that `emit("plan_proposed", ...)` fires) — 105 passed total; `ruff check`/`py_compile` clean;
+  `tsc --noEmit` clean. Live, end to end, after both bug fixes: a real turn ("write a punchy
+  headline for my new sneaker brand called Zoomies," routing to `direct_fix`→`headline_writer`)
+  showed the plan bubble immediately with a live amber "running" dot, auto-proceeded with no click,
+  turned into a ✓ on completion, and survived a full page refresh with the same ✓ status restored
+  from persisted events — confirmed via direct inspection of the turn's own JSON response that
+  `plan` was no longer `null`. Kept to a cheap, text-only specialist for this verification —
+  no paid image/video generation was triggered.
+
+## Specialist prompt simplification (2026-10-06)
+
+Explicit user ask: cross-check all 21 production specialist prompts (`backend/src/services/
+specialists/prompts/*.md`) against a simpler reference format, make them "simple yet effective,"
+while never disturbing the `<output_format>` JSON schema (other code parses those exact keys).
+`/Users/bhargavreddy/Downloads/prompts/` turned out to be an orphaned, unused snapshot — `grep -r`
+confirmed nothing in the backend loads from it; the real prompts are the ones in `services/
+specialists/prompts/`. Stripped `<!-- CHANGELOG -->` dev-history comments and "Real, live-found
+gap (date): ..." incident-narration prose from every file, restating each rule as a direct
+imperative instead — files shrank 15-40% while every MUST/mandatory tool-grounding condition,
+every "use real creative judgment, not a fixed template" clause, and every numeric cap was
+preserved. `brand_asset_applier.md` left structurally untouched (only the changelog comment
+removed) since it deliberately has no `<output_format>` block at all, matching its empty
+`required_output_fields` in `registry.py` — confirmed via `runner.py`'s own handling for "no schema
+to enforce" specialists. Verified: every file's `<output_format>` JSON keys cross-checked
+programmatically against `registry.py`'s `required_output_fields` — zero drift; `pytest` 105/105;
+all 21 specialists reload cleanly through the real registry.
+
+## Prompt-engineering cross-check — 3 real bugs found and fixed (2026-10-06)
+
+User, acting as a senior prompt engineer, asked for a cross-check of all specialist system prompts
+against real user-satisfaction criteria (does output match exactly what the user asked for). Three
+parallel audit agents (image/strategy pipeline, video pipeline, copy/compliance pipeline) surfaced
+confirmed, fixed bugs plus documented-but-deferred strategic gaps (no marketing-strategist layer,
+no legal/claims checker — both out of scope for this pass):
+1. **`format_technical_qa` auto-failed every piece of copy.** `compliance_gate.py`'s `_run_checks`
+   called the format/dimension checker unconditionally for every element, including text cards
+   (`element_type == "text"`) — it only understands image/video dimensions, so it always returned
+   `"unsupported mime type 'text/plain'"`, which `worst_of` then treated as a real compliance
+   failure. Every headline/caption/tone/claims card this app ever produced was permanently stamped
+   `compliance_status: "failed"`. Fixed: skip the format/dimension check entirely for non-image/
+   video elements (`passed: True, reason: "not applicable to text elements"`).
+2. **Script/voiceover drift.** `sound_designer`'s own `voiceover_line` could diverge from
+   `script_writer`'s already-approved `script_line` — nothing enforced reuse. Fixed two ways:
+   `sound_designer.md` now mandates reusing an approved script line verbatim, AND `motion_lead.py`
+   adds a deterministic backstop — if the model's reported line still drifts from the approved
+   script, the audio is re-synthesized from the approved text directly via `text_to_speech` rather
+   than trusting the model's self-report.
+3. **Tone calibration had zero effect.** In a dynamic plan sequencing `tone_calibrator` before
+   `headline_writer`/`caption_writer`, only a `storage_ref` (pointing at a text card neither writer
+   has a tool to read) was threaded forward — never the actual `tone_profile`/`voice_guidelines`
+   JSON. Fixed in `graph.py`'s `_run_one_step`: a new `_PLAN_CONTEXT_WORTHY_FIELDS` allowlist
+   (tone/voice, palette, references, headline, shot list, claims notes) now surfaces every earlier
+   step's real decisions into later steps' instructions as "use these, don't re-derive" — fixes
+   tone→headline/caption and similar cross-step cases generically.
+Verified: `pytest` 105/105 throughout; manual code tracing confirmed each root cause via file:line
+citations before fixing (no speculative fixes).
+
+## Ctruh Agent Engine cross-check — direct_fix grounding bug + 5 structural gaps (2026-10-06)
+
+Live bug report ("add a 15% discount for Christ students" → Overlay Artist asked for the price
+instead of looking it up, despite real Product DNA) led to comparing our flow against a reference
+doc for a related agentic system (router confidence/sticky-focus, structured never-summarized
+Ledger, engine-enforced fencing/idempotency). Root cause of the live bug: `_direct_fix_node`
+(`graph.py`) called `run_specialist_with_review(...)` WITHOUT `brief=brief` — every sibling call
+site passes it; `run_specialist_agentic`'s tool-execution loop only builds the real `tool_context`
+(`user_id`/`product_id`) `if brief:`. With `brief=None`, `product_lookup`/`data_concierge` correctly
+reported "not configured" regardless of what was actually onboarded — silently defeating grounding
+for the ENTIRE `direct_fix` route. One-line fix: added `brief=brief`.
+
+Five further gaps, all fixed in the same pass:
+- **Idempotency guard on paid retries.** `run_specialist_with_review` now checks whether the first
+  attempt already made a successful call to a paid tool (`_PAID_TOOLS`: `base_image_generator`,
+  `collab_image_generator`, `photorealistic_image_generator`, `high_resolution_image_generator`,
+  `image_editor`, `base_video_generator` — `text_to_speech` excluded, genuinely free local Kokoro).
+  If so, the retry's reminder forbids regenerating and tells the model to reuse the existing asset.
+  Video-resume path (`session_service.py`) logs a loud warning flagging the known, larger,
+  deferred risk of re-billing already-completed shots on a pause/failure restart.
+- **"Do the same for X" fidelity.** `build_ledger()` (`conversation_memory.py`) now captures the
+  real instruction/prompt text behind each artifact's last edit (`last_operation_detail`, sourced
+  from `metadata_json`'s `instruction`/`image_prompt`/etc.), not just which specialist touched it —
+  `ledger_block()` tells the model to reuse that recorded text verbatim for a repeat-edit request.
+- **Sticky focus in routing.** New orchestrator rule 11 + `last_specialist`/`last_route` tracked
+  across turns in `session.brief` — the router now sees who handled the previous turn and prefers
+  staying there for a short follow-up, while staying free to reclassify when intent shifts
+  (prompt-level signal, never a hard bypass, per the standing "routing stays model-driven"
+  preference).
+- **Fencing.** `run_specialist_agentic` now wraps each LLM call in a 90s `asyncio.wait_for` and
+  tracks cumulative tokens across the run, raising `SpecialistFailed` at a 60,000-token ceiling —
+  both generous circuit breakers for a genuinely stuck/runaway call, not tight budgets meant to
+  bind in normal operation.
+- **Output validation.** `registry.py` gained an opt-in `output_field_types: dict[str, type]` —
+  additive type/shape checking (not just key presence) wired up for `shot_planner.shots`,
+  `caption_writer.hashtags`, `copy_claims_checker.flagged_claims`.
+Verified: `pytest` 108/108; registry reload confirms wiring; live-tested the exact failing discount
+request.
+
+## Live bug chain: two-deliverable 500, duplicate paid generation, DB pool exhaustion (2026-10-06)
+
+A single user request — "make a thumbnail for youtube video for this... and also generate an
+instagram 9:16 image post for the same" — surfaced FOUR distinct, confirmed real bugs across
+several rounds of live log analysis (each one chased down from actual captured tracebacks/Replicate
+prediction records, never guessed):
+
+1. **Deliverable-spec collision (first pass, incomplete).** `session_service.py` called
+   `detect_deliverable_key` once per turn, storing a single scalar `brief["deliverable"]`.
+   `core/deliverables.py`'s ordered `_REGEX_MAPPINGS` matches `instagram_story`'s `9:16` pattern
+   before `youtube_thumbnail`'s, so the WHOLE turn (both image steps) got forced to 9:16. Fixed:
+   added `detect_deliverable_keys` (plural) — when 2+ distinct deliverables are named, deliberately
+   leave `brief["deliverable"]` unset so each step falls back to its own inference instead of one
+   shared, wrong value.
+2. **The same collision through a SECOND path (the real regression-adjacent bug).** The fallback
+   `infer_aspect_ratio_from_text` call in `runner.py`'s aspect-ratio enforcement was still being
+   run against `brief["_current_turn_message"]` — the WHOLE original message, which still names
+   both deliverables — so it resolved 9:16 for every step regardless of fix #1. Confirmed via the
+   real Replicate prediction record: a prompt explicitly titled "A crazy, eye-catching YouTube
+   thumbnail..." was submitted with `"aspect_ratio": "9:16"`. Real fix: a new `_context_to_text`
+   helper extracts ONLY the text after the dynamic executor's own `YOUR SPECIFIC INSTRUCTION FOR
+   THIS STEP:` marker (`graph.py`'s `_run_one_step`) — excluding the shared "Campaign idea so far"
+   preamble that carries every deliverable the turn ever mentioned — so each step's aspect-ratio
+   inference is correctly scoped to its own real instruction. Verified live (re-extracted the
+   per-step context shapes and ran them through the real inference function): thumbnail step → 16:9,
+   Instagram step → 9:16.
+3. **Duplicate real paid generation within ONE specialist run.** Live Replicate logs showed a
+   single illustrator step producing TWO real, successful, separately-billed images
+   (`high_resolution_image_generator` then, after a missing-fields retry, `base_image_generator`).
+   Root cause: `_recover_pseudo_tool_call` (rescues a weak fallback model that expresses a tool
+   call as rambling text instead of a structured call) runs every loop iteration with no memory of
+   earlier iterations — a confused model, told "your JSON is malformed, fix it," sometimes mentions
+   a DIFFERENT tool by name instead of fixing its JSON, and that gets recovered and executed as a
+   second real charge. Fixed: once a paid tool (`_PAID_TOOLS`) has already succeeded once in the
+   current run, the recovery mechanism refuses to execute a second one — scoped only to this
+   text-scraping recovery path, never to a real, natively-structured tool call, so illustrator's
+   own designed self-refinement flow (generate, then a genuine `image_editor` call) is untouched.
+4. **DB connection pool exhaustion crashing an unrelated concurrent request.** The actual
+   "Internal Server Error (HTTP 500)" the user kept seeing was NOT in `POST /turns` at all — full
+   traceback confirmed a concurrent `GET /api/v1/canvas/{id}` (the frontend's periodic canvas
+   refresh) hit `sqlalchemy.exc.TimeoutError: QueuePool limit...timeout 30.00` while a long,
+   Groq-rate-limit-driven turn (80+ real seconds, heavy Replicate fallback) held all 5 available
+   connections (`pool_size=3, max_overflow=2`, set after an earlier, different incident this
+   session). Fixed two ways: a specific `sqlalchemy.exc.TimeoutError` exception handler
+   (`core/middleware/error_handler.py`) now returns a clean, retryable `503` instead of falling
+   through to the generic "Something went wrong" `500`; and the pool was raised to `pool_size=5,
+   max_overflow=5` (10 total, still well under Supabase's 15-connection project-wide cap).
+Also added, same day, then reverted: a turn-level deadline (`session_service.py`'s `post_turn`
+wrapping graph execution in a 150s `asyncio.wait_for`, degrading to the app's own friendly
+retry/cancel card on timeout instead of an opaque hang) — confirmed NOT the cause of any of the
+above (every turn in this chain completed or failed within the deadline), and removed again per an
+explicit user ask shortly after shipping it, to keep `post_turn` a plain, unwrapped await of the
+graph as before.
+
+Verified throughout: `pytest` 110/110 after the final fix; `ruff check`/`py_compile` clean on every
+touched file (pre-existing unrelated lint issues confirmed via line-number cross-check, not
+introduced); new unit tests added (`test_deliverables.py`) for both the multi-key detection and the
+step-scoped context extraction, using the exact real text shapes captured from live logs.

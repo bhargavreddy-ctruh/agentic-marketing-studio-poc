@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.user import UserModel
 
 
-class SqliteUserRepository:
+class PostgresUserRepository:
     """Satisfies the UserRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

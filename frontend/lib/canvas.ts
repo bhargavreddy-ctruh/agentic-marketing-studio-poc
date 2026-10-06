@@ -7,7 +7,7 @@
  * resolution, may route to a different specialist), and asset upload + `directEdit` (client-side
  * pixel work, no model call).
  */
-import { assetUrl, request } from "./http";
+import { assetUrl, request, requestNoContent } from "./http";
 
 export { assetUrl };
 
@@ -87,6 +87,12 @@ export async function commentOnElement(elementId: string, text: string): Promise
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
+}
+
+/** Permanently removes one canvas element — `DELETE /elements/{id}`, same 204-no-body shape as
+ * `deleteSession` (`lib/api.ts`), hence `requestNoContent` rather than `request<CanvasElement>`. */
+export async function deleteElement(elementId: string): Promise<void> {
+  return requestNoContent(`/api/v1/canvas/elements/${elementId}`, { method: "DELETE" });
 }
 
 export async function approveEdit(elementId: string): Promise<CanvasElement> {

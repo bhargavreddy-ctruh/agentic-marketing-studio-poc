@@ -54,10 +54,32 @@ def _close_truncated_json(text: str) -> str | None:
     return repaired
 
 
+_THOUGHT_BLOCK = re.compile(r"<thought>[\s\S]*?</thought>", re.IGNORECASE)
+_UNCLOSED_THOUGHT_PREFIX = re.compile(r"^<thought>[\s\S]*", re.IGNORECASE)
+
+
+def _strip_thought_blocks(text: str) -> str:
+    """Every "Think Before Acting" prompt in this codebase (ideation, runner.py specialists, the
+    orchestrator) deliberately asks the model to reason inside a `<thought>...</thought>` block
+    before its JSON — live-found bug (2026-10-06): the brace-matching candidate below is greedy
+    (`\\{[\\s\\S]*\\}`), so if the model's own reasoning text mentions a `{` anywhere (e.g.
+    describing JSON-ish structure, or quoting the user's message), that candidate spans from the
+    thought block's first `{` all the way to the real answer's last `}` — garbage in the middle,
+    reliably failing to parse. Stripping the whole thought block first (it's well-formed — the
+    model reliably closes its own tag) means the candidates below only ever see the real answer."""
+    stripped = _THOUGHT_BLOCK.sub("", text).strip()
+    if stripped:
+        return stripped
+    # A response that got cut off mid-thought (no closing tag) leaves nothing real behind —
+    # dropping the whole prefix here is correct: there was no JSON after it to find anyway.
+    return _UNCLOSED_THOUGHT_PREFIX.sub("", text).strip()
+
+
 def extract_json(text: str) -> dict[str, Any]:
     text = (text or "").strip()
     if not text:
         raise ValueError("empty model response")
+    text = _strip_thought_blocks(text) or text
 
     # Real, live-found bug (2026-09-21): a smaller model sometimes wraps its answer in an EMPTY
     # code fence (` ```json``` ` with nothing inside). The old code unconditionally overwrote
@@ -82,10 +104,17 @@ def extract_json(text: str) -> dict[str, Any]:
         candidates.append(repaired)
 
     last_error: Exception | None = None
-    decoder = json.JSONDecoder()
+    # Real, live-found bug (2026-10-06, overlay_artist's own final-response parse): a model
+    # sometimes writes a literal raw newline/control character inside a JSON string value (e.g.
+    # explaining its reasoning across multiple lines inside a `"reasoning": "..."` field) instead
+    # of the escaped `\n` the JSON spec requires — strict `json.loads` rejects the whole response
+    # with "Invalid control character" even though every other character is well-formed.
+    # `strict=False` is the stdlib's own documented escape hatch for exactly this: it accepts
+    # literal control characters inside strings instead of hard-failing on them.
+    decoder = json.JSONDecoder(strict=False)
     for candidate in candidates:
         try:
-            parsed = json.loads(candidate)
+            parsed = json.loads(candidate, strict=False)
             if isinstance(parsed, dict):
                 return parsed
         except json.JSONDecodeError as exc:

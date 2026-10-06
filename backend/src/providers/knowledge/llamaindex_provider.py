@@ -21,6 +21,7 @@ on first access after a restart, rather than being silently recreated empty.
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from llama_index.core import (
@@ -101,11 +102,16 @@ class LlamaIndexKnowledgeProvider(KnowledgeProvider):
         # document got embedded twice. `ref_doc_info` is the real per-DOCUMENT index, keyed by the
         # exact `doc_id` passed to `Document(...)` — confirmed live via `ref_doc_info` before
         # trusting this fix, the same way the bug itself was caught.
+        # Real, confirmed bug (2026-10-06, same class as `embeddings_local.py`'s own fix):
+        # `index.insert()` runs the embedding model (CPU-bound) and `storage_context.persist()` is
+        # synchronous disk I/O — both ran directly on the event loop despite this being an
+        # `async def` method, blocking every other concurrent request on this single-process
+        # server for however long indexing took. Every turn calls this via `chat_memory.add_turn`.
         if doc_id not in index.ref_doc_info:
-            index.insert(doc)
+            await asyncio.to_thread(index.insert, doc)
         persist_dir = self._persist_dir(collection)
         persist_dir.mkdir(parents=True, exist_ok=True)
-        index.storage_context.persist(persist_dir=str(persist_dir))
+        await asyncio.to_thread(index.storage_context.persist, persist_dir=str(persist_dir))
         log.info("knowledge_indexed", extra={"_extra_collection": collection, "_extra_doc_id": doc_id})
 
     async def query(self, *, collection: str, question: str) -> str:

@@ -10,6 +10,22 @@
  */
 import { API_BASE_URL } from "./http";
 
+// Real, live-found bug (2026-10-06): Next.js's own rewrite proxy (used for every other API call)
+// buffers a streamed response instead of forwarding each chunk as it arrives — confirmed by
+// connecting directly to the backend (bypassing the proxy entirely) and seeing real, live,
+// one-at-a-time delivery of the exact same events that arrived in one delayed burst through the
+// proxy. This explained live narration/Node-progress appearing to do nothing until the turn's
+// final result showed up, even on turns that took 30+ seconds and emitted many real events along
+// the way (confirmed server-side via logs) — the browser just never SAW them until the stream
+// closed. `NEXT_PUBLIC_BACKEND_DIRECT_URL` (set in `frontend/.env.local` for local dev only, left
+// unset in prod) lets the browser open this ONE connection straight to the backend, skipping the
+// buffering proxy — every other call still goes through `API_BASE_URL`/the proxy as before.
+// Cross-origin cookies already work between these two localhost ports without any extra
+// Secure/SameSite dance (see `backend/src/api/v1/auth/routes.py`'s own comment on this — same
+// SITE, different origin, `SameSite=Lax` already flows), and the backend's CORS config already
+// allows this origin with credentials.
+const EVENTS_BASE_URL = process.env.NEXT_PUBLIC_BACKEND_DIRECT_URL || API_BASE_URL;
+
 export interface LiveEvent {
   type: string;
   [key: string]: unknown;
@@ -21,7 +37,7 @@ export function openEventStream(
 ): () => void {
   // withCredentials: true — the events route is now ownership-checked (Tasks_Workflows.md #2),
   // so the signed session cookie must actually be sent; EventSource doesn't do this by default.
-  const es = new EventSource(`${API_BASE_URL}/api/v1/sessions/${sessionId}/events`, {
+  const es = new EventSource(`${EVENTS_BASE_URL}/api/v1/sessions/${sessionId}/events`, {
     withCredentials: true,
   });
   es.onmessage = (e) => {
@@ -69,6 +85,17 @@ export interface PipelineNode {
    * `endedAt` naturally ends up reflecting when the RETRY finished, not the first attempt — an
    * honest longer real duration for a card that needed two tries. */
   retried?: boolean;
+}
+
+/** One step of a `plan_proposed` event (2026-10-06, explicit user ask: show what will run BEFORE
+ * it runs, like Luma, then auto-proceed — every route, not just `dynamic`). Mirrors
+ * `orchestrator.py`'s `_build_plan_preview()` output exactly — `instruction`/`parallel_group` are
+ * `null` for every fixed-pipeline route (`direct_fix` is the one exception: the user's own message
+ * IS its instruction); only the `dynamic` route's real, per-request LLM plan ever has both. */
+export interface PlanStep {
+  specialist: string;
+  instruction: string | null;
+  parallel_group: number | null;
 }
 
 function nodeIdentity(nodeName: string): { id: string; label: string; kind: PipelineNode["kind"] } {
@@ -396,6 +423,11 @@ export function describeEvent(event: LiveEvent): string | null {
     // to detect exactly that, no change needed there.
     case "dynamic_plan_group_parallel":
       return `⚡ Running ${event.step_count} steps in parallel…`;
+    // The actual VISUAL for this (2026-10-06) is a real chat bubble `ChatPanel.tsx` inserts
+    // directly on this same event — this narration-log line is just for completeness alongside
+    // the other plan-related line above, not the primary UI for it.
+    case "plan_proposed":
+      return `📋 Planned ${Array.isArray(event.plan) ? event.plan.length : 0} step(s)`;
     // Product/Brand crawler (2026-09-28) — POST /{session_id}/crawl and chat's turn
     // auto-detection both emit these via the same real `emit()` (core/events.py).
     case "crawler_started":
