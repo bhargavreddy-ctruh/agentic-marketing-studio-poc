@@ -29,7 +29,7 @@ from ...models.canvas_element import CanvasElementModel
 from ...models.chat_turn import ChatTurnModel
 from ...models.session import SessionModel
 from ...repositories.base import CanvasRepository, ChatTurnRepository, SessionRepository
-from ...repositories.sqlite.sqlite_canvas_repository import SqliteCanvasRepository
+from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
 from ...schemas.sessions.responses import (
     ChatTurnResponse,
     IdeationOption,
@@ -61,6 +61,83 @@ def cancel_running_turn(session_id: str) -> bool:
         task.cancel()
         return True
     return False
+
+
+async def _run_turn_bg(
+    *,
+    session_id: str,
+    user_message: str,
+    referenced_element_ids: list[str] | None,
+    target_product_id: str | None,
+    start_new_product: bool,
+) -> None:
+    """Module-level coroutine for fire-and-forget turn execution (2026-10-06).
+
+    Creates a completely independent SessionService with its own async DB session so it can
+    safely run after the originating HTTP request has already returned.  Progress is surfaced
+    exclusively via SSE (core/events.py); the frontend fetches GET /sessions/{id} once the
+    SSE 'turn_completed' event arrives to get the final SessionResponse.
+    """
+    from ...models.base import async_session_factory
+    from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
+    from ...repositories.postgres.postgres_canvas_version_repository import (
+        PostgresCanvasVersionRepository,
+    )
+    from ...repositories.postgres.postgres_chat_turn_repository import PostgresChatTurnRepository
+    from ...repositories.postgres.postgres_session_repository import PostgresSessionRepository
+    from ..canvas.versioning_service import CanvasVersioningService
+
+    # Real, live-found gap (2026-10-06): `_run_turn` below already guarantees `mark_turn_done` and
+    # a terminal status for anything that goes wrong INSIDE it — but this function's own session
+    # lookup, and the `async with` block's own commit/close on the way out, sit OUTSIDE that guard.
+    # An exception here used to propagate straight out of this fire-and-forget `asyncio.create_task`
+    # with nothing to catch it but Python's silent "Task exception was never retrieved" — no
+    # `mark_turn_done`, no status reset, leaving any client polling or listening for completion
+    # waiting forever for a signal that would never come, with zero indication in the logs of why.
+    try:
+        async with async_session_factory() as db:
+            svc = SessionService(
+                sessions=PostgresSessionRepository(db),
+                canvas=PostgresCanvasRepository(db),
+                versioning=CanvasVersioningService(
+                    canvas=PostgresCanvasRepository(db),
+                    versions=PostgresCanvasVersionRepository(db),
+                ),
+                chat_turns=PostgresChatTurnRepository(db),
+            )
+            session = await svc._sessions.get(session_id)
+            if session is None:
+                log.error("_run_turn_bg: session not found", extra={"_extra_session": session_id})
+                return
+            await svc._run_turn(
+                session,
+                user_message=user_message,
+                referenced_element_ids=referenced_element_ids,
+                target_product_id=target_product_id,
+                start_new_product=start_new_product,
+            )
+    except Exception as exc:
+        # `_run_turn` already resolved its OWN failures (sets status="error", emits
+        # "turn_completed", calls mark_turn_done) before re-raising — reaching here means the
+        # failure is in code `_run_turn` never got a chance to guard (the session lookup above, or
+        # the `async with` block's own teardown). Best-effort terminal status write, in its own
+        # try/except so a second failure here can't suppress the `mark_turn_done` below — a client
+        # waiting on EITHER signal (status polling or the SSE event) must still get unblocked.
+        log.error("run_turn_bg_crashed_outside_guard", extra={"_extra_error": str(exc)})
+        try:
+            async with async_session_factory() as db:
+                recovery_session = await PostgresSessionRepository(db).get(session_id)
+                if recovery_session is not None:
+                    recovery_session.status = "error"
+                    recovery_session.next_prompt_json = IdeationPrompt(
+                        message=f"Something went wrong while generating: {exc}",
+                        options=[], allow_free_text=True,
+                    ).model_dump()
+                    await PostgresSessionRepository(db).update(recovery_session)
+        except Exception as recovery_exc:
+            log.error("run_turn_bg_recovery_failed", extra={"_extra_error": str(recovery_exc)})
+    finally:
+        await mark_turn_done(session_id)
 
 
 
@@ -215,7 +292,7 @@ class SessionService:
         Forbidden/NotFoundError before any deletion happens, so a user can never delete (or even
         discover the existence of) another user's session by guessing an id. The real cascade
         (canvas elements/versions, chat turns, generation jobs, tool call logs) lives in the
-        repository (`SqliteSessionRepository.delete` — Rules.md section 2: only repositories touch
+        repository (`PostgresSessionRepository.delete` — Rules.md section 2: only repositories touch
         the database)."""
         await self._get_owned_session(session_id, user_id=user_id)
         await self._sessions.delete(session_id)
@@ -275,12 +352,13 @@ class SessionService:
                 id=t.id, user_text=t.user_text, thinking_text=t.thinking_text,
                 assistant_text=t.assistant_text, created_at=t.created_at,
                 events=t.events_json or [],
+                plan=t.plan_json,
                 referenced_elements=[referenced_elements[rid] for rid in getattr(t, "referenced_element_ids", []) or [] if rid in referenced_elements]
             )
             for t in turns
         ]
 
-    async def post_turn(
+    async def begin_turn(
         self,
         session_id: str,
         *,
@@ -291,16 +369,20 @@ class SessionService:
         target_product_id: str | None = None,
         start_new_product: bool = False,
     ) -> SessionResponse:
+        """Fire-and-forget variant of post_turn (2026-10-06) — does all validation and preparation
+        synchronously, marks status='generating', then dispatches _run_turn as a detached asyncio
+        background task and returns immediately.  The HTTP response comes back in milliseconds, so
+        Next.js's proxy 30-second timeout can never be reached.  The frontend receives live events
+        via SSE and fetches GET /sessions/{id} after the turn_completed event to get the final
+        SessionResponse."""
         session = await self._get_owned_session(session_id, user_id=user_id)
+        if session.status == "generating" or session_id in _RUNNING_TURNS:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail="A generation is still running or cancelling. Please wait a moment and try again.")
         if not picked_option_id and not free_text:
             raise ValidationFailed("Provide either picked_option_id or free_text")
 
-        # Product/Brand crawler turn auto-detection (2026-09-28) — a URL in the free text is a
-        # distinct, higher-priority signal than any of the gates below, but this is fire-and-forget
-        # (same dispatch pattern as the dedicated POST /{session_id}/crawl route): the crawl runs
-        # as a genuinely detached background task and the turn proceeds normally below, exactly as
-        # if no URL had been mentioned. Progress/results surface purely via SSE crawler_* events
-        # alongside the turn's own narration — never blocks this response.
+        # Product/Brand crawler turn auto-detection — same fire-and-forget as post_turn.
         if free_text:
             url_match = _URL_RE.search(free_text)
             if url_match:
@@ -308,18 +390,11 @@ class SessionService:
                 crawled_urls = set(session.brief.get("crawled_urls") or [])
                 if url not in crawled_urls:
                     from ..crawlers.crawl_runner import run_crawl_and_ingest
-
                     task = asyncio.create_task(run_crawl_and_ingest(session_id, url))
                     _background_tasks.add(task)
                     task.add_done_callback(_background_tasks.discard)
 
-        # A real, chat-actionable resolution for a staged per-element direct edit (2026-09-22, see
-        # the matching comment where `_pending_edit_approval_id` is set in `_run_turn_inner`) —
-        # handled here, BEFORE the graph ever runs, since approving/rejecting a staged edit is not
-        # a new creative request for the ideation/orchestrator pipeline to interpret. Reuses the
-        # exact same `CanvasVersioningService` methods the canvas UI's own Approve/Reject buttons
-        # already call (`api/v1/canvas/routes.py`'s `/approve-edit`/`/reject-edit`), so a chat reply
-        # and a canvas click do exactly the same real thing.
+        # Staged edit approval — handled synchronously like post_turn.
         pending_edit_id = session.brief.get("_pending_edit_approval_id")
         if pending_edit_id:
             reply = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
@@ -332,9 +407,6 @@ class SessionService:
                 await self._versioning.reject_pending_edit(pending_edit_id)
                 message = "Rejected — discarded, nothing changed."
             else:
-                # An unclear reply never means yes (core/approval.py's own rule, already applied
-                # to the video pipeline's motion-spend gate) — leave the gate open rather than
-                # guessing at a real, currently-pending change.
                 session = await self._sessions.update(session)
                 return SessionMapper.to_response(session)
             session.brief = {k: v for k, v in session.brief.items() if k != "_pending_edit_approval_id"}
@@ -343,19 +415,7 @@ class SessionService:
             session = await self._sessions.update(session)
             return SessionMapper.to_response(session)
 
-        # A real, live-found bug (2026-09-23, per an explicit user report: "Cancel is also
-        # creating llm task??"): the Laya-fallback "approval_required" prompt (orchestrator.py,
-        # when both real LLM gateways are down but Laya can still suggest a specialist) built its
-        # options as `laya_approve_{specialist}`/`cancel`, but NEITHER was ever specially handled
-        # here — both silently fell through to the generic path below, which treats a picked
-        # option as just its label TEXT and re-runs the full ideation/orchestrator pipeline with
-        # it as a brand-new user message. So "No, cancel" didn't cancel anything: it sent the
-        # literal words "No, cancel" back through real LLM classification (hence a fresh "Thinking
-        # about the brief…" the user never asked for), and "Yes, use X" didn't actually invoke X
-        # either — it sent "Yes, use X" back through the SAME classifier that had just degraded in
-        # the first place, likely to misroute or degrade again. Handled explicitly here, the same
-        # "resolve a real pending gate before the graph ever re-runs" shape as the
-        # `_pending_edit_approval_id` block just above.
+        # Laya fallback approval — handled synchronously like post_turn.
         last_option_labels = session.brief.get("_last_option_labels") or {}
         laya_approve_keys = [k for k in last_option_labels if k.startswith("laya_approve_")]
         if laya_approve_keys:
@@ -373,42 +433,18 @@ class SessionService:
             )
             if approved_key:
                 laya_specialist = approved_key.removeprefix("laya_approve_")
-                # The real request text got lost the moment classification degraded — it was never
-                # persisted anywhere except the chat history itself, so recover it from the most
-                # recent real (non-empty) turn rather than re-asking the user to repeat themselves.
                 past_turns = await self._chat_turns.list_for_session(session.id)
                 original_message = past_turns[-1].user_text if past_turns else ""
                 brief_with_target = dict(session.brief)
-                # Consumed once by `orchestrator.py`'s `route()` (checked before real
-                # classification, same shape as its existing `video_stage` resume-check) — skips
-                # re-classifying with the same degraded LLM path and goes straight to `direct_fix`
-                # with the specialist the user just explicitly approved.
                 brief_with_target["_laya_approved_specialist"] = laya_specialist
                 session.brief = brief_with_target
+                # For the laya path, still run synchronously — it's already fast (no LLM, direct dispatch).
                 return await self._run_turn(
                     session, user_message=original_message, referenced_element_ids=referenced_element_ids,
                     target_product_id=target_product_id, start_new_product=start_new_product,
                 )
-            # Neither a clear approve nor a clear cancel (e.g. the user typed something else
-            # entirely instead of picking either option) — treat it as a genuinely new message,
-            # same as the generic fallthrough below.
 
-        # A real, live-found bug (2026-09-22, traced from a real session's `brief.idea` getting
-        # corrupted to the literal string "approve"): a free-text reply to an open ideation
-        # clarifying question (`_last_option_labels` set, real pickable options shown) that doesn't
-        # literally match any option's id/label — e.g. typing "approve" instead of clicking a
-        # button labeled "Yes, add $1500 RS as the price tag." — fell straight through as raw,
-        # context-free `user_message` text. `ideation_service.py`'s own clarification-accumulation
-        # fix then concatenated it onto the pending question text into one confusing blob, which is
-        # what the orchestrator's classifier actually saw as "the user's latest message" — a real,
-        # traced cause of at least one live misroute. Resolved deterministically here, same
-        # "a plain check beats trusting an LLM every time" reasoning as `_is_bare_greeting`/
-        # `_check_price_stated` (`ideation_service.py`) and the `_pending_edit_approval_id` gate
-        # just above: if the reply is a clear yes/no-shaped word AND one of the pending options
-        # itself reads as the yes/no answer (its own label starts with "yes"/"no"), resolve to that
-        # option's real label — exactly as if it had been clicked — instead of passing an
-        # unresolved bare word forward. Genuinely ambiguous option sets (neither option reads as
-        # yes/no — most subject/style disambiguation choices) are left untouched; no unsafe guess.
+        # Resolve yes/no free-text reply to a pending option.
         last_option_labels = session.brief.get("_last_option_labels") or {}
         if not picked_option_id and free_text and last_option_labels:
             reply = free_text.strip()
@@ -417,18 +453,9 @@ class SessionService:
                 if resolved_label:
                     free_text = resolved_label
 
-        # A card pick is just shorthand for its label — the graph's ideation node only deals in
-        # plain text either way (Architecture.md section 1d: a pick is a shortcut, not a
-        # different code path).
         user_message = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
             picked_option_id, picked_option_id
         )
-        # See `_find_real_user_message_and_refs`'s own comment above: a bare "retry" is a
-        # continuation of the real prior request, not a new one — recovered from real chat history
-        # so it's what actually reaches classification/ideation/persisted history/semantic memory
-        # this turn, instead of the content-free label "Try again" itself. The reference is
-        # recovered the same way, and only used to FILL IN a gap — an explicit reference the caller
-        # already sent (e.g. the user picked a different element for this retry) always wins.
         if not free_text and (user_message or "").strip().lower() == _BARE_RETRY_LABEL:
             past_turns = await self._chat_turns.list_for_session(session.id)
             real_message, real_refs = _find_real_user_message_and_refs(past_turns)
@@ -436,10 +463,24 @@ class SessionService:
                 user_message = real_message
             if real_refs and not referenced_element_ids:
                 referenced_element_ids = real_refs
-        return await self._run_turn(
-            session, user_message=user_message, referenced_element_ids=referenced_element_ids,
-            target_product_id=target_product_id, start_new_product=start_new_product,
-        )
+
+        # Mark generating NOW so GET /sessions/{id} immediately reflects it.
+        session.status = "generating"
+        session.next_prompt_json = None
+        session = await self._sessions.update(session)
+
+        # Fire-and-forget: dispatch the actual turn in a background task with its own DB session.
+        task = asyncio.create_task(_run_turn_bg(
+            session_id=session.id,
+            user_message=user_message,
+            referenced_element_ids=referenced_element_ids,
+            target_product_id=target_product_id,
+            start_new_product=start_new_product,
+        ))
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+
+        return SessionMapper.to_response(session)
 
     async def get_session(self, session_id: str, *, user_id: str) -> SessionResponse:
         session = await self._get_owned_session(session_id, user_id=user_id)
@@ -507,6 +548,7 @@ class SessionService:
                 options=[], allow_free_text=True,
             ).model_dump()
             await self._sessions.update(session)
+            emit("turn_completed", status=session.status)
             raise
         except asyncio.CancelledError:
             log.info("turn_cancelled", extra={"_extra_session": session.id})
@@ -572,9 +614,11 @@ class SessionService:
         if target_product_id:
             # An explicit pick from the session's own known products — the real name is looked up
             # server-side, never trusted from the client.
-            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            from ...repositories.postgres.postgres_product_repository import (
+                PostgresProductRepository,
+            )
             async with async_session_factory() as db:
-                picked_product = await SqliteProductRepository(db).get(target_product_id)
+                picked_product = await PostgresProductRepository(db).get(target_product_id)
             if picked_product:
                 resolved_product_id = picked_product.id
                 resolved_product_name = picked_product.name
@@ -648,10 +692,20 @@ class SessionService:
         # can be stale/summarized), so this is threaded separately rather than reusing that field.
         brief_for_graph["_current_turn_message"] = user_message
         
-        from ...core.deliverables import detect_deliverable
-        detected_spec = detect_deliverable(user_message)
-        if detected_spec:
-            brief_for_graph["deliverable"] = detected_spec.key
+        from ...core.deliverables import detect_deliverable, detect_deliverable_keys
+        # Real, live-found bug (2026-10-06): a message naming TWO different deliverables (e.g.
+        # "make a youtube thumbnail... and also an instagram 9:16 post") used to resolve to a
+        # single global `brief["deliverable"]` (whichever pattern matched first), which
+        # `runner.py`'s aspect-ratio enforcement then force-applied to EVERY image-generating tool
+        # call this turn — both steps silently collapsed onto one wrong aspect ratio. When 2+
+        # distinct deliverables are named, deliberately leave `brief["deliverable"]` unset so each
+        # dynamic-plan step falls back to its own per-step instruction-derived aspect ratio
+        # (illustrator.md's own rule already handles "set aspect_ratio to match the actual
+        # requested format") instead of one shared, wrong value.
+        if len(detect_deliverable_keys(user_message)) <= 1:
+            detected_spec = detect_deliverable(user_message)
+            if detected_spec:
+                brief_for_graph["deliverable"] = detected_spec.key
             
         # Fallback fields for backwards compatibility with parts of graph that expect latest_element
         if latest_element:
@@ -721,12 +775,14 @@ class SessionService:
         stripped_message = user_message.strip()
         if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
             from ...core.exceptions import SpecialistFailed
-            from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+            from ...repositories.postgres.postgres_product_repository import (
+                PostgresProductRepository,
+            )
             from ..knowledge.product_dna_service import ProductDnaService
 
             try:
                 async with async_session_factory() as db:
-                    product_repo = SqliteProductRepository(db)
+                    product_repo = PostgresProductRepository(db)
                     product_dna_svc = ProductDnaService(product_repo)
                     linked_ids = list(session.brief.get("product_profile_ids") or [])
                     existing_products = [
@@ -791,8 +847,10 @@ class SessionService:
         photo_product_id = resolved_product_id or (session.product_profile_id if not start_new_product else None)
         if photo_product_id:
             async with async_session_factory() as db:
-                from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
-                product_repo = SqliteProductRepository(db)
+                from ...repositories.postgres.postgres_product_repository import (
+                    PostgresProductRepository,
+                )
+                product_repo = PostgresProductRepository(db)
                 product = await product_repo.get(photo_product_id)
                 if product:
                     if product.photo_storage_ref:
@@ -860,11 +918,31 @@ class SessionService:
                 # The video pipeline doesn't have true step-by-step resume, but we can restart it fresh
                 # with the combined context of the original idea and the user's new answer, ensuring it
                 # doesn't get misrouted by the orchestrator.
+                #
+                # Real, flagged risk (2026-10-06, Ctruh Agent Engine cross-check): a pause/failure
+                # inside the video pipeline can occur AFTER real, PAID generation already succeeded
+                # for one or more earlier shots (scene_builder/camera_director calls, each a real
+                # Replicate charge) — this restart has no per-shot memory of that, so a resume can
+                # re-generate and re-bill shots that already completed successfully before the
+                # pause. A full fix needs per-shot resume state threaded through `run_motion_lead`
+                # (out of scope for this pass); logged loudly here so a double-charge is visible and
+                # auditable in the run log, not silent.
+                log.warning(
+                    "full_video_resume_restarts_from_scratch",
+                    extra={
+                        "_extra_session_id": session.id,
+                        "_extra_note": (
+                            "resuming via _motion_lead_node restart — any shot that already "
+                            "completed a real paid generation before this pause/failure will be "
+                            "regenerated and re-billed; no per-shot resume exists yet"
+                        ),
+                    },
+                )
                 original_message = paused_plan.get("original_message", "")
                 combined_idea = f"{original_message}\nUser clarification answer: {user_message}".strip()
                 resume_brief["idea"] = combined_idea
                 resume_state["user_message"] = combined_idea
-                
+
                 from .graph import _motion_lead_node
                 result_state = await _motion_lead_node(resume_state)
             else:
@@ -875,7 +953,7 @@ class SessionService:
         else:
             from ..ideation.requirements_check import run_requirements_check
             req_prompt = run_requirements_check(user_message, brief_for_graph, existing_elements, referenced_elements)
-            
+
             if req_prompt:
                 result_state = {
                     "brief": brief_for_graph,
@@ -1155,6 +1233,11 @@ class SessionService:
             # Real, persisted Node Mode run history for this turn (2026-09-22) — see
             # `models/chat_turn.py`'s own docstring for why this exists.
             events_json=get_current_turn_events(session.id),
+            # The plan-preview bubble's own data (2026-10-06) — see `models/chat_turn.py`'s own
+            # docstring. `result_state` is whatever `orchestrator.route()`/the resume path set on
+            # `state["plan_preview"]`; absent for any turn that never routed (an error before
+            # routing), persisting `None` there is correct.
+            plan_json=result_state.get("plan_preview"),
         ))
         
         # Ingest into the semantic ChatMemoryService so it can be recalled in future turns
@@ -1325,7 +1408,7 @@ async def _run_compliance_background(element_id: str) -> None:
     "running" forever (worse than an occasional false "failed", which the gate's own remediation
     already makes rare in practice)."""
     async with async_session_factory() as db:
-        canvas = SqliteCanvasRepository(db)
+        canvas = PostgresCanvasRepository(db)
         if not settings.compliance_qa_enabled:
             await canvas.update_compliance_status(element_id, "disabled")
             return
@@ -1336,8 +1419,10 @@ async def _run_compliance_background(element_id: str) -> None:
         # well after the request that created the element has already returned.
         element = await canvas.get_element(element_id)
         if element is not None:
-            from ...repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
-            owning_session = await SqliteSessionRepository(db).get(element.session_id)
+            from ...repositories.postgres.postgres_session_repository import (
+                PostgresSessionRepository,
+            )
+            owning_session = await PostgresSessionRepository(db).get(element.session_id)
             if owning_session is not None and not owning_session.guardrails_enabled:
                 await canvas.update_compliance_status(element_id, "disabled")
                 return

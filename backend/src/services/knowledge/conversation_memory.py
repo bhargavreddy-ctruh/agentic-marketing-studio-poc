@@ -120,6 +120,34 @@ class LedgerArtifact:
     label: str
     status: str
     last_op: str | None
+    last_operation_detail: str | None
+
+
+# The real instruction/prompt text a specialist actually used to produce or edit an element —
+# checked in this priority order since different specialists write different metadata keys
+# (illustrator: image_prompt, composition_artist/image_editor-based edits: instruction,
+# camera_director: motion_prompt, overlay_artist: overlay_text, scene_builder: the three
+# environment/prop/lighting descriptions). Same field set `compliance_gate.py`'s
+# `_generation_prompt_text` already proved out for a near-identical purpose (that function reads a
+# SUBSET of these for compliance checks; this reads the fuller set since "what did we actually do
+# to this artifact" is a broader question than "what should we check for compliance").
+_OPERATION_DETAIL_FIELDS = (
+    "instruction", "image_prompt", "motion_prompt", "overlay_text",
+    "environment_description", "prop_description", "lighting_description",
+)
+
+
+def _operation_detail(metadata: dict) -> str | None:
+    """The real recorded text behind an element's last edit (2026-10-06, Ctruh Agent Engine
+    cross-check): without this, a "do the same for this other image" request had no way to see
+    WHAT was actually done to the first one — only which specialist touched it — so it was always a
+    fresh LLM re-interpretation with no guarantee of matching the original edit. Returns the first
+    non-empty field found, truncated to the same bound every other short Ledger field already uses."""
+    for field in _OPERATION_DETAIL_FIELDS:
+        value = metadata.get(field)
+        if value:
+            return _truncate_description(str(value))
+    return None
 
 
 def build_ledger(
@@ -138,8 +166,10 @@ def build_ledger(
         label = (el.product_name or el.element_type or "artifact").strip()
         status = el.compliance_status or "unknown"
         last_op = el.produced_by_specialist
+        last_operation_detail = _operation_detail(el.metadata_json or {})
         artifacts[el.id] = LedgerArtifact(
-            kind=el.element_type, label=label, status=status, last_op=last_op
+            kind=el.element_type, label=label, status=status, last_op=last_op,
+            last_operation_detail=last_operation_detail,
         ).__dict__
     return {"artifacts": artifacts, "current_focus": current_focus_id}
 
@@ -159,7 +189,14 @@ def ledger_block(ledger: dict | None) -> str:
             lines.append(f"  ...and {len(artifacts) - 5} more.")
             break
         marker = " (current focus)" if el_id == focus else ""
-        lines.append(f"  - {a['kind']} \"{a['label']}\" — {a['status']}{marker}")
+        op_suffix = f" — last real edit: {a['last_operation_detail']!r}" if a.get("last_operation_detail") else ""
+        lines.append(f"  - {a['kind']} \"{a['label']}\" — {a['status']}{marker}{op_suffix}")
+    lines.append(
+        '  If the request is "do the same for X"/"same as that other one", reuse the referenced '
+        "artifact's own last real edit text above as your starting point — adapt it only for the "
+        "new target's real content, don't re-derive a differently-worded interpretation from "
+        "scratch."
+    )
     return "\n" + "\n".join(lines)
 
 

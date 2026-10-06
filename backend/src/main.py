@@ -23,10 +23,10 @@ from .core.middleware.error_handler import register_error_handlers
 from .core.middleware.logging import configure_logging, get_logger
 from .models.base import async_session_factory, dispose_engine, init_models
 from .providers.observability.langsmith import configure_langsmith
-from .repositories.sqlite.sqlite_app_setting_repository import SqliteAppSettingRepository
-from .repositories.sqlite.sqlite_brand_repository import SqliteBrandRepository
-from .repositories.sqlite.sqlite_mood_board_repository import SqliteMoodBoardRepository
-from .repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from .repositories.postgres.postgres_app_setting_repository import PostgresAppSettingRepository
+from .repositories.postgres.postgres_brand_repository import PostgresBrandRepository
+from .repositories.postgres.postgres_mood_board_repository import PostgresMoodBoardRepository
+from .repositories.postgres.postgres_product_repository import PostgresProductRepository
 from .services.knowledge.brand_dna_service import reindex_all_brands
 from .services.knowledge.mood_board_service import reindex_all_mood_board_assets
 from .services.knowledge.product_dna_service import reindex_all_products
@@ -47,7 +47,7 @@ async def _settings_poll_loop() -> None:
     while True:
         try:
             async with async_session_factory() as db:
-                await sync_settings_from_db(SqliteAppSettingRepository(db))
+                await sync_settings_from_db(PostgresAppSettingRepository(db))
         except Exception:
             log.exception("settings_poll_loop_iteration_failed")
         await asyncio.sleep(settings.settings_poll_interval_seconds)
@@ -60,7 +60,7 @@ async def lifespan(app: FastAPI):
     # Apply any DB-stored settings overrides BEFORE anything below gets a chance to build a
     # provider singleton off the un-overridden `.env` value.
     async with async_session_factory() as db:
-        await sync_settings_from_db(SqliteAppSettingRepository(db))
+        await sync_settings_from_db(PostgresAppSettingRepository(db))
     settings_poll_task = asyncio.create_task(_settings_poll_loop())
     load_all_tools()
     load_all_specialists()
@@ -68,9 +68,38 @@ async def lifespan(app: FastAPI):
     # records — a server restart alone must never silently make an already-onboarded brand/product
     # look "not configured" again (Memory.md, Phase 3: a real gap found via live testing).
     async with async_session_factory() as db:
-        await reindex_all_brands(SqliteBrandRepository(db))
-        await reindex_all_products(SqliteProductRepository(db))
-        await reindex_all_mood_board_assets(SqliteMoodBoardRepository(db))
+        await reindex_all_brands(PostgresBrandRepository(db))
+        await reindex_all_products(PostgresProductRepository(db))
+        await reindex_all_mood_board_assets(PostgresMoodBoardRepository(db))
+
+    # Startup crash-recovery: any session left in status='generating' from a previous server
+    # crash or forced restart is permanently stuck — the asyncio task that was running it died
+    # with the process, so it will never flip itself to 'completed' or 'error'. Without this,
+    # the frontend detects status='generating' on page load, shows "Reconnecting…", and polls
+    # forever. Reset every orphaned generating session to 'error' with a friendly retry prompt
+    # so the user can immediately try again rather than staring at a frozen spinner.
+    import json
+    _recovery_prompt = json.dumps({
+        "message": "The server restarted mid-generation. What would you like to do?",
+        "options": [{"id": "retry", "label": "Try again", "description": "Retry the interrupted generation"}],
+        "allow_free_text": True,
+    })
+    async with async_session_factory() as db:
+        import sqlalchemy as _sa
+        result = await db.execute(
+            _sa.text(
+                "UPDATE sessions SET status='error', next_prompt_json=:p WHERE status='generating'"
+            ),
+            {"p": _recovery_prompt},
+        )
+        await db.commit()
+        recovered = result.rowcount
+        if recovered:
+            log.warning(
+                "startup_session_recovery",
+                extra={"_extra_recovered_count": recovered},
+            )
+
     log.info("app_started", extra={"_extra_project": settings.langsmith_project})
     yield
     settings_poll_task.cancel()

@@ -1,6 +1,6 @@
 """Integration test — real SQLite, per Architecture.md's tests/integration/ scope.
 
-Covers the chat lazy-load pagination added to `SqliteChatTurnRepository.list_for_session`
+Covers the chat lazy-load pagination added to `PostgresChatTurnRepository.list_for_session`
 (2026-10-05): `limit` alone returns the most recent N turns (oldest-first), and `before_id` pages
 further back in history from an already-loaded turn's id.
 """
@@ -13,11 +13,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from src.models.base import Base
 from src.models.chat_turn import ChatTurnModel
 from src.models.session import SessionModel  # noqa: F401 — registers `sessions` for the FK below
-from src.repositories.sqlite.sqlite_chat_turn_repository import SqliteChatTurnRepository
+from src.repositories.postgres.postgres_chat_turn_repository import PostgresChatTurnRepository
 
 
 async def _make_repo(db):
-    return SqliteChatTurnRepository(db)
+    return PostgresChatTurnRepository(db)
 
 
 def _turn(session_id: str, index: int, created_at: datetime) -> ChatTurnModel:

@@ -34,7 +34,7 @@ export default function HomePage() {
   const [workflowsError, setWorkflowsError] = useState<string | null>(null);
   const [showNewWorkflow, setShowNewWorkflow] = useState(false);
   const [newTitle, setNewTitle] = useState("");
-  const [newApprovalMode, setNewApprovalMode] = useState<"auto" | "approve">("auto");
+  const [newApprovalMode, setNewApprovalMode] = useState<"auto" | "approve">("approve");
   // Product/Brand crawler (2026-09-28) — optional, additive: filling either kicks off a crawl
   // right after the session is created, alongside the existing create flow.
   const [newCompanyUrl, setNewCompanyUrl] = useState("");

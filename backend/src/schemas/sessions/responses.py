@@ -59,3 +59,6 @@ class ChatTurnResponse(BaseModel):
     # that happened to be open at the time.
     events: list[dict] = []
     referenced_elements: list[dict] = []
+    # The plan-preview bubble's own data (2026-10-06) — see `models/chat_turn.py`'s `plan_json`
+    # docstring. `None` only for a turn that errored before routing ever decided anything.
+    plan: list[dict] | None = None

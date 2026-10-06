@@ -320,6 +320,26 @@ async def run_motion_lead(
     sound_call = sound.latest_call("text_to_speech")
     audio_storage_ref = sound_call.data.get("storage_ref") if sound_call and sound_call.ok else None
 
+    # Script/voiceover fidelity enforcement (2026-10-06, real audit finding): Sound Designer's
+    # prompt now instructs it to reuse `script_line` verbatim, but nothing short of checking the
+    # ACTUAL audio enforces that — the model could still report `voiceover_line` correctly while
+    # having called `text_to_speech` with different words, or vice versa. A marketer who approved
+    # the script_writer's text on the canvas should never hear different words in the rendered
+    # video, so re-synthesize deterministically whenever there's drift, rather than trusting the
+    # model's self-report.
+    if narrative and narrative.script_line and audio_storage_ref:
+        reported_line = (sound.get("voiceover_line") or "").strip()
+        approved_line = narrative.script_line.strip()
+        if reported_line != approved_line:
+            log.warning(
+                "motion_lead_sound_designer_script_drift",
+                extra={"_extra_reported": reported_line[:120], "_extra_expected": approved_line[:120]},
+            )
+            tts_result = await get_tool("text_to_speech").run({"text": approved_line})
+            if tts_result.ok and tts_result.data.get("storage_ref"):
+                audio_storage_ref = tts_result.data["storage_ref"]
+                sound.data["voiceover_line"] = approved_line
+
     # Muxing is a real, deterministic ffmpeg operation (AudioVideoMuxerTool) — no agentic
     # reasoning needed at call time, only Sound Designer's own prior creative judgment on WHETHER
     # to (its `should_mux` field, decided without ever seeing the video — see sound_designer.md).

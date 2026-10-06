@@ -7,7 +7,7 @@ approximately-retrieved — Architecture.md section 1).
 Tools are registered once at boot, outside any one HTTP request's DB session, so this is the one
 tool that opens its own short-lived session directly against the shared engine
 (`models/base.py`'s `async_session_factory`) rather than receiving one via FastAPI's DI — still
-only ever through `SqliteProductRepository`, keeping "only repositories touch the database" intact
+only ever through `PostgresProductRepository`, keeping "only repositories touch the database" intact
 (Rules.md section 2).
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import ClassVar
 
 from ...models.base import async_session_factory
-from ...repositories.sqlite.sqlite_product_repository import SqliteProductRepository
+from ...repositories.postgres.postgres_product_repository import PostgresProductRepository
 from .base import Tool, ToolResult
 from .registry import register_tool
 
@@ -43,7 +43,7 @@ class DiscountClaimsCalculatorTool(Tool):
             return ToolResult(ok=False, data={}, error="product_id is required")
 
         async with async_session_factory() as session:
-            product = await SqliteProductRepository(session).get(product_id)
+            product = await PostgresProductRepository(session).get(product_id)
 
         if product is None:
             return ToolResult(ok=False, data={}, error=f"no product found for product_id {product_id}")

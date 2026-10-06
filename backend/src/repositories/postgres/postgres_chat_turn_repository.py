@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.chat_turn import ChatTurnModel
 
 
-class SqliteChatTurnRepository:
+class PostgresChatTurnRepository:
     """Satisfies the ChatTurnRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

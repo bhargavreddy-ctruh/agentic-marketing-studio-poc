@@ -137,6 +137,13 @@ conversational flow, not a separate upload form.
   illustrator/overlay_artist. Chat history also now lazy-loads (most recent turns first, older ones
   paged in on scroll) instead of fetching a session's entire turn history up front. See Memory.md's
   "Canvas/Assets Load Performance" and "Chat History Lazy-Load" entries for full detail.
+- **Every route now announces its plan before executing it** (2026-10-06, Luma-style) — `route()`
+  emits a normalized step list (which specialists, what each does, parallel vs. sequential) the
+  moment a route is decided; the chat shows it as its own bubble immediately, with live per-step
+  progress badges, then execution proceeds automatically in the same turn — not a blocking
+  approval gate. See Memory.md's "Plan Preview for Every Route" entry for the two real bugs this
+  surfaced (a missing DB migration entry, a `GraphState` field that didn't survive LangGraph's
+  node-to-node state merging) and how they were found.
 
 ## 2. Folder and file structure
 
@@ -211,8 +218,8 @@ poc/
         brand_repository.py
         product_repository.py
         sqlite/                    # current implementation of the protocols above
-          sqlite_session_repository.py
-          sqlite_canvas_repository.py
+          postgres_session_repository.py
+          postgres_canvas_repository.py
           ...
       providers/
         llm/
@@ -281,7 +288,7 @@ kept for the original rationale.
 | Image editing / inpainting | Cloudflare Workers AI FLUX.2 [klein] 4B (free Neuron allocation), falling back to HuggingFace Inference API (free tier) | Cloudflare added 2026-09-21 after HuggingFace's fal-ai sub-provider hit a real `402 Payment Required` (credits exhausted) |
 | Video generation | fal.ai free trial credits (+ existing FFmpeg stitcher, reused unchanged) | Bounded but real, enough to prove the agents work |
 | Observability | LangSmith | Native LangGraph integration, free tier, per-node cost/latency traces |
-| Persistence | SQLite via LangGraph's own checkpointer | Zero infra now — see 4 for the portability requirement |
+| Persistence | Postgres via LangGraph's own checkpointer | Zero infra now — see 4 for the portability requirement |
 | Generated file storage | Local disk, same pattern as the existing `clip_store.py` | Proven pattern, zero cost |
 | Auth | None, for this POC | Single-user internal validation; nothing here blocks adding real auth later |
 | Live updates | SSE from FastAPI, porting the existing `emit()` event pattern | Simplest thing that shows live narration + canvas tiles filling in |

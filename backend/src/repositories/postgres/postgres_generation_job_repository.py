@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ...models.generation_job import GenerationJobModel
 
 
-class SqliteGenerationJobRepository:
+class PostgresGenerationJobRepository:
     """Satisfies the GenerationJobRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

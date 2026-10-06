@@ -11,7 +11,7 @@ from ...models.session import SessionModel
 from ...models.tool_call_log import ToolCallLogModel
 
 
-class SqliteSessionRepository:
+class PostgresSessionRepository:
     """Satisfies the SessionRepository protocol (repositories/base.py)."""
 
     def __init__(self, session: AsyncSession):

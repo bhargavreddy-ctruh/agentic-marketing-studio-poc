@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     correlation_header: str = "X-Correlation-ID"
     # Comma-separated allowed origins for the Next.js frontend (Phase 4a) — config-driven per
     # Rules.md section 2, not hardcoded into main.py itself.
-    frontend_origins: str = "http://localhost:3000"
+    frontend_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # --- Auth (Tasks_Workflows.md #1) — signs the session cookie's HMAC (core/security.py).
     # A real dev-only default so the app still boots with zero setup, per the project's own

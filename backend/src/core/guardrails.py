@@ -210,6 +210,16 @@ def _product_rules(product: dict, key: str = "") -> list[GuardrailRule]:
             "governs backgrounds/accents/brand graphics, not the product itself)."
         ))
 
+    if product.get("price"):
+        add("price", f"This product's official price is {product['price']}. Any price tag, price reveal, or promotional overlay MUST use this exact price figure.")
+
+    if product.get("discount") or product.get("discount_percent"):
+        disc = product.get("discount") or f"{product.get('discount_percent')}% off"
+        add("discount", f"This product's active discount offer is {disc}. Any promotional copy or overlay MUST use this exact discount figure.")
+
+    if product.get("summary"):
+        add("summary", f"Product summary: {product['summary']}")
+
     # All other arbitrary attributes in the JSON mapping
     # "id" (2026-09-25): the product's own row id, added by `_load_brand_and_products_json` purely
     # to namespace this product's rule ids (see `key` above) — a real, live-found bug caught by

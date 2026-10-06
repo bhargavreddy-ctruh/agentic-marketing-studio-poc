@@ -12,6 +12,15 @@ class GraphState(TypedDict, total=False):
     route: str | None  # "dynamic" | "full_image" | "full_video" | "direct_fix" | None
     target_specialist: str | None  # set only for the direct_fix route
     dynamic_plan: list[dict[str, Any]] | None  # List of steps for dynamic execution
+    # The normalized plan preview `orchestrator.py`'s `_build_plan_preview()` builds for EVERY
+    # route (2026-10-06) — MUST be declared here, not just set on the `state` dict inside
+    # `route()`: LangGraph uses this TypedDict's own declared fields to set up its internal state
+    # channels, so a key missing from this schema doesn't reliably survive being merged from one
+    # graph node into the next (a real, live-found bug — confirmed via a live turn where the
+    # `plan_proposed` SSE event correctly carried the plan, but `session_service.py`'s
+    # `result_state.get("plan_preview")` still came back `None` at turn-completion time, because
+    # this field was never declared here).
+    plan_preview: list[dict[str, Any]] | None
     result: dict[str, Any] | None
     error: str | None
     new_guardrails: list[dict[str, Any]] | None

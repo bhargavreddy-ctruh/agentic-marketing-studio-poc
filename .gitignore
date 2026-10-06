@@ -20,6 +20,10 @@ backend/**/*.egg-info/
 backend/.pytest_cache/
 backend/**/.pytest_cache/
 
+# Runtime-downloaded font cache (text_overlay.py's `_ensure_font_file`) — fetched on first use,
+# never source; committing the binaries would just bloat the repo for no benefit.
+backend/src/services/tools/fonts/
+
 # --- Frontend excludes ---
 frontend/node_modules/
 frontend/.env.local

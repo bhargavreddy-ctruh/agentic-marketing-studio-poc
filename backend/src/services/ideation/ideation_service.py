@@ -7,6 +7,7 @@ for the Illustrator (Rules.md's model-tiering principle in practice).
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from ...core.approval import is_cancel
 from ...core.chat_history import build_history_messages
@@ -22,6 +23,10 @@ from ..orchestration.state import GraphState
 log = get_logger(__name__)
 
 _SYSTEM_PROMPT = """You are the ideation partner for a product marketing creative studio.
+
+<MASTER_DIRECTIVE>
+CRITICAL RULE 0 — Think Before Acting: You MUST write down your step-by-step reasoning inside a <thought>...</thought> block BEFORE outputting your final JSON response. Always think creatively and plan your work for the overall goal before deciding if the brief is ready.
+</MASTER_DIRECTIVE>
 
 Given a running brief (what the user has told you so far) and their latest message, decide:
 1. Is there enough here to start generating something (a clear subject/idea, even if brand and
@@ -207,7 +212,7 @@ Return ONLY JSON:
 """
 
 
-async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None:
+async def _check_followup_clarity(brief: dict, user_message: str, guardrails_xml: str | None = None) -> dict | None:
     """Judges a single follow-up message for genuine ambiguity, without touching the brief —
     returns None (never blocks the turn) if the check itself fails for an infra reason, since a
     broken clarity check should never be worse than the old blind-bypass behavior it replaces.
@@ -238,6 +243,12 @@ async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None
             f"terms, not by how well it fits this):\n{existing_idea}"
         )
     ]
+    if guardrails_xml:
+        context_parts.append(
+            f"EXISTING GUARDRAILS (Product/Brand facts already established — DO NOT ask for clarification on facts "
+            f"that are already present here!):\n{guardrails_xml}"
+        )
+
     latest_ref = brief.get("latest_element_storage_ref")
     referenced_elements = brief.get("referenced_elements_context", [])
     if len(referenced_elements) > 1:
@@ -287,6 +298,7 @@ async def _check_followup_clarity(brief: dict, user_message: str) -> dict | None
 async def run_ideation(state: GraphState) -> GraphState:
     brief = state.get("brief") or {}
     user_message = state.get("user_message") or ""
+    guardrails = state.get("guardrails_xml", "")
 
     # Resuming a paused "approve" mode video pipeline (Memory.md, Phase 4) — the user's message is
     # an approval/revision reply to an already-staged proposal, not new material to ideate on.
@@ -354,7 +366,7 @@ async def run_ideation(state: GraphState) -> GraphState:
             pending = None
             
         effective_message = f"{pending}\n\n{user_message}" if pending else user_message
-        clarity = _check_price_stated(effective_message) or await _check_followup_clarity(brief, effective_message)
+        clarity = _check_price_stated(effective_message) or await _check_followup_clarity(brief, effective_message, guardrails)
         
         if clarity and isinstance(clarity.get("new_guardrails"), list):
             state["new_guardrails"] = [g for g in clarity["new_guardrails"] if isinstance(g, dict)]
@@ -388,22 +400,59 @@ async def run_ideation(state: GraphState) -> GraphState:
     context = f"Running brief so far:\n{brief_summary}\n\nLatest message from the user:\n{user_message}"
 
     emit("ideation_started")
-    try:
-        result = await llm.complete(
-            tier=ModelTier.TIER_1,
-            system=_SYSTEM_PROMPT,
-            messages=build_history_messages(brief, context),
-            # 512 was too tight in practice (Memory.md, Phase 1): several free-tier models spend
-            # real tokens on internal reasoning before or interleaved with the visible JSON
-            # content, and got cut off mid-response at the lower budget.
-            max_tokens=1536,
-            # Real live "thinking" text, per the user's explicit ask (2026-09-21).
-            on_delta=lambda delta: emit("llm_delta", node="ideation", text=delta),
-        )
-        parsed = extract_json(result.text)
-    except Exception as exc:  # provider or parse failure — fail this turn clearly, don't crash the graph
-        log.error("ideation_failed", extra={"_extra_error": str(exc)})
-        raise SpecialistFailed("ideation", str(exc)) from exc
+    messages = build_history_messages(brief, context)
+    # Real, live-found bug (2026-10-06): ideation runs on EVERY turn, before routing even happens —
+    # unlike every specialist in `runner.py` (which already has a bounded one-retry tolerance for
+    # exactly this), a single malformed-JSON response here used to fail the WHOLE TURN outright,
+    # with no retry at all. Confirmed live: Groq rate-limited the TIER_1 model, the Replicate
+    # fallback (Gemini) wrapped its answer in a `<thought>...</thought>` block instead of clean
+    # JSON, and the turn crashed with a raw `SpecialistFailed` (502) — even though the exact same
+    # "model rambled instead of returning clean JSON" failure mode is already a known, handled,
+    # recoverable case everywhere else in this codebase. One bounded retry, same shape as
+    # `runner.py`'s `_json_parse_retries_left`, before genuinely giving up.
+    last_error: Exception | None = None
+    parsed: dict[str, Any] | None = None
+    for attempt in range(2):
+        try:
+            result = await llm.complete(
+                tier=ModelTier.TIER_1,
+                system=_SYSTEM_PROMPT,
+                messages=messages,
+                # 512 was too tight in practice (Memory.md, Phase 1): several free-tier models spend
+                # real tokens on internal reasoning before or interleaved with the visible JSON
+                # content, and got cut off mid-response at the lower budget.
+                max_tokens=1536,
+                # Real live "thinking" text, per the user's explicit ask (2026-09-21).
+                on_delta=lambda delta: emit("llm_delta", node="ideation", text=delta),
+            )
+            parsed = extract_json(result.text)
+            break
+        except Exception as exc:  # provider or parse failure
+            last_error = exc
+            if attempt == 0:
+                log.warning("ideation_json_parse_retry", extra={"_extra_error": str(exc)})
+                # Live-found (2026-10-06): asking the model to merely keep its <thought> block
+                # "brief" was not enough to override the system prompt's own "MUST write a
+                # <thought> block" rule — it kept spending the entire retry budget on reasoning
+                # too. This overrides that rule outright for the retry only: no thought block at
+                # all, so every token goes toward the one thing that's actually required.
+                messages = [
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your previous response did not end with a valid JSON object — it was "
+                            "cut off. For THIS response only, skip the <thought> block entirely "
+                            "(ignore that instruction this one time) and output ONLY the required "
+                            "JSON object — no prose, no reasoning, no markdown fences."
+                        ),
+                    },
+                ]
+    if parsed is None:
+        # Still fail this turn clearly after the real retry — don't crash the graph silently, but
+        # don't give up on the first transient parse hiccup either.
+        log.error("ideation_failed", extra={"_extra_error": str(last_error)})
+        raise SpecialistFailed("ideation", str(last_error)) from last_error
 
     # Defensive coercion, not trust — a free-tier model asked for {"idea": "..."} has, in real
     # testing (Memory.md, Phase 1), returned a bare string instead. Ported pattern from the

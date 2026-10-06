@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.models.base import Base
 from src.models.session import SessionModel
-from src.repositories.sqlite.sqlite_session_repository import SqliteSessionRepository
+from src.repositories.postgres.postgres_session_repository import PostgresSessionRepository
 
 
 @pytest.mark.asyncio
@@ -17,7 +17,7 @@ async def test_session_round_trips_through_repository():
 
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as db:
-        repo = SqliteSessionRepository(db)
+        repo = PostgresSessionRepository(db)
         created = await repo.add(SessionModel(id=uuid.uuid4().hex, status="ideating", brief={}))
 
         fetched = await repo.get(created.id)
