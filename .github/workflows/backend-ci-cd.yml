@@ -56,11 +56,23 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             docker compose down
-            # Force-kill any orphaned container or process holding port 8000 before starting
-            docker rm -f $(docker ps -q -f "expose=8000") || true
-            fuser -k 8000/tcp || sudo fuser -k 8000/tcp || true
+            
+            # Find and stop any specific container holding port 8000
+            CONFLICTING_CONTAINER=$(docker ps -q --filter "publish=8000")
+            if [ -n "$CONFLICTING_CONTAINER" ]; then
+              echo "Stopping container $CONFLICTING_CONTAINER that is holding port 8000..."
+              docker stop $CONFLICTING_CONTAINER || true
+              docker rm -f $CONFLICTING_CONTAINER || true
+            fi
             sleep 3
-            docker compose up -d --build backend ollama
+            
+            # Run docker compose up, and if it fails, print logs to help debug
+            if ! docker compose up -d --build backend ollama; then
+              echo "Docker compose up failed. Printing running containers and logs:"
+              docker ps
+              docker compose logs backend
+              exit 1
+            fi
             docker image prune -f
 
       - name: Health check
@@ -72,6 +84,7 @@ jobs:
           port: ${{ secrets.EC2_SSH_PORT || 22 }}
           script: |
             set -e
+            cd ~/agentic-marketing-studio/poc
             for i in $(seq 1 12); do
               if curl -sf http://localhost:8000/health >/dev/null; then
                 echo "Backend healthy"
@@ -80,5 +93,6 @@ jobs:
               echo "Waiting for backend to come up... ($i/12)"
               sleep 5
             done
-            echo "Backend did not become healthy in time"
+            echo "Backend did not become healthy in time. Printing logs:"
+            docker compose logs backend
             exit 1
