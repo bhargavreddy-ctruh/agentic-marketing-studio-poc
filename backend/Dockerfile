@@ -30,6 +30,6 @@ RUN playwright install --with-deps chromium
 # re-enabling this optimization is real, disclosed follow-up work, not abandoned, just deferred.
 ENV HF_HUB_DISABLE_XET=1
 
-EXPOSE 8000
+EXPOSE 8080
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]

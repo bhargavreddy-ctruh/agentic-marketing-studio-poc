@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
     container_name: ams-backend
     ports:
-      - "8080:8000"
+      - "8080:8080"
     volumes:
       # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
       # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
