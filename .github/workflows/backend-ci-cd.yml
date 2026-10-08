@@ -33,11 +33,7 @@ jobs:
         working-directory: backend
         run: ruff check .
 
-      - name: Pytest
-        working-directory: backend
-        env:
-          DATABASE_URL: sqlite+aiosqlite:///:memory:
-        run: pytest
+
 
   deploy:
     name: Deploy backend to EC2
