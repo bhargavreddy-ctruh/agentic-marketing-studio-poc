@@ -5,8 +5,8 @@ description = "Agentic Marketing Studio POC backend — LangGraph orchestration,
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
-    "uvicorn[standard    "google-genai",
-]>=0.32.0",
+    "uvicorn[standard]>=0.32.0",
+    "google-genai",
     "pydantic>=2.9.0",
     "pydantic-settings>=2.6.0",
     "sqlalchemy>=2.0.36",
