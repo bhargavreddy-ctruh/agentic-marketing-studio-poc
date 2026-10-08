@@ -33,9 +33,8 @@ log = get_logger(__name__)
 class ImageEditorTool(Tool):
     name = "image_editor"
     description = (
-        "Applies a targeted edit to an EXISTING image (color/lighting/object change, price strike, "
-        "logo correction) — never for generating a new image from scratch (use base_image_generator "
-        "for that) or for drawing legible text onto an image (use text_overlay for that)."
+        "Applies a targeted edit to an EXISTING image (e.g. color/lighting/object change, price strike, "
+        "logo correction)."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

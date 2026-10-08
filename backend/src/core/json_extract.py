@@ -54,6 +54,59 @@ def _close_truncated_json(text: str) -> str | None:
     return repaired
 
 
+def _escape_unescaped_quotes_in_strings(text: str) -> str | None:
+    """Real, live-found failure (2026-10-07, illustrator's final response — a DIFFERENT bug than
+    the control-character one `strict=False` above already fixed): a model sometimes embeds a
+    literal, un-escaped `"` INSIDE a string value — e.g. a prompt field describing on-screen text
+    like `a sign reading "SALE"` instead of escaping it as `\\"SALE\\"`. That quote closes the JSON
+    string early; everything after it until the next real quote is then raw text the parser never
+    expects, which reliably fails with "Expecting ',' delimiter" or similar, often hundreds of
+    characters into an otherwise well-formed response — `strict=False` doesn't help here, since the
+    text isn't a disallowed control character, it's a structurally-misplaced ordinary character.
+
+    There is no way to know with certainty which quote the model "meant" to close the string at —
+    but in practice a GENUINE closing quote is always immediately followed (after optional
+    whitespace) by a real JSON structural character: `,`, `}`, `]`, or `:`. A quote NOT followed by
+    one of those is almost always a stray one that should have been escaped. Walks the text
+    character-by-character (respecting real escapes, same approach `_close_truncated_json` above
+    already uses) and escapes exactly those stray quotes, leaving genuine structural quotes alone —
+    never invents or removes content, only repairs misplaced escaping."""
+    if '"' not in text:
+        return None
+    out: list[str] = []
+    in_string = False
+    escape = False
+    changed = False
+    n = len(text)
+    for i, ch in enumerate(text):
+        if in_string:
+            if escape:
+                out.append(ch)
+                escape = False
+                continue
+            if ch == "\\":
+                out.append(ch)
+                escape = True
+                continue
+            if ch == '"':
+                j = i + 1
+                while j < n and text[j] in " \t\r\n":
+                    j += 1
+                if j >= n or text[j] in ",}]:":
+                    in_string = False
+                    out.append(ch)
+                else:
+                    out.append('\\"')
+                    changed = True
+                continue
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = True
+        out.append(ch)
+    return "".join(out) if changed else None
+
+
 _THOUGHT_BLOCK = re.compile(r"<thought>[\s\S]*?</thought>", re.IGNORECASE)
 _UNCLOSED_THOUGHT_PREFIX = re.compile(r"^<thought>[\s\S]*", re.IGNORECASE)
 
@@ -102,6 +155,14 @@ def extract_json(text: str) -> dict[str, Any]:
     repaired = _close_truncated_json(repair_source)
     if repaired:
         candidates.append(repaired)
+
+    # Stray-quote repair — tried against every candidate gathered so far (a truncation repair can
+    # ALSO have a stray quote earlier in the same response; trying it against each candidate,
+    # not just raw `text`, covers that combination instead of only the single most common case).
+    for candidate in list(candidates):
+        quote_fixed = _escape_unescaped_quotes_in_strings(candidate)
+        if quote_fixed and quote_fixed not in candidates:
+            candidates.append(quote_fixed)
 
     last_error: Exception | None = None
     # Real, live-found bug (2026-10-06, overlay_artist's own final-response parse): a model

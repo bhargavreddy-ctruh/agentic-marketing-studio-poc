@@ -29,13 +29,9 @@ from .registry import register_tool
 class HighResolutionImageGeneratorTool(Tool):
     name = "high_resolution_image_generator"
     description = (
-        "Use this ONLY when the user explicitly asks for high resolution, 2K, 4K output, or "
-        "otherwise clearly needs the highest achievable image fidelity. Slower and more expensive "
-        "than the default tools — NEVER use this as a default; for a normal request use "
-        "base_image_generator, and for a photorealistic-but-not-explicitly-high-res request use "
-        "photorealistic_image_generator instead. Works with zero reference images (pure "
-        "text-to-image) or with reference_storage_refs (1-14 real, distinct visual assets) to edit "
-        "or combine them at high resolution."
+        "Generates a very high resolution (2K/4K) photorealistic image. Slower and higher cost. "
+        "Works with zero reference images (pure text-to-image) or with reference_storage_refs "
+        "(1-14 real, distinct visual assets) to edit or combine them at high resolution."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -107,6 +103,27 @@ class HighResolutionImageGeneratorTool(Tool):
         refs = args.get("reference_storage_refs") or []
         if not isinstance(refs, list):
             return ToolResult(ok=False, data={}, error="reference_storage_refs must be a list of storage_refs")
+
+        # Real, live-found gap (2026-10-07, reference-image routing complaint): unlike
+        # base_image_generator (which already falls back to the shared tool `context`'s
+        # product_photo_storage_ref/reference_storage_ref when the model's own call omits an
+        # explicit reference), this tool had no such backstop — a real, relevant referenced
+        # element the model's call simply forgot to attach was silently dropped with nothing to
+        # catch it. Only fires when the model supplied NO explicit refs at all; an explicit
+        # (even empty-on-purpose) choice by the model is never second-guessed.
+        if not refs:
+            ctx = context or {}
+            context_refs = [
+                str(el["storage_ref"]) for el in (ctx.get("referenced_elements_context") or [])
+                if el.get("storage_ref")
+            ]
+            if not context_refs:
+                fallback = str(ctx.get("reference_storage_ref") or ctx.get("product_photo_storage_ref") or "").strip()
+                if fallback:
+                    context_refs = [fallback]
+            if context_refs:
+                refs = context_refs
+
         if len(refs) > 14:
             return ToolResult(ok=False, data={}, error="reference_storage_refs supports at most 14 real assets")
 

@@ -21,12 +21,8 @@ from .registry import register_tool
 class BaseImageGeneratorTool(Tool):
     name = "base_image_generator"
     description = (
-        "The default: generates a NEW still image from a text prompt (stylized, illustrated, or "
-        "plain photographic). Use collab_image_generator instead when combining 2+ real reference "
-        "images into one scene; photorealistic_image_generator/high_resolution_image_generator "
-        "instead for an explicitly photorealistic result; image_editor instead for editing an "
-        "EXISTING image. Pass reference_storage_ref to ground this generation in one existing image "
-        "(image-to-image) instead of only describing it in the prompt."
+        "Generates a new, stylized or illustrated still image from a text prompt. "
+        "Supports taking a reference_storage_ref to ground generation in an existing image."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

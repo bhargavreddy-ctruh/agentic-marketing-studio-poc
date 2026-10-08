@@ -17,7 +17,11 @@ class DataConciergeTool(Tool):
     name = "data_concierge"
     description = (
         "Inter-agent data assistant. Ask any question about product details, prices, discount rules, "
-        "brand kit guidelines, active canvas elements, or earlier chat history context."
+        "brand kit guidelines, active canvas elements, or earlier chat history context. "
+        "Call this BEFORE asking the user about a missing FACT you need — it's grounded against "
+        "real product/brand/canvas/session data, never invented. Returns has_data: false when "
+        "nothing relevant was actually found — treat that as a genuine 'I don't have this,' not a "
+        "hint to guess; only then is it appropriate to ask the user directly."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

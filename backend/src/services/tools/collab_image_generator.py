@@ -27,13 +27,9 @@ from .registry import register_tool
 class CollabImageGeneratorTool(Tool):
     name = "collab_image_generator"
     description = (
-        "Use this INSTEAD OF base_image_generator specifically when you need to combine two or "
-        "more real, distinct visual assets into ONE generation — e.g. a brand/sponsor logo "
-        "together with the product's own photo, for a named collaboration or co-branded "
-        "campaign. Do NOT use this for a single-subject or purely text-described generation — "
-        "use base_image_generator for that. Requires at least 2 real reference_storage_refs; "
-        "each must be a real, already-relevant asset (e.g. from brand_kit_lookup's own result and "
-        "the current product's own photo) — never a guessed-at or stale one."
+        "Combines two or more real, distinct visual assets into ONE generation — e.g. a brand/sponsor "
+        "logo together with the product's own photo, for a named collaboration or co-branded campaign. "
+        "Requires at least 2 real reference_storage_refs."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

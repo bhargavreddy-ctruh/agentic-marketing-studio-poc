@@ -133,7 +133,7 @@ class BrandDnaService:
         # `user_id` at all, always hitting its "not configured" early-exit) is fixed in
         # `compliance/compliance_gate.py`/`brand_consistency_checker.py`.
         await get_knowledge_provider().index_document(
-            collection=f"brand_{user_id}", doc_id=brand.id, text=_build_index_text(name, merged_facts, guardrails)
+            collection=f"brand_{brand.id}", doc_id=brand.id, text=_build_index_text(name, merged_facts, guardrails)
         )
         brand.indexed = True
         return await self._brands.add(brand)
@@ -251,6 +251,6 @@ async def reindex_all_brands(brands: BrandRepository) -> None:
         guardrails = brand.raw_profile.get("guardrails", {})
         if brand.user_id:
             await knowledge.index_document(
-                collection=f"brand_{brand.user_id}", doc_id=brand.id, text=_build_index_text(brand.name, raw_facts, guardrails)
+                collection=f"brand_{brand.id}", doc_id=brand.id, text=_build_index_text(brand.name, raw_facts, guardrails)
             )
     log.info("brand_reindex_complete")

@@ -61,21 +61,14 @@ class Settings(BaseSettings):
     # `apply_or_stage`'s own behavior changes; flipping this back on is the whole rollback.
     canvas_versioning_enabled: bool = False
 
-    # --- Reasoning (OpenRouter) ---
-    openrouter_api_key: str | None = None
-    openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    # Tier -> comma-separated model id list, tried in order with fallback to the next on
-    # persistent failure — the same provider-fallback-chain pattern already proven in the
-    # existing agentic_flow codebase's image/video providers, applied here because real testing
-    # showed free-tier OpenRouter models genuinely do get transiently congested (Memory.md,
-    # Phase 1). Every model below was verified live against OpenRouter's actual /models endpoint
-    # plus a real completion call — not a guess. Re-verify before relying on these long-term,
-    # since OpenRouter's free catalog changes over time.
-    model_tier_1: str = "google/gemma-4-26b-a4b-it:free,liquid/lfm-2.5-2.6b:free"
-    model_tier_2: str | None = "nex-agi/nex-n2.5-pro:free,nvidia/nemotron-3-super-120b-a12b:free"
-    model_tier_3: str | None = (
-        "nvidia/nemotron-3-ultra-550b-a55b:free,deepseek/deepseek-v4-flash-0731:free"
-    )
+    # --- Reasoning (Gemini) ---
+    # Gemini serves as the primary fallback when Groq rate limits.
+    gemini_api_key: str | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    gemini_model_tier_1: str = "gemini-3.5-flash-lite"
+    gemini_model_tier_2: str = "gemini-3.8-flash"
+    gemini_model_tier_3: str = "gemini-3.8-flash"
+    gemini_vision_model: str = "gemini-3.8-flash"
 
     # Groq — a second LLM gateway, used only as a whole-provider fallback (router.py) when
     # OpenRouter itself is unavailable. Added after real testing found OpenRouter's free tier has
@@ -89,31 +82,16 @@ class Settings(BaseSettings):
     # term; Groq's catalog changes over time same as OpenRouter's.
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model_tier_1: str = "openai/gpt-oss-20b"
-    groq_model_tier_2: str | None = "openai/gpt-oss-120b"
-    groq_model_tier_3: str | None = "openai/gpt-oss-120b"
+    groq_model_tier_1: str = "llama-3.1-8b-instant"
+    groq_model_tier_2: str | None = "llama-3.1-70b-versatile"
+    groq_model_tier_3: str | None = "llama-3.1-70b-versatile"
     # A dedicated vision-capable model, deliberately separate from the Tier 1/2/3 system — vision
     # is a CAPABILITY question ("can this model see an image at all"), not a "how smart" tier
     # choice, and none of the Tier models above support image input. Confirmed live and free
     # (Memory.md, Phase 4): a real image correctly described, including spotting a watermark.
-    groq_vision_model: str = "qwen/qwen3.8-27b"
+    groq_vision_model: str = "llama-3.2-90b-vision-preview"
 
-    # --- Image generation ---
-    huggingface_api_token: str | None = None
-    huggingface_base_url: str = "https://api-inference.huggingface.co"
-    huggingface_image_edit_model: str = "black-forest-labs/FLUX.1-Kontext-dev"
 
-    # --- Image editing (Cloudflare Workers AI, FLUX.2 [klein] 4B) — a real second option for
-    # image_editor.py, added because HuggingFace's fal-ai sub-provider was hitting a real 402
-    # Payment Required (Memory.md's disclosed gap). Cloudflare gives a 10,000-Neuron/day free
-    # allocation shared across all Workers AI models on the account; this model costs ~5.37
-    # Neurons per 512x512 input tile and ~26.05 per 512x512 output tile (Cloudflare's own pricing
-    # page) — genuinely free at this project's volume, not "free" in the vaguer sense. Preferred
-    # over HuggingFace when both are configured (image_editor.py), since it doesn't share HF's
-    # exhausted fal-ai credits.
-    cloudflare_account_id: str | None = None
-    cloudflare_api_token: str | None = None
-    cloudflare_flux_model: str = "@cf/black-forest-labs/flux-2-klein-4b"
 
     # --- Text-to-speech (local, not a remote provider) ---
     # Confirmed live (Memory.md): HuggingFace's own free `hf-inference` serverless tier hosts NO

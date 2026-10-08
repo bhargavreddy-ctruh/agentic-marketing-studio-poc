@@ -42,7 +42,7 @@ def _generation_prompt_text(metadata: dict) -> str:
     ).strip() or "(no generation prompt recorded for this element)"
 
 
-async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) -> dict:
+async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str, product_id: str | None = None) -> dict:
     generation_prompt_text = _generation_prompt_text(metadata)
 
     # Real vision for images (Memory.md, Phase 4) — video elements fall back to text-only
@@ -86,11 +86,11 @@ async def _run_checks(*, storage_ref: str, metadata: dict, element_type: str) ->
 
     brand = await check_brand_consistency(
         generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
-        image_url=image_url, user_id=user_id,
+        image_url=image_url, user_id=user_id, product_id=product_id,
     )
     visual = await check_visual_fidelity(
         generation_prompt_text=generation_prompt_text, image_bytes=image_bytes, mime_type=mime_type,
-        image_url=image_url, user_id=user_id,
+        image_url=image_url, user_id=user_id, product_id=product_id,
     )
     # Real, live-found bug (2026-10-06, prompt-engineering cross-check): `check_format_technical`
     # only ever understands image/video dimensions — for a text element (every headline/caption/
@@ -137,15 +137,17 @@ def _split_price_violations(violations: list[str]) -> tuple[list[str], list[str]
     return price_related, other
 
 
-async def _real_overlay_text() -> str | None:
-    """The real price/discount text for the (single, POC-scope) onboarded product, read directly
-    from SQL — never a guess. Returns None if no product is onboarded or it has no price/discount
+async def _real_overlay_text(product_id: str | None) -> str | None:
+    """The real price/discount text for the specific onboarded product, read directly
+    from SQL — never a guess. Returns None if no product is passed or it has no price/discount
     at all, so callers know there's nothing real to draw."""
-    async with async_session_factory() as db:
-        products = await PostgresProductRepository(db).list_all()
-    if not products:
+    if not product_id:
         return None
-    attrs = products[0].attributes
+    async with async_session_factory() as db:
+        product = await PostgresProductRepository(db).get(product_id)
+    if not product:
+        return None
+    attrs = product.attributes
     price, discount = attrs.get("price"), attrs.get("discount_percent")
     parts = []
     if price is not None:
@@ -165,7 +167,8 @@ async def run_compliance_gate(
 
     metadata = dict(element.metadata_json or {})
     checks = await _run_checks(
-        storage_ref=element.storage_ref, metadata=metadata, element_type=element.element_type
+        storage_ref=element.storage_ref, metadata=metadata, element_type=element.element_type,
+        product_id=element.product_id
     )
     
     # Check if alignment failed and append it as a non-blocking warning metadata
@@ -191,7 +194,7 @@ async def run_compliance_gate(
         # reliably render legible text (confirmed live: Memory.md, Phase 3), so this goes through
         # the deterministic text_overlay tool with the real figure, never a guessed one.
         if price_violations:
-            overlay_text = await _real_overlay_text()
+            overlay_text = await _real_overlay_text(element.product_id)
             if overlay_text:
                 overlay_args = {"storage_ref": current_ref, "text": overlay_text, "placement": "lower third"}
                 async with trace(name="tool:text_overlay", run_type="tool", inputs=overlay_args) as tool_run:
@@ -233,7 +236,8 @@ async def run_compliance_gate(
             element = await canvas.update_element(element)
 
             recheck = await _run_checks(
-                storage_ref=current_ref, metadata=metadata, element_type=element.element_type
+                storage_ref=current_ref, metadata=metadata, element_type=element.element_type,
+                product_id=element.product_id
             )
             recheck_passed = all(bool(c.get("passed")) for c in recheck.values())
             remediation = {

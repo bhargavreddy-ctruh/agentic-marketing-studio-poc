@@ -26,10 +26,10 @@ class SessionModel(Base, TimestampMixin):
     product_profile_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     style_ref_storage_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
     style_seed: Mapped[int | None] = mapped_column(nullable=True)
-    # "auto" (default, existing behavior — a Lead runs its whole pipeline through with no pauses)
-    # or "approve" (Memory.md, Phase 4: real per-stage pipeline gates and per-edit staging — a
-    # user's explicit ask for genuine approval checkpoints, not just after-the-fact fixes).
-    approval_mode: Mapped[str] = mapped_column(String(16), default="auto")
+    # "approve" only (2026-10-07: "auto" mode — skipping every pipeline gate/edit-staging pause —
+    # was removed entirely; genuine approval checkpoints are now always on). Column/field kept
+    # (not dropped) so existing rows stay valid with no migration.
+    approval_mode: Mapped[str] = mapped_column(String(16), default="approve")
     # User-facing per-session toggle (2026-09-25, explicit user ask): when False, this session's
     # turns skip both real enforcement points — no guardrails XML is injected into any specialist's
     # system prompt (session_service.py sets an empty ContextVar instead), and the post-hoc

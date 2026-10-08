@@ -65,6 +65,7 @@ class ReplicateVideoProvider(VideoGenProvider):
         camera_motion: str | None = None,
         first_frame_bytes: bytes | None = None,
         last_frame_bytes: bytes | None = None,
+        audio_bytes: bytes | None = None,
         model: str | None = None,
         generate_audio: bool | None = None,
     ) -> VideoResult:
@@ -119,6 +120,8 @@ class ReplicateVideoProvider(VideoGenProvider):
         }
         if last_frame_bytes:
             input_payload["last_frame_image"] = io.BytesIO(last_frame_bytes)
+        if audio_bytes:
+            input_payload["audio"] = io.BytesIO(audio_bytes)
         if generate_audio is not None:
             input_payload["generate_audio"] = generate_audio
 
@@ -132,9 +135,14 @@ class ReplicateVideoProvider(VideoGenProvider):
                 input=input_payload,
             )
 
+            attempts = 0
+            max_attempts = 300  # 10 minutes max (at 2s per poll)
             while prediction.status not in ["succeeded", "failed", "canceled"]:
+                if attempts >= max_attempts:
+                    raise ProviderUnavailable("replicate", f"Prediction timed out after {max_attempts} attempts.")
                 await asyncio.sleep(2)
                 prediction = await client.predictions.async_get(prediction.id)
+                attempts += 1
 
             if prediction.status != "succeeded":
                 raise ProviderUnavailable("replicate", f"Prediction ended with status: {prediction.status}")

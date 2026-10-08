@@ -6,24 +6,23 @@ from pydantic import BaseModel, Field
 
 
 class CreateSessionRequest(BaseModel):
-    # "auto" (default — existing behavior, no pauses) or "approve" (Memory.md, Phase 4: real
-    # per-stage pipeline gates and per-edit staging). No initial_message any more — creating the
-    # session and running its first turn are now two separate calls (session_service.py's
-    # `create_session` docstring explains why: the client needs the id back before it can open
-    # the SSE stream, so the first turn's live events aren't lost).
-    approval_mode: str = Field(default="auto", pattern="^(auto|approve)$")
+    # "approve" only (2026-10-07, explicit user ask: "remove auto mode as a whole, only approve
+    # mode") — "auto" (skip every pipeline gate/edit-staging pause) has been removed entirely; this
+    # field/column stays only so existing rows and the per-session value remain valid, always
+    # "approve" now. No initial_message any more — creating the session and running its first turn
+    # are now two separate calls (session_service.py's `create_session` docstring explains why: the
+    # client needs the id back before it can open the SSE stream, so the first turn's live events
+    # aren't lost).
+    approval_mode: str = Field(default="approve", pattern="^approve$")
     # A real, human-chosen workflow name (Tasks_Workflows.md #2) — optional; the model's own
     # default ("Untitled workflow") covers a blank/omitted title rather than rejecting the request.
     title: str | None = Field(default=None, max_length=200)
 
 
 class UpdateApprovalModeRequest(BaseModel):
-    # Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be
-    # able to select the mode(auto/approve mode)") — `approval_mode` was only ever settable at
-    # session CREATION (`CreateSessionRequest` above); once a session existed, the chat UI could
-    # only display it, never change it. Same validation as creation, reused here rather than
-    # duplicated.
-    approval_mode: str = Field(pattern="^(auto|approve)$")
+    # "auto" mode removed (2026-10-07) — kept for the rare existing caller, but there is no longer
+    # a second value to switch to. Same validation as `CreateSessionRequest.approval_mode` above.
+    approval_mode: str = Field(pattern="^approve$")
 
 
 class SelectBrandRequest(BaseModel):

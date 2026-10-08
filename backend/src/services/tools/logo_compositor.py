@@ -34,7 +34,7 @@ class LogoCompositorTool(Tool):
             },
             "logo_storage_ref": {
                 "type": "string",
-                "description": "storage_ref of the brand logo PNG image.",
+                "description": "storage_ref of the brand logo PNG image. Leave blank to automatically use the session's active brand logo.",
             },
             "position": {
                 "type": "string",
@@ -58,12 +58,18 @@ class LogoCompositorTool(Tool):
                 "description": "Logo opacity from 0.0 (transparent) to 1.0 (opaque).",
             },
         },
-        "required": ["image_storage_ref", "logo_storage_ref"],
+        "required": ["image_storage_ref"],
     }
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
         image_ref = str(args.get("image_storage_ref") or "").strip()
-        logo_ref = str(args.get("logo_storage_ref") or "").strip()
+        
+        # Magic fallback to the session's real brand logo, same as base_image_generator
+        raw_logo_ref = args.get("logo_storage_ref")
+        logo_ref = str(raw_logo_ref or "").strip()
+        if not logo_ref and context:
+            logo_ref = str(context.get("brand_logo_storage_ref") or "").strip()
+
         position = str(args.get("position") or "bottom_right").strip().lower()
         logo_scale_pct = float(args.get("logo_scale_pct") or 15.0)
         padding_pct = float(args.get("padding_pct") or 3.0)

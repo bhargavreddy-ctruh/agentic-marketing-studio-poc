@@ -89,27 +89,32 @@ DELIVERABLES = {
     )
 }
 
+# Real, live-found bug (2026-10-07, Monster Energy "1:1 vs got 16:9" complaint): this list is
+# scanned first-match-wins (`detect_deliverable_key` below). It used to check the broad `16:9`/
+# `banner`/`landscape` patterns BEFORE the `1:1`/`instagram_square`/`instagram_post_ambiguous`
+# patterns, so a text containing both an explicit "16:9" token (for some unrelated part of a
+# multi-asset request) and "Instagram"/"1:1" resolved to 16:9 regardless of actual intent.
+# Reordered so every EXPLICIT numeric ratio/pixel-dimension token is checked first (most specific,
+# least ambiguous), then the vaguer keyword-only patterns — a specific "1:1" should never lose to
+# a vague "banner"/"landscape" match elsewhere in the same scanned text.
 _REGEX_MAPPINGS = [
+    # Explicit ratio/dimension tokens — most specific, checked first.
     (r"\b(9:16|1080x1920)\b", "instagram_story"),
-    (r"\b(story|stories|reel|reels|vertical)\b", "instagram_story"),
-    
     (r"\b(16:9|1280x720|1920x1080|1080p)\b", "youtube_thumbnail"),
-    (r"\b(youtube thumbnail|thumbnail)\b", "youtube_thumbnail"),
-    (r"\b(banner|landscape)\b", "landscape_banner"),
-    
     (r"\b(2:3)\b", "poster"),
-    (r"\b(poster)\b", "poster"),
-    
     (r"\b(1:1|1080x1080)\b", "instagram_square"),
-    (r"\b(square)\b", "instagram_square"),
-    
     (r"\b(4:5|1080x1350)\b", "meta_portrait"),
-    (r"\b(portrait)\b", "meta_portrait"),
-    
     (r"\b(1.91:1|1200x628)\b", "linkedin_post"),
-    (r"\b(linkedin)\b", "linkedin_post"),
-    
-    (r"\b(instagram post|insta post|ig post)\b", "instagram_post_ambiguous"),
+
+    # Vaguer keyword-only patterns — checked only once no explicit ratio/dimension matched.
+    # Tightened to avoid false positives on single nouns that can be subjects (e.g., "banner", "poster", "landscape", "square", "portrait", "story")
+    (r"\b(instagram post|insta post|ig post|instagram image|instagram)\b", "instagram_post_ambiguous"),
+    (r"\b(instagram story|insta story|ig story|instagram reel|insta reel|ig reel|facebook story|fb story)\b", "instagram_story"),
+    (r"\b(youtube thumbnail|yt thumbnail)\b", "youtube_thumbnail"),
+    (r"\b(youtube video|yt video|landscape video|web banner|website banner)\b", "landscape_banner"),
+    (r"\b(movie poster|campaign poster)\b", "poster"),
+    (r"\b(meta portrait|facebook portrait|fb portrait)\b", "meta_portrait"),
+    (r"\b(linkedin post|linkedin)\b", "linkedin_post"),
 ]
 
 def detect_deliverable_key(text: str) -> str | None:

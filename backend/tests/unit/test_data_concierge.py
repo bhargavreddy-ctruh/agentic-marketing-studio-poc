@@ -1,9 +1,10 @@
 import pytest
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.services.tools.registry import load_all_tools, get_tool
 from src.services.specialists.registry import load_all_specialists, SPECIALIST_REGISTRY
+from src.services.knowledge.data_concierge_service import DataConciergeService
 
 def test_data_concierge_tool_registration():
     load_all_tools()
@@ -35,3 +36,43 @@ async def test_data_concierge_execution():
         assert res.ok is True
         assert res.data["answer"] == "Samsung S26 Ultra price is ₹1,39,999."
         assert res.data["has_data"] is True
+
+
+@pytest.mark.asyncio
+async def test_synthesis_reports_not_found_even_with_gathered_facts():
+    # Real, live-found gap (2026-10-07): gathering SOME context (here, a referenced canvas
+    # element) used to unconditionally set has_data=True regardless of whether that context
+    # actually answered the query — the synthesis step's own `found: false` self-report is what
+    # should drive this now, not just "was anything gathered at all."
+    with patch("src.services.knowledge.data_concierge_service.get_knowledge_provider", return_value=MagicMock()), \
+         patch("src.services.knowledge.data_concierge_service.get_llm_provider") as mock_get_llm:
+        mock_llm = AsyncMock()
+        mock_llm.complete.return_value = MagicMock(
+            text='{"found": false, "answer": "The canvas element info doesn\'t mention a price."}'
+        )
+        mock_get_llm.return_value = mock_llm
+        service = DataConciergeService()
+        result = await service.answer_query(
+            "What is the price?",
+            referenced_elements=[{"element_type": "image", "description": "a blue mug", "storage_ref": "abc"}],
+        )
+        assert result["has_data"] is False
+        assert "price" in result["answer"].lower()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_llm_failure_reports_not_found_not_raw_dump():
+    with patch("src.services.knowledge.data_concierge_service.get_knowledge_provider", return_value=MagicMock()), \
+         patch("src.services.knowledge.data_concierge_service.get_llm_provider") as mock_get_llm:
+        mock_llm = AsyncMock()
+        mock_llm.complete.side_effect = RuntimeError("provider unavailable")
+        mock_get_llm.return_value = mock_llm
+        service = DataConciergeService()
+        result = await service.answer_query(
+            "What is the price?",
+            referenced_elements=[{"element_type": "image", "description": "a blue mug", "storage_ref": "abc"}],
+        )
+        assert result["has_data"] is False
+        # Real, live-found gap this closes: previously dumped unsynthesized raw facts here,
+        # indistinguishable from a genuine grounded answer to the calling specialist.
+        assert "raw facts" not in result["answer"].lower()

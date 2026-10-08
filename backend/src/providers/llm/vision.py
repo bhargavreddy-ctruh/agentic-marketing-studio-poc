@@ -33,7 +33,6 @@ from ...core.middleware.logging import get_logger
 from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMResult, ModelTier
 from .key_cooldown import is_cooling_down, mark_rate_limited
-from .replicate_llm import get_replicate_llm_provider
 
 log = get_logger(__name__)
 
@@ -153,15 +152,23 @@ async def complete_with_vision(
             continue
 
     if last_error is not None:
-        log.warning("vision_falling_back_to_replicate", extra={"_extra_groq_error": last_error.message})
+        log.warning("vision_falling_back_to_gemini", extra={"_extra_groq_error": last_error.message})
     else:
-        log.warning("vision_groq_key_missing_falling_back_to_replicate")
-    emit("llm_provider_fallback", tier="vision", from_provider="groq", to_provider="replicate_llm")
+        log.warning("vision_groq_key_missing_falling_back_to_gemini")
+    emit("llm_provider_fallback", tier="vision", from_provider="groq", to_provider="gemini")
 
-    return await get_replicate_llm_provider().complete(
-        tier=ModelTier.TIER_3,
-        system=system,
-        messages=[user_message],
+    if not settings.gemini_api_key:
+        if last_error is not None:
+            raise last_error
+        else:
+            raise ProviderUnavailable("groq", "No Groq API keys available and no Gemini fallback configured.")
+
+    return await call_openai_compatible_chat(
+        provider_name="gemini",
+        base_url=settings.gemini_base_url,
+        api_key=settings.gemini_api_key,
+        model=settings.gemini_vision_model,
+        messages=[{"role": "system", "content": system}, user_message],
         tools=None,
         max_tokens=max_tokens,
     )

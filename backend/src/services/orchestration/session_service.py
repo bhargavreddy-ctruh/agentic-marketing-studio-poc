@@ -216,7 +216,7 @@ class SessionService:
         self._versioning = versioning
 
     async def create_session(
-        self, *, user_id: str, approval_mode: str = "auto", title: str | None = None
+        self, *, user_id: str, approval_mode: str = "approve", title: str | None = None
     ) -> SessionResponse:
         """Persists a bare session row and returns immediately, with no turn run yet.
 
@@ -263,6 +263,15 @@ class SessionService:
         session = await self._get_owned_session(session_id, user_id=user_id)
         session.brand_profile_id = brand_id
         session = await self._sessions.update(session)
+        
+        # Re-derive guardrails immediately so the frontend sees the new brand's DNA
+        # rather than falling back to the old one.
+        from ....services.knowledge.guardrail_service import GuardrailService
+        guardrail_svc = GuardrailService()
+        await guardrail_svc.get_or_derive_for_session(session_id)
+        
+        # Refetch the session so the response includes the newly derived guardrails
+        session = await self._sessions.get(session_id)
         return SessionMapper.to_response(session)
 
     async def update_guardrails_enabled(
@@ -467,6 +476,8 @@ class SessionService:
         # Mark generating NOW so GET /sessions/{id} immediately reflects it.
         session.status = "generating"
         session.next_prompt_json = None
+        if picked_option_id:
+            session.brief["_last_picked_option_id"] = picked_option_id
         session = await self._sessions.update(session)
 
         # Fire-and-forget: dispatch the actual turn in a background task with its own DB session.
@@ -648,6 +659,7 @@ class SessionService:
         # 2026-10-05) can scope its lookup to this session; `runner.py`'s shared tool-context
         # builder reads it the same way it already reads `user_id`/`product_id`.
         brief_for_graph["session_id"] = session.id
+        brief_for_graph["brand_profile_id"] = session.brand_profile_id
         # Tiered conversation memory (2026-10-05, explicit user design — Ledger/Window/Digests/
         # Recall/caching) — replaces the old flat, UNCAPPED "last 6 turns" slice (no token budget,
         # no masking of old long text) plus an UNCONDITIONAL semantic-memory call on every single
@@ -905,12 +917,84 @@ class SessionService:
         # NEW question overwrites it instead, so a chain of clarifications resumes correctly too.
         paused_plan = session.brief.get("paused_plan")
         if paused_plan:
-            resume_brief = {**brief_for_graph, "clarification_answer": user_message}
+            picked_id = brief_for_graph.pop("_last_picked_option_id", None)
+            answer_text = f"{user_message} (Option ID: {picked_id})" if picked_id else user_message
+            resume_brief = {**brief_for_graph, "clarification_answer": answer_text}
             resume_state: GraphState = {
                 "session_id": session.id, "user_id": session.user_id,
                 "user_message": user_message, "brief": resume_brief,
             }
-            if paused_plan.get("route") == "direct_fix":
+            if paused_plan.get("route") == "plan_approval":
+                # Real, live-found gap closed (2026-10-07, explicit user ask: "after creating a
+                # plan there should be hitl, be it campaign generation or any generation") —
+                # `orchestrator.py`'s `route()` now always pauses here before any specialist runs
+                # (see its own comment for why). Three outcomes, same shape as every other
+                # approve/cancel/revise gate in this file (e.g. the staged-edit branch right above):
+                pending_route = paused_plan.get("pending_route")
+                original_message = paused_plan.get("original_message", "")
+                if is_approval(user_message):
+                    # Re-enter the graph directly at the REAL execution node, using the plan
+                    # already shown to and approved by the user — never re-invokes
+                    # `orchestrator.route()`, so the approved plan can never be silently
+                    # re-classified into something different.
+                    resume_state["user_message"] = original_message
+                    resume_brief.pop("clarification_answer", None)
+                    resume_state["brief"] = resume_brief
+                    
+                    # Re-emit structural events so Node Mode redraws the flow leading up to this resume point
+                    # rather than appearing cleared out.
+                    emit("ideation_started")
+                    emit("ideation_completed", ready=True)
+                    if paused_plan.get("plan_preview"):
+                        emit("plan_proposed", route=pending_route, plan=paused_plan["plan_preview"])
+                    emit("route_decided", route=pending_route, target_specialist=paused_plan.get("target_specialist"))
+
+                    if pending_route == "direct_fix":
+                        resume_state["target_specialist"] = paused_plan.get("target_specialist")
+                        result_state = await _direct_fix_node(resume_state)
+                    elif pending_route == "full_image":
+                        from .graph import _visual_design_lead_node
+                        result_state = await _visual_design_lead_node(resume_state)
+                    elif pending_route == "full_video":
+                        from .graph import _motion_lead_node
+                        result_state = await _motion_lead_node(resume_state)
+                    elif pending_route == "full_audio":
+                        from .graph import _full_audio_node
+                        result_state = await _full_audio_node(resume_state)
+                    else:
+                        resume_state["dynamic_plan"] = paused_plan.get("dynamic_plan")
+                        result_state = await _dynamic_executor_node(resume_state)
+                elif is_cancel(user_message):
+                    session.brief = {k: v for k, v in session.brief.items() if k != "paused_plan"}
+                    result_state = {
+                        "brief": resume_brief,
+                        "result": {
+                            "message": "Cancelled — the proposed plan was discarded and nothing was "
+                                       "generated. Send a new idea whenever you're ready.",
+                        },
+                    }
+                else:
+                    # Anything else is revision feedback, not a clear approve/cancel — re-run the
+                    # real orchestrator with the revision appended, so a NEW plan is proposed and
+                    # the SAME gate fires again; a revision is never silently applied as if it were
+                    # the original, already-rejected plan.
+                    combined_message = f"{original_message}\nUser revision feedback: {user_message}".strip()
+                    resume_brief["idea"] = combined_message
+                    resume_state["user_message"] = combined_message
+                    resume_state.pop("target_specialist", None)
+                    resume_state.pop("dynamic_plan", None)
+                    graph = get_graph()
+                    result_state = await graph.ainvoke(
+                        {
+                            "session_id": session.id, "user_id": session.user_id,
+                            "user_message": combined_message, "brief": resume_brief,
+                        }
+                    )
+            elif paused_plan.get("route") == "direct_fix":
+                emit("ideation_started")
+                emit("ideation_completed", ready=True)
+                emit("route_decided", route="direct_fix", target_specialist=paused_plan.get("specialist_name"))
+
                 resume_state["target_specialist"] = paused_plan.get("specialist_name")
                 resume_brief["_resume_direct_fix_context"] = paused_plan.get("context")
                 result_state = await _direct_fix_node(resume_state)
@@ -938,6 +1022,10 @@ class SessionService:
                         ),
                     },
                 )
+                emit("ideation_started")
+                emit("ideation_completed", ready=True)
+                emit("route_decided", route="full_video", target_specialist=None)
+
                 original_message = paused_plan.get("original_message", "")
                 combined_idea = f"{original_message}\nUser clarification answer: {user_message}".strip()
                 resume_brief["idea"] = combined_idea
@@ -946,6 +1034,10 @@ class SessionService:
                 from .graph import _motion_lead_node
                 result_state = await _motion_lead_node(resume_state)
             else:
+                emit("ideation_started")
+                emit("ideation_completed", ready=True)
+                emit("route_decided", route="dynamic_plan", target_specialist=None)
+
                 resume_state["dynamic_plan"] = paused_plan.get("plan")
                 resume_brief["_resume_next_step_index"] = paused_plan.get("next_step_index")
                 resume_brief["_resume_completed_results"] = paused_plan.get("completed_results")

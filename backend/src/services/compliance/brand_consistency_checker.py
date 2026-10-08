@@ -62,14 +62,15 @@ Return ONLY JSON:
 @traceable(name="brand_consistency_checker")
 async def check_brand_consistency(
     *, generation_prompt_text: str, image_bytes: bytes | None = None, mime_type: str | None = None,
-    image_url: str | None = None, user_id: str | None = None,
+    image_url: str | None = None, user_id: str | None = None, product_id: str | None = None,
 ) -> dict:
     # Real, live-found bug (2026-09-25): this call used to pass no `context` at all, so
     # `BrandKitLookupTool` always hit its own `if not user_id: return configured: False` early
     # exit (brand_kit_lookup.py) — meaning this checker reported "no brand kit configured" for
     # EVERY element, even when the owning user has a real, fully onboarded brand.
     brand_result = await BrandKitLookupTool().run(
-        {"question": generation_prompt_text[:500]}, context={"user_id": user_id} if user_id else None
+        {"question": generation_prompt_text[:500]}, 
+        context={"user_id": user_id, "product_id": product_id} if user_id else None
     )
     brand_facts = brand_result.data
     facts_context = f"Brand facts (configured={brand_facts.get('configured')}):\n{brand_facts.get('facts', '')}"

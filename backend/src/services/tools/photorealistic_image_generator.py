@@ -34,13 +34,9 @@ from .registry import register_tool
 class PhotorealisticImageGeneratorTool(Tool):
     name = "photorealistic_image_generator"
     description = (
-        "Use this INSTEAD OF base_image_generator/collab_image_generator specifically when the "
-        "request calls for a genuinely PHOTOREALISTIC result — a real-world realistic photo or "
-        "product shot, not a stylized/illustrated/artistic look. Fast and low-cost (Google's Nano "
-        "Banana 2 Lite). Works with zero reference images (pure text-to-image) or with "
-        "reference_storage_refs (1-14 real, distinct visual assets) to edit or combine them into "
-        "one photorealistic scene. Do NOT use this for a stylized/illustrated/artistic request — "
-        "use base_image_generator for that."
+        "Generates a genuinely PHOTOREALISTIC still image — a real-world realistic photo or product shot. "
+        "Works with zero reference images (pure text-to-image) or with reference_storage_refs "
+        "(1-14 real, distinct visual assets) to edit or combine them into one photorealistic scene."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",

@@ -38,10 +38,6 @@ from ...core.middleware.logging import get_logger
 from ...providers.llm.base import ModelTier
 from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import traceable
-from ..leads.motion_lead import MOTION_LEAD
-from ..leads.narrative_lead import NARRATIVE_LEAD
-from ..leads.scene_lead import SCENE_LEAD
-from ..leads.visual_design_lead import VISUAL_DESIGN_LEAD
 from ..specialists.registry import SPECIALIST_REGISTRY
 from .specialist_classifier import describe_specialists
 from .state import GraphState
@@ -72,26 +68,11 @@ def _build_plan_preview(
         return dynamic_plan
     if chosen_route == "direct_fix" and target_specialist:
         return [{"specialist": target_specialist, "instruction": user_message, "parallel_group": None}]
-    if chosen_route == "full_image":
-        sequence = VISUAL_DESIGN_LEAD.specialist_sequence
-    elif chosen_route == "full_video":
-        sequence = (
-            NARRATIVE_LEAD.specialist_sequence + SCENE_LEAD.specialist_sequence
-            + MOTION_LEAD.specialist_sequence
-        )
-    elif chosen_route == "full_audio":
-        # No dedicated LeadSpec exists for full_audio (`graph.py`'s `_full_audio_node`) — it's a
-        # direct single-specialist call, same shape as `direct_fix`.
-        sequence = ("sound_designer",)
-    else:
-        return []
-    return [{"specialist": s, "instruction": None, "parallel_group": None} for s in sequence]
+    return []
 
-_VIDEO_KEYWORDS = ("video", "clip", "motion", "reel")
-_AUDIO_KEYWORDS = ("audio", "voiceover", "voice over", "narration", "spoken", "sound clip")
 _FIX_KEYWORDS = ("fix", "just change", "just fix", "relight", "recolor", "redo", "update", "remove", "add")
 
-_VALID_ROUTES = {"dynamic", "full_image", "full_video", "full_audio", "direct_fix"}
+_VALID_ROUTES = {"dynamic", "direct_fix"}
 
 _SYSTEM_PROMPT = """<role>
 You are the Orchestrator for a creative marketing studio. Your job is to analyze the user's request and dynamically assemble a plan of specialists to execute it.
@@ -104,15 +85,18 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 3. **Valid Specialists Only:** You can only use the specialists listed below.
 4. **NO ASSUMPTIONS ON VAGUE INPUTS:** Never assume anything that is not strictly allowed. Never make a decision on vague inputs or assumptions. If the user attaches an image but does not specify how it should be used (e.g. as a product to composite, a style reference, or a base for image-to-image), or if their request is too vague to safely route, you MUST return a plan that instructs the first specialist to fail and explicitly ask the user for clarification.
 5. **Campaign Defaults (CRAZY & BOLD):** We are making this for elite marketing and creating campaigns. Image and video generations should be CRAZY, striking, and visually incredible. If the request is for a broad "campaign", autonomously build a robust plan (e.g. style/palette planning, generating 1-2 base images via illustrator, and applying promotional text via overlay_artist). Push the creative boundaries.
-5b. **Text Overlays on New Images:** If the user asks for a price, discount, or promotional text to be displayed on a new image, you MUST add `overlay_artist` as a step AFTER `illustrator`. Image generators (like illustrator) cannot reliably draw text, so `overlay_artist` is required to actually write the price/text on the generated image.
+5b. **Text on New Images — Flat Overlay vs. In-Scene Element:** Distinguish WHAT KIND of text is being asked for before deciding whether `overlay_artist` is needed.
+   - **Flat/precise overlay** (a price, a discount %, a promo badge, legal/disclaimer copy — anything where the EXACT characters matter and it should read as a graphic-design layer sitting on top of the photo, separate from the scene itself): add `overlay_artist` as a step AFTER `illustrator`. `overlay_artist` draws this as a flat strip on the EXISTING image and cannot change composition — correct for this case.
+   - **In-scene/stylistic text** (a neon sign, a banner, graffiti, a marquee, a billboard, a tattoo — anything the request frames as part of the photographed/illustrated scene itself, where stylized/approximate rendering is the POINT, not a defect): do NOT add `overlay_artist`. Instead, instruct `illustrator` to render it directly as a described scene element in its own image prompt (e.g. "a glowing neon sign reading 'SALE' integrated into the scene, in bold red lettering"). Pasting a flat `overlay_artist` layer on top of this kind of request looks obviously stuck-on rather than part of the artwork, which is the opposite of what was asked for.
+   - When unsure which case applies, ask: would a real photographer/illustrator have painted or lit this text as part of the scene (in-scene), or would a graphic designer have added it afterward in a separate pass (flat overlay)? That's the deciding question.
 6. **Context Guardrail:** If the request and the brief entirely lack a specific subject or product, do NOT invent or guess a generic product. Instead, return a plan instructing the first specialist to fail and ask the user for clarification. ALWAYS prioritize building guardrails based on user inputs.
 6b. **Reference Image Handling:** If the user provided a reference image and their instruction is clear on how to use it, you MUST explicitly tell the first generating specialist (e.g., `illustrator` for an IMAGE deliverable, `camera_director` for a VIDEO deliverable — see Rule 7b-video) how to use it. For example, if it's an image-to-image base for illustrator, add to the instruction: "You MUST use the provided referenced element as your image-to-image reference_storage_ref"; for camera_director animating it into a clip, add: "You MUST use the provided referenced element as your source_image_storage_ref".
 7. **Editing Existing Assets vs. Using One as Reference Material:** A referenced element being present does NOT always mean "edit it in place" — distinguish the two cases below before choosing a route.
 7a. **In-place edit** (the deliverable stays the SAME shot/composition, just changed): "edit this image", "strike out the price", "change the color", "recolor this", "add a price tag to this", "fix the logo on this". You MUST use route 'direct_fix' and provide the 'target_specialist'. Do NOT use 'dynamic' for this case. For image content edits (recoloring, changing subjects, adding/removing visual elements, modifying the image itself), use 'composition_artist'. Only use 'overlay_artist' for pure TEXT overlays (adding price tags, discount labels, promotional text ON TOP of an image, with no other visual change).
 7b. **New, differently-composed deliverable using the element as reference material** (the ask names a DIFFERENT finished-format deliverable than a plain edit — e.g. "make a youtube thumbnail of/using/from this", "turn this into a poster", "make a hero banner with this", "make this pop like a movie poster" — especially when the wording names a format keyword like thumbnail/poster/banner/hero/cover, or implies a different aspect ratio or a dramatically different look than the source photo): route 'dynamic' with 'illustrator' as the generating step. Your instruction to illustrator MUST say to use the referenced element as an image-to-image reference (reference_storage_ref on base_image_generator, or reference_storage_refs on high_resolution_image_generator/collab_image_generator) — describe WHICH element by what it depicts (e.g. "the referenced product photo"), never by retyping its storage_ref value yourself: the executor already states the exact, correct storage_ref for you in the real element's own context block, and a hand-retyped copy of a long id string is exactly the kind of thing a model gets wrong character-by-character. The goal is a genuinely new, differently composed, appropriately-sized, visually striking result — NOT to copy its composition untouched. NEVER route a 7b-shaped request to 'overlay_artist' — it can only draw text on the UNCHANGED source pixels at the source's own original dimensions, so it cannot deliver a new aspect ratio or a recomposed shot no matter how the instruction is worded.
-7b-video. **The exact same case, but the ask is for a VIDEO.** For a SINGLE SHOT animating an existing referenced element (e.g. "make an unboxing video of this", "turn this into a reel", "animate this into a video ad", "make an exciting intro video using this photo" — no multi-beat story, no explicit duration/script ask): route 'dynamic' with 'camera_director' as the sole generating step. Your instruction to camera_director MUST say to use the referenced element as its starting frame (source_image_storage_ref on base_video_generator) by describing WHICH element by what it depicts — same reason as above, never retype its storage_ref value yourself. This is deliberately LIGHTER than 'full_video': it skips the duration-clarification question and multi-shot script/pacing work neither applies to nor was asked for here. Reserve 'full_video' (Narrative Lead -> Scene Lead -> Motion Lead) for a genuine multi-shot narrative/story video — that pipeline CAN also ground a shot on this same referenced element (scene_builder's own `use_existing_image_as_scene`), so a referenced element alone is never, by itself, a reason to prefer one route over the other — the actual complexity of the ask (one quick clip vs. a real multi-shot story) is.
+7b-video. **The exact same case, but the ask is for a VIDEO.** For a SINGLE SHOT animating an existing referenced element (e.g. "make an unboxing video of this", "turn this into a reel", "animate this into a video ad", "make an exciting intro video using this photo" — no multi-beat story, no explicit duration/script ask): route 'dynamic' with 'camera_director' as the generating step. Your instruction to camera_director MUST say to use the referenced element as its starting frame (source_image_storage_ref on base_video_generator) by describing WHICH element by what it depicts — same reason as above, never retype its storage_ref value yourself. For a genuine multi-shot narrative/story video, still use route 'dynamic' with 'camera_director' but instruct it to delegate to 'shot_planner' to plan the multi-shot sequence first.
 7c. **Genuinely ambiguous between 7a/7b:** if the message gives no real signal either way (no format keyword, no "turn this into X", just a vague "do something with this"), treat it as 7a (direct_fix) — the safer default — rather than guessing a new deliverable format that wasn't asked for.
-Examples: "strike out the old price on this" -> 7a, direct_fix -> composition_artist. "add a 20% off badge to this" -> 7a, direct_fix -> overlay_artist. "make a youtube thumbnail out of this product photo" -> 7b, dynamic -> illustrator (image-to-image, 16:9, dramatic). "turn this product shot into an Instagram story" -> 7b, dynamic -> illustrator (image-to-image, 9:16). "make an exciting unboxing video of this product photo" -> 7b-video, dynamic -> camera_director (single shot, animates the referenced photo). "tell a 3-shot story about this product launching, ending on this photo" -> full_video (genuine multi-shot narrative, not 7b-video).
+Examples: "strike out the old price on this" -> 7a, direct_fix -> composition_artist. "add a 20% off badge to this" -> 7a, direct_fix -> overlay_artist. "make a youtube thumbnail out of this product photo" -> 7b, dynamic -> illustrator (image-to-image, 16:9, dramatic). "turn this product shot into an Instagram story" -> 7b, dynamic -> illustrator (image-to-image, 9:16). "make an exciting unboxing video of this product photo" -> 7b-video, dynamic -> camera_director (single shot, animates the referenced photo). "tell a 3-shot story about this product launching, ending on this photo" -> dynamic -> camera_director (genuine multi-shot narrative). "a crazy collab image with a banner reading 'SALE' in bold neon letters" -> 5b in-scene case, dynamic -> illustrator only (render the neon sign as part of the scene in its own image prompt; do NOT add an overlay_artist step). "a product shot with a 20% off price badge in the corner" -> 5b flat-overlay case, dynamic -> illustrator then overlay_artist (the price badge is a precise flat overlay).
 8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
 9. **Element Disambiguation:** When several existing elements are shown as candidates rather than one confirmed reference, determine which ONE (if any) the message explicitly targets. If the request is an edit or tweak but genuinely ambiguous about which element to modify (e.g., "make it pop", "recolor it" with 2+ candidates and no target specified), do NOT guess or default blindly to the latest tile. Set `resolved_element_id` to `null` and instruct the first specialist in your plan to ask the user for clarification via options. Only set `resolved_element_id` when the user's message or context makes the target element unambiguous.
 10. **Parallel Steps (only in a 'dynamic' plan, only when genuinely independent):** If two or more steps each generate a completely FRESH, independent asset from scratch that do NOT depend on each other's output (e.g. two separate illustrator variants for A/B options, or an illustrator image alongside an unrelated sound_designer voiceover) — no need for one to have finished before the other starts — give them the SAME `parallel_group` number so they can run concurrently. NEVER put a step that EDITS an existing asset (composition_artist, prop_stylist, lighting_designer, overlay_artist) in a group with anything else, and NEVER group a step that needs another step's own not-yet-produced storage_ref — those must stay ungrouped (omit `parallel_group`, or give it a number no other step shares) so they run in your intended order. When genuinely unsure whether two steps are independent, leave `parallel_group` unset — sequential is always correct, grouping wrongly is not.
@@ -126,7 +110,7 @@ Examples: "strike out the old price on this" -> 7a, direct_fix -> composition_ar
 <output_format>
 Return ONLY valid JSON matching this schema:
 {{
-  "route": "Must be exactly one of: 'dynamic', 'direct_fix', 'full_video', 'full_image', 'full_audio'",
+  "route": "Must be exactly one of: 'dynamic', 'direct_fix'",
   "target_specialist": "Required ONLY IF route is 'direct_fix'. MUST be a valid specialist name from the <specialists> section (e.g., 'overlay_artist', 'composition_artist'). DO NOT return null if route is 'direct_fix'. Otherwise null.",
   "plan": [ // Required ONLY IF route is 'dynamic'. Otherwise null.
     {{
@@ -142,17 +126,9 @@ Return ONLY valid JSON matching this schema:
 
 
 def _keyword_fallback_route(message: str) -> tuple[str, str | None, list[dict] | None]:
-    """The original Phase 0 heuristic — used only if the real LLM classification call itself
-    fails, never as the default path. `_AUDIO_KEYWORDS` added 2026-09-22 alongside "full_audio" —
-    checked before the video keywords since "voiceover"/"narration" alone (no "video"/"clip"
-    keyword present) should degrade to audio, not video."""
     if any(k in message for k in _FIX_KEYWORDS):
         return "direct_fix", "composition_artist", None
-    if any(k in message for k in _AUDIO_KEYWORDS) and not any(k in message for k in _VIDEO_KEYWORDS):
-        return "full_audio", None, None
-    if any(k in message for k in _VIDEO_KEYWORDS):
-        return "full_video", None, None
-        
+    
     # Default to a basic dynamic generation plan instead of the old, static full_image pipeline
     return "dynamic", None, [
         {"specialist": "illustrator", "instruction": "Generate the requested image based on the prompt."}
@@ -160,20 +136,7 @@ def _keyword_fallback_route(message: str) -> tuple[str, str | None, list[dict] |
 
 @traceable(name="orchestrator_node")
 async def route(state: GraphState) -> GraphState:
-    # Resuming a paused "approve" mode video pipeline (Memory.md, Phase 4) — always route straight
-    # back to the video pipeline node, which itself interprets the message as approve/revise.
-    # Explicit state tracking, not LLM classification, decides this — reliable and free, since
-    # there's nothing genuinely ambiguous to classify once video_stage is set.
     brief_stage_check = state.get("brief") or {}
-    if brief_stage_check.get("video_stage") in ("narrative_pending", "scene_pending", "motion_pending"):
-        state["route"] = "full_video"
-        state["target_specialist"] = None
-        # No LLM call on this resume path, but still stripped for the same reason as the main
-        # return below — leads/specialists downstream don't need it restated in their own dumps.
-        if "_recent_chat_history" in brief_stage_check:
-            state["brief"] = {k: v for k, v in brief_stage_check.items() if k != "_recent_chat_history"}
-        emit("route_decided", route="full_video", target_specialist=None, resumed=True)
-        return state
 
     # Resuming after a real, explicit user approval of Laya's fallback suggestion (2026-09-23,
     # per a real user report: "Cancel is also creating llm task??" — the same fallthrough bug also
@@ -338,12 +301,13 @@ async def route(state: GraphState) -> GraphState:
             raise ValueError(f"model returned an invalid route: {chosen_route!r}")
         if chosen_route == "direct_fix" and target_specialist not in SPECIALIST_REGISTRY:
             # A real, named failure mode rather than silently accepting a hallucinated specialist
-            # name — fall through to full_image rather than routing to something that doesn't exist.
+            # name — fall through to dynamic rather than routing to something that doesn't exist.
             log.warning(
                 "orchestrator_invalid_target_specialist",
                 extra={"_extra_target": target_specialist},
             )
-            chosen_route, target_specialist = "full_image", None
+            chosen_route, target_specialist = "dynamic", None
+            dynamic_plan = [{"specialist": "illustrator", "instruction": user_message}]
 
         # Real, live-found bug (2026-09-23): a referenced-element edit ("Edit image with offer
         # price of 15% on 30000...") got routed to 'dynamic' with an illustrator regeneration plan
@@ -408,16 +372,15 @@ async def route(state: GraphState) -> GraphState:
 
         # Persist for the NEXT turn's rule 11 (Sticky Focus) — only meaningful for direct_fix,
         # since that's the single-specialist "quick edit" shape a short follow-up like "make it
-        # bigger" actually targets; a broader route (full_image/full_video/dynamic/full_audio) has
+        # bigger" actually targets; a broader route (dynamic) has
         # no one specialist that obviously owns the next tweak, so reset rather than carry forward.
         brief["last_specialist"] = target_specialist if chosen_route == "direct_fix" else None
         brief["last_route"] = chosen_route
         state["brief"] = brief
 
         # Plan preview (2026-10-06, explicit user ask: show what will run BEFORE it runs, like
-        # Luma, then auto-proceed — not a blocking gate, purely informational). Persisted onto
-        # `state` (not just emitted) so `session_service.py` can save it onto the turn's own row —
-        # same treatment `dynamic_plan` already gets.
+        # Luma). Persisted onto `state` (not just emitted) so `session_service.py` can save it onto
+        # the turn's own row — same treatment `dynamic_plan` already gets.
         plan_preview = _build_plan_preview(chosen_route, target_specialist, dynamic_plan, user_message)
         state["plan_preview"] = plan_preview
         if plan_preview:
@@ -427,15 +390,49 @@ async def route(state: GraphState) -> GraphState:
         laya_route = await laya_task
         if laya_route and laya_route != chosen_route:
             log.warning(
-                "orchestrator_route_mismatch", 
+                "orchestrator_route_mismatch",
                 extra={"_extra_llm_route": chosen_route, "_extra_laya_route": laya_route}
             )
-            
+
         log.info(
             "orchestrator_routed",
             extra={"_extra_route": chosen_route, "_extra_target": target_specialist, "_extra_method": "llm"},
         )
         emit("route_decided", route=chosen_route, target_specialist=target_specialist)
+
+        # Real, live-found gap closed (2026-10-07, explicit user ask: "after creating a plan there
+        # should be hitl, be it campaign generation or any generation"): the plan preview above used
+        # to be purely informational — shown, then auto-proceeded straight into execution with no
+        # pause. Now it's a genuine gate for every real route (dynamic/direct_fix): pause here, before ANY specialist runs, and require an explicit
+        # user approval. Reuses the exact `paused_plan`/`state["result"]` shape the existing
+        # `SpecialistNeedsClarification` pause-resume machinery already uses (`state.py`), so
+        # `session_service.py`'s existing persistence/resume dispatch (lines ~906-952) just needs
+        # one more branch, no new mechanism. `route_condition` below sends this to END exactly like
+        # the pre-existing `"approval_required"` Laya-fallback branch already does.
+        if plan_preview:
+            state["paused_plan"] = {
+                "route": "plan_approval",
+                "pending_route": chosen_route,
+                "dynamic_plan": dynamic_plan,
+                "target_specialist": target_specialist,
+                "plan_preview": plan_preview,
+                "original_message": user_message,
+            }
+            state["result"] = {
+                "message": "Here's the plan — want me to go ahead?",
+                "options": [
+                    {"id": "approve", "label": "Approve", "description": "Run this plan as-is"},
+                    {"id": "cancel", "label": "Cancel", "description": "Discard this idea and pivot"},
+                ],
+                "allow_free_text": True,
+                "proposal": {"plan": plan_preview},
+            }
+            state["route"] = "plan_approval"
+            emit("lead_paused", lead="orchestrator", question=state["result"]["message"])
+            for scratch_key in ("_retrieved_memory",):
+                if scratch_key in (state.get("brief") or {}):
+                    state["brief"] = {k: v for k, v in state["brief"].items() if k != scratch_key}
+            return state
     except (ProviderUnavailable, ValueError) as exc:
         # LLM gateways are down, or it returned something unparseable — no model available to
         # make Fix 7's real disambiguation judgment call, so this degraded path falls back to the

@@ -52,7 +52,8 @@ def _try_recover_fake_final_tool_call(error_body: str) -> str | None:
     fabricating anything: the JSON returned is verbatim what the model itself generated.
     """
     try:
-        err = (json.loads(error_body).get("error")) or {}
+        parsed = json.loads(error_body)
+        err = (parsed.get("error") if isinstance(parsed, dict) else {}) or {}
     except json.JSONDecodeError:
         return None
 

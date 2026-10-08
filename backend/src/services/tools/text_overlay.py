@@ -128,8 +128,16 @@ class TextOverlayTool(Tool):
         "properties": {
             "storage_ref": {"type": "string"},
             "text": {"type": "string"},
-            "placement": {"type": "string", "default": "lower third"},
-            "font_family": {"type": "string", "description": "e.g., Montserrat, Oswald, Playfair Display, Roboto"},
+            "placement": {
+                "type": "string", 
+                "enum": ["lower third", "lower third, centered", "bottom center", "top center", "bottom right", "bottom left", "top left", "top right"],
+                "default": "lower third"
+            },
+            "font_family": {
+                "type": "string", 
+                "enum": ["Montserrat", "Oswald", "Playfair Display", "Roboto"],
+                "description": "e.g., Montserrat, Oswald, Playfair Display, Roboto"
+            },
             "text_color": {"type": "string", "description": "Hex color code, e.g., #ffffff"},
             "backend": {
                 "type": "string",

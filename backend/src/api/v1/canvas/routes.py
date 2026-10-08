@@ -226,8 +226,8 @@ async def direct_edit_element(
     sessions: SessionRepositoryDep,
 ) -> CanvasElementResponse:
     """A direct edit — no model call (Architecture.md section 1c). The actual crop/retouch/recolor
-    happens client-side; this records the already-uploaded result — applied immediately in "auto"
-    mode, staged for explicit approval in "approve" mode (Memory.md, Phase 4)."""
+    happens client-side; this records the already-uploaded result — staged for explicit approval
+    (Memory.md, Phase 4; "auto" mode removed 2026-10-07)."""
     element = await canvas.get_element(element_id)
     if element is None:
         raise NotFoundError("CanvasElement", element_id)
@@ -237,7 +237,7 @@ async def direct_edit_element(
         storage_ref=body.storage_ref,
         metadata={**element.metadata_json, "direct_edit": True},
         action="direct_edit",
-        approval_mode=session.approval_mode if session else "auto",
+        approval_mode=session.approval_mode if session else "approve",
     )
     return await CanvasMapper.to_response(updated)
 
@@ -380,7 +380,7 @@ async def masked_edit_element(
         storage_ref=new_storage_ref,
         metadata={**element.metadata_json, "masked_edit": True, "instruction": body.instruction},
         action="masked_edit",
-        approval_mode=session.approval_mode if session else "auto",
+        approval_mode=session.approval_mode if session else "approve",
     )
     return await CanvasMapper.to_response(updated)
 

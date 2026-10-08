@@ -59,15 +59,24 @@
 .bg-mesh-light {
   background-color: #f8fafc;
   background-image: 
-    radial-gradient(at 0% 0%, hsla(220,60%,96%,1) 0, transparent 50%), 
-    radial-gradient(at 50% 0%, hsla(240,70%,95%,0.8) 0, transparent 50%), 
-    radial-gradient(at 100% 0%, hsla(260,80%,96%,0.6) 0, transparent 50%);
+    radial-gradient(at 0% 0%, hsla(250, 100%, 95%, 1) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(220, 100%, 93%, 0.8) 0, transparent 50%), 
+    radial-gradient(at 100% 0%, hsla(280, 100%, 95%, 0.7) 0, transparent 50%);
 }
 
 .bg-mesh-dark {
   background-color: #09090b;
   background-image: 
-    radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
-    radial-gradient(at 50% 0%, hsla(225,39%,30%,0.15) 0, transparent 50%), 
-    radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
+    radial-gradient(at 0% 0%, hsla(253, 40%, 12%, 1) 0, transparent 50%), 
+    radial-gradient(at 50% 0%, hsla(225, 50%, 15%, 0.4) 0, transparent 60%), 
+    radial-gradient(at 100% 0%, hsla(280, 60%, 18%, 0.3) 0, transparent 50%),
+    radial-gradient(at 50% 100%, hsla(240, 50%, 15%, 0.2) 0, transparent 50%);
+}
+
+.glass-panel {
+  @apply bg-surface-900/60 backdrop-blur-xl border border-white/10 shadow-[0_8px_32px_0_rgba(0,0,0,0.3)] dark:bg-surface-900/40 dark:border-white/5;
+}
+
+.glass-input {
+  @apply bg-surface-800/40 backdrop-blur-md border border-surface-700/50 shadow-inner focus-within:border-brand-500/50 focus-within:bg-surface-800/60 focus-within:ring-4 focus-within:ring-brand-500/10 transition-all duration-300;
 }

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
 from ...models.base import async_session_factory
 from ...providers.knowledge.llamaindex_provider import get_knowledge_provider
@@ -35,7 +36,16 @@ Synthesize the provided raw background facts (Product Specs, Brand Guidelines, S
 2. **Concise & Direct:** Give a clear, direct answer under ~300 characters when possible so the requesting agent can immediately take creative action.
 3. **Structured Specs:** If asked for prices, include currency symbols. If asked for colors, include color names or hex codes if present.
 4. **Disambiguation:** If the raw data contains multiple products or variants, list them briefly so the caller knows the available options.
+5. **Honest "not found":** The raw data below may contain facts about OTHER things that don't
+   actually answer this specific query (e.g. brand guidelines when the question is about a price
+   nothing here mentions). If nothing in the raw data actually answers the query, set
+   `"found": false` and say what's missing in `"answer"` — never fill the gap with a plausible-
+   sounding guess. Only set `"found": true` when the raw data genuinely contains the answer.
 </rules>
+
+<output_format>
+Respond with ONLY a JSON object, no prose outside it: {"found": true | false, "answer": "..."}
+</output_format>
 """
 
 
@@ -97,16 +107,17 @@ class DataConciergeService:
                 brands = await PostgresBrandRepository(db).list_for_user(user_id)
                 brand = brands[0] if brands else None
                 if brand:
-                    context_chunks.append(f"[BRAND IDENTITY]\nName: {brand.name}\nGuidelines: {brand.guidelines}")
+                    context_chunks.append(f"[BRAND IDENTITY]\nName: {brand.name}\nGuidelines: {brand.raw_profile}")
                     sources.append(f"brand:{brand.name}")
 
-            try:
-                brand_rag = await self._knowledge.query(collection=f"brand_{user_id}", question=query)
-                if brand_rag:
-                    context_chunks.append(f"[BRAND RAG GUIDELINES]\n{brand_rag}")
-                    sources.append("brand_rag")
-            except Exception as exc:
-                log.debug("data_concierge_brand_rag_failed", extra={"_extra_error": str(exc)})
+            if brand:
+                try:
+                    brand_rag = await self._knowledge.query(collection=f"brand_{brand.id}", question=query)
+                    if brand_rag:
+                        context_chunks.append(f"[BRAND RAG GUIDELINES]\n{brand_rag}")
+                        sources.append("brand_rag")
+                except Exception as exc:
+                    log.debug("data_concierge_brand_rag_failed", extra={"_extra_error": str(exc)})
 
         # 3. Session / Chat Memory
         if session_id:
@@ -146,13 +157,26 @@ class DataConciergeService:
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=512,
             )
-            answer = (res.text or "").strip()
+            parsed = extract_json(res.text)
+            found = bool(parsed.get("found"))
+            answer = str(parsed.get("answer") or "").strip()
+            if not answer:
+                found = False
+                answer = "The data concierge could not produce a grounded answer for this query."
         except Exception as e:
+            # Real, live-found gap (2026-10-07): this used to fall back to dumping unsynthesized
+            # raw facts as if they were a real answer — the specialist calling this tool has no
+            # way to tell that apart from a genuine, grounded answer, and could easily treat a
+            # provider failure as "the concierge found this." A provider hiccup isn't "no data,"
+            # but it's also not a trustworthy answer — `found: False` either way, so the caller
+            # always gets an honest, unambiguous signal rather than ever risking a fabricated-
+            # looking answer.
             log.warning("data_concierge_synthesis_failed", extra={"_extra_error": str(e)})
-            answer = f"Raw facts gathered:\n{full_context[:400]}"
+            found = False
+            answer = "The data concierge hit an error and could not synthesize an answer right now."
 
         return {
             "answer": answer,
             "sources": sources,
-            "has_data": True,
+            "has_data": found,
         }

@@ -20,9 +20,8 @@ from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
+from .gemini import GeminiProvider
 from .groq import GroqProvider
-from .replicate_llm import ReplicateLLMProvider
-
 log = get_logger(__name__)
 
 # Real, live-found noise/waste (2026-09-26, explicit user report — a screenshot showing the SAME
@@ -41,7 +40,7 @@ _GROQ_COOLDOWN_SECONDS = 60.0
 class LLMRouter(LLMProvider):
     def __init__(self):
         self._primary = GroqProvider()
-        self._fallback = ReplicateLLMProvider()
+        self._fallback = GeminiProvider()
         # Monotonic timestamp until which Groq is skipped entirely (0 = never tripped / already
         # expired). Instance-level, not per-call — `get_llm_provider()` is a singleton, so this
         # state is naturally shared across every specialist/tool-calling iteration in the process,
@@ -60,8 +59,6 @@ class LLMRouter(LLMProvider):
     ) -> LLMResult:
         now = time.monotonic()
         if now < self._groq_cooldown_until:
-            # Already tripped recently — go straight to the fallback, no repeat attempt, no
-            # repeat log/event (that already happened once, when the cooldown started below).
             return await self._fallback.complete(
                 tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
                 on_delta=on_delta,
@@ -77,10 +74,10 @@ class LLMRouter(LLMProvider):
         except ProviderUnavailable as exc:
             self._groq_cooldown_until = now + _GROQ_COOLDOWN_SECONDS
             log.warning(
-                "llm_router_falling_back_to_replicate",
+                "llm_router_falling_back_to_gemini",
                 extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
             )
-            emit("llm_provider_fallback", tier=tier.name, from_provider="groq", to_provider="replicate_llm")
+            emit("llm_provider_fallback", tier=tier.name, from_provider="groq", to_provider="gemini")
 
         return await self._fallback.complete(
             tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,

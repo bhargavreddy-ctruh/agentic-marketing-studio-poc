@@ -180,6 +180,7 @@ def load_all_specialists() -> None:
             "base_image_generator", "collab_image_generator", "photorealistic_image_generator",
             "high_resolution_image_generator", "image_editor", "brand_kit_lookup", "product_lookup",
             "data_concierge", "web_trend_search", "asset_mood_board_search", "color_palette_extractor", "visual_palette_analyzer",
+            "delegate_task",
         ),
         tier=ModelTier.TIER_3,
         description="Generates the base still IMAGE from scratch (full_image pipeline's core step).",
@@ -205,9 +206,9 @@ def load_all_specialists() -> None:
         # product_lookup added 2026-10-05 (fidelity audit) — composition_artist.md's own rule 3
         # already told the LLM to "check product_lookup" for real currency/price facts, but the
         # tool was never actually granted here — a dangling instruction it could never follow.
-        allowed_tools=("image_editor", "brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("image_editor", "brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer", "export_asset", "image_crop_resize", "delegate_task"),
         tier=ModelTier.TIER_2,
-        description="Applies a targeted EDIT to an already-existing image using the image_editor tool (direct_fix use case). Handles ALL visual modifications to images: recoloring, changing subjects, editing content, striking through prices, adding discounted prices visually onto an image, modifying text baked into images, and any request that says 'image edit' or 'edit image'. This is the DEFAULT specialist for any image edit request. Never generates a new image from scratch, never touches video. Also writes the real creative-brief text card for a just-generated image.",
+        description="Applies a targeted EDIT to an already-existing image using the image_editor tool (direct_fix use case). Handles ALL visual modifications to images: recoloring, changing subjects, editing content, striking through prices, cropping, resizing, changing aspect ratios, adding discounted prices visually onto an image, modifying text baked into images, and any request that says 'image edit' or 'edit image' or 'export'. This is the DEFAULT specialist for any image edit request. Never generates a new image from scratch, never touches video. Also writes the real creative-brief text card for a just-generated image.",
         required_output_fields=("notes",),
     ))
     register_specialist(SpecialistSpec(
@@ -215,7 +216,7 @@ def load_all_specialists() -> None:
         prompt_file="camera_director.md",
         # product_lookup added 2026-10-05 (fidelity audit) — a shot that shows the linked product
         # needs the same real grounding every other product-facing specialist already has.
-        allowed_tools=("base_video_generator", "brand_kit_lookup", "product_lookup", "data_concierge"),
+        allowed_tools=("base_video_generator", "brand_kit_lookup", "product_lookup", "data_concierge", "delegate_task", "video_stitcher"),
         tier=ModelTier.TIER_3,
         description="Generates NEW raw video footage/clips — this is the specialist for 'make a video of X', not video_editor_cutter. Runs as the full_video pipeline's Motion Lead step (animating a Scene-Lead-built frame), AND can be used standalone as the sole step of a 'dynamic' plan to animate an existing referenced element directly into a single clip (e.g. 'make an unboxing video of this photo') — see orchestrator.py Rule 7b-video.",
         required_output_fields=("motion_prompt", "camera_motion", "aspect_ratio"),
@@ -347,7 +348,7 @@ def load_all_specialists() -> None:
         # thin creative value. The three old specialists stay registered (harmless, nothing else
         # calls them) but `scene_lead.py` now calls this instead.
         prompt_file="scene_builder.md",
-        allowed_tools=("base_image_generator", "brand_kit_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("base_image_generator", "brand_kit_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_3,
         description="Generates ONE fully art-directed scene/background IMAGE (environment + props + lighting decided together) for the full_video pipeline's Scene Lead step — the only image-generation call in the video pipeline, so it gets the same tier as illustrator.",
         required_output_fields=("environment_description", "prop_description", "lighting_description", "use_existing_image_as_scene", "scene_description_storage_ref"),
@@ -405,5 +406,13 @@ def load_all_specialists() -> None:
         allowed_tools=("brand_kit_lookup", "logo_compositor", "text_overlay", "image_crop_resize"),
         tier=ModelTier.TIER_2,
         description="Applies brand identity assets (logos, brand fonts, colors, safe-zone overlays) to canvas images. Handles logo placement, brand watermark overlay, and ad-spec compliant asset formatting.",
+    ))
+    register_specialist(SpecialistSpec(
+        name="compliance_lead",
+        prompt_file="compliance_lead.md",
+        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge"),
+        tier=ModelTier.TIER_2,
+        description="Peer-reviews generated assets for brand consistency and visual fidelity. Returns pass/fail and remediation instructions.",
+        required_output_fields=("compliance_passed", "reasoning", "remediation_instruction"),
     ))
     log.info("specialists_loaded", extra={"_extra_count": len(SPECIALIST_REGISTRY)})

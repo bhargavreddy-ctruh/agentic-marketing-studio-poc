@@ -14,133 +14,16 @@ import {
   listTurns,
   postTurn,
   cancelTurn,
-  updateApprovalMode,
 } from "@/lib/api";
 import { assetUrl } from "@/lib/http";
 import { ReferencedElement, elementKind } from "@/components/CanvasView";
 import { LiveEvent, PipelineNode, PlanStep, describeEvent, openEventStream } from "@/lib/events";
 import { CanvasElement, getCanvasState, uploadAndPlaceElement } from "@/lib/canvas";
 
-/** `video_stage` values a session's brief can carry while paused at a real pipeline gate
- * (`graph.py`'s `_motion_lead_node`) — used only to pick which proposal detail to render; the
- * gate's actual message/options still come from the real `next_prompt`, same as ideation. */
-type GateStage = "narrative_pending" | "scene_pending" | "motion_pending";
-
-/** Real, live-found gap (2026-10-06): a proxy in front of the backend (Next.js's own dev-mode
- * rewrite proxy, or Vercel's rewrite proxy in prod) can give up relaying a response — including
- * the normally-instant `POST /turns` response, now that the backend's turn handling is
- * fire-and-forget — well before the backend itself has failed or even finished. That shows up as
- * a `fetch`-level network error (no real HTTP status at all) or a bare, non-JSON 500/502/503/504
- * from the proxy. A GENUINE backend failure always returns a real JSON error body
- * (`core/middleware/error_handler.py`'s own generic catch-all message is "Something went
- * wrong.", never this exact phrase) — so an `ApiError` with status 500 and message EXACTLY
- * "Internal Server Error" is an unambiguous proxy signature, never the real app. `withNarration`
- * uses this to decide whether to swallow a `postTurn` rejection and keep waiting for the real
- * `turn_completed` SSE event instead of surfacing a false "it failed" to the user. */
-function isGatewayTimeoutLikeError(err: unknown): boolean {
-  if (err instanceof ApiError) {
-    return [502, 503, 504].includes(err.status) || (err.status === 500 && err.message === "Internal Server Error");
-  }
-  return err instanceof Error && (err.message.includes("fetch failed") || err.message.includes("hang up"));
-}
-
-interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "error" | "gate" | "plan";
-  text: string;
-  options?: IdeationOption[];
-  allowFreeText?: boolean;
-  gateStage?: GateStage;
-  narrativePlan?: NarrativePlan;
-  scenePlan?: ScenePlan;
-  /** The plan preview for this turn's route — every route gets one, not just `dynamic`
-   * (2026-10-06, explicit user ask: show what will run BEFORE it runs, like Luma, then
-   * auto-proceed; also: "update the progress also," per the same ask — see `pipelineNodes` usage
-   * in the render below, which reuses the SAME real node/status data `AgentHUD`/Node Mode already
-   * derive from the live event stream, rather than inventing a second progress mechanism). */
-  planSteps?: PlanStep[];
-  /** The canvas element this user message referenced when it was sent, if any (2026-09-21, per
-   * the user's explicit ask) — real, live-found gap: the "referencing this X" chip only showed
-   * while composing, then vanished the instant the message sent (`onClearReference` is one-shot),
-   * so chat history had no record of what a follow-up like "make the sky darker" was actually
-   * about. Snapshotted onto the message itself, not just referenced by id, so it keeps rendering
-   * correctly even if that canvas element is later edited or removed. */
-  referencedElements?: ReferencedElement[];
-  /** The real accumulated model text streamed live during this turn (`llm_delta` events,
-   * core/events.py's accumulator, 2026-09-22) — rendered as a collapsible "Analyzed your request"
-   * block right before this message, matching the reference product's own persistent thinking
-   * card. Previously this text was shown live while `loading` and then genuinely discarded the
-   * instant the turn finished — never part of the chat history at all, gone on refresh. */
-  thinking?: string;
-  /** Roughly how long this turn took, for the "Analyzed your request Ns" label — real elapsed
-   * time for a live turn; recomputed from `created_at` deltas isn't available for restored
-   * history (the backend doesn't persist a duration), so restored turns show no number. */
-  thinkingSeconds?: number;
-}
-
-// A real, live-found bug (2026-09-22): a module-scoped mutable counter is fragile in ways that
-// don't show up until something reloads the module underneath already-rendered state — a Next.js
-// Fast Refresh (or React 18 Strict Mode's dev-only double-invoke of mount effects) can re-execute
-// this module fresh, resetting `nextId` back to 0, while `messages` in React state still holds
-// earlier ids like "m8" — the next real message then collides with an old one, producing React's
-// "two children with the same key" warning (and the duplicated/omitted rendering that comes with
-// it). `crypto.randomUUID()` has no shared mutable state to reset, so this whole class of bug is
-// structurally impossible, not just less likely.
-function newId(): string {
-  return crypto.randomUUID();
-}
-
-function truncate(text: string, maxChars: number): string {
-  const t = text.trim();
-  return t.length > maxChars ? `${t.slice(0, maxChars - 1).trimEnd()}…` : t;
-}
-
-/** `headline_writer` -> "Headline Writer" — a plain client-side label transform, no new registry
- * needed (2026-10-06, plan-preview cards). */
-function humanizeSpecialist(name: string): string {
-  return name
-    .split("_")
-    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
-    .join(" ");
-}
-
-/** Groups plan steps by `parallel_group`, mirroring `graph.py`'s own `_group_plan_steps` semantics
- * exactly: a missing/`null` group is its own singleton (never grouped with anything else), and a
- * group's position in the output is its FIRST member's position in the input — so the preview's
- * "run together" grouping visually matches exactly what `_dynamic_executor_node` will actually do,
- * not an independently-invented grouping (2026-10-06). */
-function groupPlanSteps(plan: PlanStep[]): PlanStep[][] {
-  const groups: PlanStep[][] = [];
-  const indexByGroup = new Map<number, number>();
-  for (const step of plan) {
-    const gid = step.parallel_group;
-    if (gid == null) {
-      groups.push([step]);
-      continue;
-    }
-    const existing = indexByGroup.get(gid);
-    if (existing != null) {
-      groups[existing].push(step);
-    } else {
-      indexByGroup.set(gid, groups.length);
-      groups.push([step]);
-    }
-  }
-  return groups;
-}
-
-/** Live/restored status for one plan step — cross-referenced against `pipelineNodes` (the SAME
- * real data `AgentHUD`/Node Mode already derive from the event stream via `buildPipelineNodes`,
- * computed once in `page.tsx`) by exact specialist-name match (`nodeIdentity()` in `lib/events.ts`
- * sets a specialist node's `label` to the raw specialist key verbatim). `undefined` — rendered as
- * a neutral/no badge — when there's no matching node yet (the step hasn't started) or this isn't
- * the turn `pipelineNodes` currently reflects. */
-function planStepStatus(
-  step: PlanStep,
-  pipelineNodes?: PipelineNode[],
-): PipelineNode["status"] | undefined {
-  return pipelineNodes?.find((n) => n.label === step.specialist)?.status;
-}
+import { ChatMessage, GateStage, ChatBubble, newId, isGatewayTimeoutLikeError, truncate } from "@/components/chat/ChatBubble";
+import { ChatInput } from "@/components/chat/ChatInput";
+import { useDragDrop } from "@/hooks/useDragDrop";
+import { useChatStream } from "@/hooks/useChatStream";
 
 /**
  * Turns one real SessionResponse into what the chat should say next — status is a real backend
@@ -253,65 +136,14 @@ function ChatPanel(
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [approvalMode, setApprovalMode] = useState<"auto" | "approve">("auto");
-  const [changingMode, setChangingMode] = useState(false);
   const [loading, setLoadingState] = useState(false);
   const loadingRef = useRef(false);
   function setLoading(v: boolean) { loadingRef.current = v; setLoadingState(v); }
-  const [attaching, setAttaching] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const { attaching, attachFile, handlePaste, handleDrop } = useDragDrop(sessionId, onAddReferenceElement, onGenerated);
 
-  /** The one real path every attach gesture (paperclip click, paste, drop) reduces to — uploads
-   * the file, places it as a real canvas element, then adds it to the chat's reference selection
-   * so it reaches the next turn as a real `referenced_element_id`, exactly like clicking an
-   * existing canvas tile to reference it. */
-  async function attachFile(file: File) {
-    if (!sessionId || !file.type.startsWith("image/")) return;
-    setAttaching(true);
-    try {
-      const el: CanvasElement = await uploadAndPlaceElement(sessionId, file);
-      onAddReferenceElement?.({
-        id: el.id,
-        kind: elementKind(el.element_type),
-        url: el.storage_ref ? assetUrl(el.storage_ref, el.url) : "",
-        description: el.description,
-        productId: el.product_id,
-        productName: el.product_name,
-      });
-      onGenerated?.(); // bump the canvas refresh so the uploaded tile shows up there too
-    } catch (err) {
-      console.error("attachFile failed", err);
-    } finally {
-      setAttaching(false);
-    }
-  }
 
-  function handlePaste(e: React.ClipboardEvent<HTMLTextAreaElement>) {
-    const item = Array.from(e.clipboardData.items).find((i) => i.type.startsWith("image/"));
-    if (!item) return;
-    const file = item.getAsFile();
-    if (file) {
-      e.preventDefault();
-      void attachFile(file);
-    }
-  }
-
-  function handleDrop(e: React.DragEvent<HTMLTextAreaElement>) {
-    const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
-    if (file) {
-      e.preventDefault();
-      void attachFile(file);
-    }
-  }
-  const [narration, setNarration] = useState<string[]>([]);
-  // The real raw model text streaming live DURING the current turn (2026-09-22, per an explicit
-  // user ask: "i want it as it generates" — the collapsed post-hoc "Analyzed your request" block
-  // alone wasn't enough; they want to watch it being written, not just read a summary afterward).
-  // Real React state (not a plain local variable) specifically so it re-renders as it grows —
-  // `narration`'s structured status lines ("🎨 illustrator started") stay separate and shown
-  // alongside this, since they answer a different question (which STEP is running) than this does
-  // (what is the model actually REASONING, live).
-  const [liveThinking, setLiveThinking] = useState("");
+  const { narration, setNarration, liveThinking, withNarration } = useChatStream(setMessages, onTurnEvent);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -416,89 +248,7 @@ function ChatPanel(
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [messages, liveThinking, narration, loading]);
 
-  /** Opens the real SSE stream for this turn (Phase 4c) and narrates it live — only possible once
-   * a sessionId already exists (the backend's own disclosed scope boundary: the very first
-   * message can't be watched live since its session_id isn't known until it returns). Also
-   * accumulates the REAL raw model text (`llm_delta` events) as it streams — the actual
-   * "thinking" content (2026-09-22), separate from the human-readable status lines `narration`
-   * already shows; `core/events.py` persists the exact same accumulated text server-side, so this
-   * client-side copy is what the message will show immediately, matching what a later refresh
-   * would restore. Returns it (plus elapsed seconds) alongside the call's own result — previously
-   * this was thrown away the instant the turn finished, never part of the chat history at all. */
-  async function withNarration(
-    sid: string,
-    fn: () => Promise<SessionResponse>,
-  ): Promise<{ result: SessionResponse; thinking: string; seconds: number }> {
-    setNarration([]);
-    setLiveThinking("");
-    const startedAt = Date.now();
-    let thinking = "";
-    // Real, live-found bug (2026-10-06): this function used to open a SECOND, separate
-    // `openEventStream` subscription right here, left over from before the backend's turn
-    // handling became fire-and-forget (the `new Promise` below, which resolves off a real
-    // `turn_completed` event, is the version that replaced it). That old subscription's own
-    // `close()` handle was never called anywhere — a leaked, never-closed SSE connection on every
-    // single turn, and every event (narration lines, streamed "thinking" text, the plan-preview
-    // bubble) got handled TWICE, once by each subscription — doubled/garbled streamed text and a
-    // duplicated plan-preview bubble. Removed; the subscription below already does everything the
-    // old one did, plus the real completion signal.
-    return new Promise<{ result: SessionResponse; thinking: string; seconds: number }>((resolve, reject) => {
-      let isDone = false;
-      const cleanup = () => {
-        if (isDone) return;
-        isDone = true;
-        close();
-        setNarration([]);
-        setLiveThinking("");
-      };
 
-      const close = openEventStream(sid, async (event) => {
-        const line = describeEvent(event);
-        if (line) setNarration((n) => [...n, line]);
-        if (event.type === "llm_delta" && typeof event.text === "string") {
-          thinking += event.text;
-          setLiveThinking(thinking);
-        }
-        // The plan-preview bubble (2026-10-06, explicit user ask) — appended the MOMENT the route
-        // decides, while `fn()` (the real `postTurn` promise) is still in flight, so it shows
-        // BEFORE the eventual result bubble, not after the turn completes. No gate/approval logic
-        // involved: execution just keeps running underneath this in the same turn.
-        if (event.type === "plan_proposed" && Array.isArray(event.plan)) {
-          setMessages((m) => [...m, { id: newId(), role: "plan", text: "", planSteps: event.plan as PlanStep[] }]);
-        }
-        onTurnEvent?.(event);
-
-        if (event.type === "turn_completed") {
-          try {
-            const finalSession = await getSession(sid);
-            cleanup();
-            resolve({ result: finalSession, thinking, seconds: Math.round((Date.now() - startedAt) / 1000) });
-          } catch (e) {
-            cleanup();
-            reject(e);
-          }
-        }
-      });
-
-      // The POST request is fire-and-forget. It returns status="generating" immediately, so a
-      // rejection here means the proxy in front of the backend gave up relaying the (fast) POST
-      // response — not that the turn itself failed. The real completion signal either way is the
-      // `turn_completed` SSE event above, so a timeout-shaped rejection is swallowed here, not
-      // surfaced. Real, live-found bug (2026-10-06): this used to also treat ANY bare HTTP 500 as
-      // timeout-shaped with no check on the error body — but the backend's own genuine failures
-      // ALSO return status 500 (just with a real JSON error body, never this exact literal
-      // proxy-only phrase — see `isGatewayTimeoutLikeError`'s own comment) — silently swallowing
-      // those left a real backend crash showing no error at all, stuck "loading" forever with no
-      // `turn_completed` ever coming. Reuses the same precise check `handleSend`'s own comment
-      // references, so a genuine failure is never mistaken for "still working."
-      fn().catch((err) => {
-        if (!isGatewayTimeoutLikeError(err)) {
-          cleanup();
-          reject(err);
-        }
-      });
-    });
-  }
 
   function appendUser(text: string, referencedElements?: ReferencedElement[]) {
     setMessages((m) => [...m, { id: newId(), role: "user", text, referencedElements }]);
@@ -558,7 +308,7 @@ function ChatPanel(
       // the SSE stream can open against a real id, THEN send the message as a normal turn —
       // fixes live "thinking"/Node Mode being empty for a session's very first message.
       if (!sid) {
-        const created = await createSession(approvalMode);
+        const created = await createSession();
         sid = created.id;
         onSessionId(sid);
       }
@@ -693,9 +443,6 @@ function ChatPanel(
       // Wire the real session title (4a) — already fetched above, just never stored before.
       setSessionTitle(session.title ?? "Untitled workflow");
 
-      if (session.approval_mode === "auto" || session.approval_mode === "approve") {
-        setApprovalMode(session.approval_mode);
-      }
       const restored: ChatMessage[] = turns.flatMap((turn: ChatTurn) => [
         { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
         // The plan-preview bubble, reconstructed from its own persisted field (2026-10-06) —
@@ -788,6 +535,26 @@ function ChatPanel(
     await loadHistory();
   }
 
+  async function handleCancelTurn() {
+    if (!sessionId) return;
+    cancelledRef.current = true;
+    setLoading(false);
+    setMessages((m) => [
+      ...m.filter(
+        (msg) =>
+          !msg.text.startsWith("Reconnecting") &&
+          !msg.text.startsWith("Still working"),
+      ),
+      { id: newId(), role: "assistant", text: "Generation cancelled by user." },
+    ]);
+    try {
+      await cancelTurn(sessionId);
+    } catch (e) {
+      console.error("Failed to cancel", e);
+      appendError(e);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     // Real, live-found gap (2026-10-05): `cancelled` alone only suppressed the STATE UPDATE for a
@@ -820,7 +587,7 @@ function ChatPanel(
   const lastPlanMessageId = messages.filter((mm) => mm.role === "plan").at(-1)?.id;
 
   return (
-    <div className={`flex h-full w-full flex-col bg-surface-900/95 backdrop-blur-2xl p-4 shadow-2xl overflow-hidden font-sans transition-all duration-300 ${
+    <div className={`flex h-full w-full flex-col glass-panel p-4 overflow-hidden font-sans transition-all duration-300 ${
       isMaximized
         ? "rounded-none border-r border-surface-700/50"
         : "rounded-2xl border border-surface-700/50"
@@ -910,242 +677,14 @@ function ChatPanel(
           </div>
         )}
         {messages.map((m) => (
-          <div key={m.id} className="animate-in fade-in slide-in-from-bottom-2 duration-300">
-            {/* Real, persisted "thinking" (2026-09-22) — the actual raw model text streamed live
-             * during this turn, collapsible like the reference product's own "Analyzed your
-             * request" card, rendered right before the response it led to. Previously this text
-             * was shown only while the turn was in flight, then discarded the instant it finished
-             * — never part of the chat history, gone on refresh. */}
-            {m.thinking && (
-              <div className="mb-2 pl-4 border-l-2 border-surface-700/50">
-                <details className="text-xs group">
-                  <summary className="cursor-pointer select-none font-medium text-surface-500 hover:text-surface-400 flex items-center gap-1.5 transition-colors">
-                    <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                    Analyzed your request{m.thinkingSeconds != null ? ` ${m.thinkingSeconds}s` : ""}
-                  </summary>
-                  <p className="mt-2 whitespace-pre-wrap italic text-surface-500 pr-4">{m.thinking}</p>
-                </details>
-              </div>
-            )}
-            <div className={m.role === "user" ? "flex justify-end" : "flex justify-start"}>
-            <div
-              className={
-                "max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed " +
-                (m.role === "user"
-                  ? "bg-surface-800 text-surface-100 shadow-md"
-                  : m.role === "error"
-                    ? "bg-red-900/20 text-red-200 border border-red-900/50"
-                    : m.role === "gate"
-                      ? m.gateStage === "motion_pending"
-                        ? "bg-red-900/10 text-surface-200 border border-red-900/30"
-                        : "bg-surface-800/50 text-surface-200 border border-surface-700/50"
-                      : m.role === "plan"
-                        ? "bg-surface-800/50 text-surface-200 border border-surface-700/50"
-                        : "text-surface-200")
-              }
-            >
-              {m.role === "gate" && (
-                <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">⏸</span>
-                  {m.gateStage === "motion_pending" ? "Spend approval needed" : "Approval needed"}
-                </p>
-              )}
-              {/* Plan preview (2026-10-06, explicit user ask: show what will run BEFORE it runs,
-               * like Luma, then auto-proceed — every route, not just dynamic; "update the progress
-               * also" per the same ask, via live per-step status badges cross-referenced against
-               * `pipelineNodes`, the SAME real event-derived data AgentHUD/Node Mode already use —
-               * only for the most recent plan bubble, see `lastPlanMessageId` above). */}
-              {m.role === "plan" && m.planSteps && m.planSteps.length > 0 && (
-                <div>
-                  <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
-                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">📋</span>
-                    Here&apos;s the plan
-                  </p>
-                  <div className="space-y-2 rounded-xl border border-surface-700/50 bg-surface-900/50 p-3 text-xs shadow-inner">
-                    {groupPlanSteps(m.planSteps).map((group, gi) => (
-                      <div key={gi} className={group.length > 1 ? "rounded-lg border border-surface-700/40 p-2" : ""}>
-                        {group.length > 1 && (
-                          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-surface-500">
-                            ⚡ run together
-                          </p>
-                        )}
-                        <ul className="ml-4 space-y-1 list-disc text-surface-400">
-                          {group.map((step, si) => {
-                            const status = m.id === lastPlanMessageId ? planStepStatus(step, pipelineNodes) : undefined;
-                            return (
-                              <li key={si} className="flex items-start gap-1.5">
-                                <span className="flex-1">
-                                  <span className="font-medium text-surface-300">{humanizeSpecialist(step.specialist)}</span>
-                                  {step.instruction && <> — {truncate(step.instruction, 140)}</>}
-                                </span>
-                                {status === "running" && (
-                                  <span className="shrink-0 text-amber-400" title="Running">●</span>
-                                )}
-                                {status === "completed" && (
-                                  <span className="shrink-0 text-emerald-400" title="Completed">✓</span>
-                                )}
-                                {status === "failed" && (
-                                  <span className="shrink-0 text-red-400" title="Failed">✗</span>
-                                )}
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              {m.role === "user" && m.referencedElements && m.referencedElements.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-2">
-                  {m.referencedElements.map((el) => (
-                    <div key={el.id} className="flex max-w-[80%] items-center gap-2 overflow-hidden rounded-lg bg-surface-900/50 p-1 pl-2 border border-surface-700/50">
-                      <span className="truncate text-xs text-surface-300" title={el.description ?? undefined}>
-                        re: {el.kind}
-                        {el.description && <> — {truncate(el.description, 40)}</>}
-                      </span>
-                      {el.kind === "video" ? (
-                        <video src={el.url} className="h-8 w-8 shrink-0 rounded-md object-cover" />
-                      ) : el.kind === "audio" ? (
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface-800">
-                          <svg className="h-4 w-4 text-surface-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072M17.657 6.343a8 8 0 010 11.314M9 10l-3-3m0 0l3-3m-3 3h12" />
-                          </svg>
-                        </div>
-                      ) : el.kind === "text" ? (
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface-800">
-                          <svg className="h-4 w-4 text-surface-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
-                          </svg>
-                        </div>
-                      ) : (
-                        <img src={el.url} alt="" className="h-8 w-8 shrink-0 rounded-md object-cover" />
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="whitespace-pre-wrap">{m.text}</div>
-              
-              {/* Asset plan visualizers */}
-              {m.role === "gate" && m.gateStage === "narrative_pending" && m.narrativePlan && (
-                <div className="mt-3 rounded-xl border border-surface-700/50 bg-surface-900/50 p-3 text-xs shadow-inner">
-                  <p className="font-medium text-surface-200 mb-1">Shots</p>
-                  <ul className="ml-4 space-y-1 list-disc text-surface-400">
-                    {m.narrativePlan.shots.map((shot, i) => (
-                      <li key={i}>{shot}</li>
-                    ))}
-                  </ul>
-                  <p className="mt-2 text-surface-400">
-                    <span className="font-medium text-surface-300">Story:</span> {m.narrativePlan.overall_story}
-                  </p>
-                </div>
-              )}
-              {m.role === "gate" && m.gateStage === "scene_pending" && m.scenePlan && (
-                <div className="mt-3 flex gap-3 rounded-xl border border-surface-700/50 bg-surface-900/50 p-3 text-xs shadow-inner">
-                  {m.scenePlan.scene_image_storage_ref && (
-                    // eslint-disable-next-line @next/next/no-img-element -- a dynamic, backend-served asset thumbnail
-                    <img
-                      src={assetUrl(m.scenePlan.scene_image_storage_ref)}
-                      alt="Scene starting frame"
-                      className="h-20 w-20 shrink-0 rounded-lg object-cover border border-surface-700"
-                    />
-                  )}
-                  <div className="text-surface-400 space-y-1">
-                    <p>
-                      <span className="font-medium text-surface-300">Environment:</span>{" "}
-                      {m.scenePlan.environment_description}
-                    </p>
-                    <p>
-                      <span className="font-medium text-surface-300">Lighting:</span> {m.scenePlan.lighting_description}
-                    </p>
-                    {m.scenePlan.prop_description && (
-                      <p>
-                        <span className="font-medium text-surface-300">Props:</span> {m.scenePlan.prop_description}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-              {m.role === "gate" && m.gateStage === "motion_pending" && (
-                <div className="mt-3 rounded-xl border border-red-900/30 bg-red-900/10 p-3 text-xs text-surface-400 shadow-inner">
-                  {m.narrativePlan && (
-                    <p className="mb-1">
-                      <span className="font-medium text-surface-300">Shot:</span> {m.narrativePlan.shots[0]}
-                    </p>
-                  )}
-                  {m.scenePlan && (
-                    <p className="mb-2">
-                      <span className="font-medium text-surface-300">Scene:</span> {m.scenePlan.environment_description}
-                    </p>
-                  )}
-                  <p className="font-medium text-red-400 flex items-center gap-1.5">
-                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                    </svg>
-                    This will call a paid provider (Replicate).
-                  </p>
-                </div>
-              )}
-              {m.options && m.options.length > 0 && (
-                <div className="mt-3 flex flex-col gap-2">
-                  {m.options.map((opt, i) => (
-                    <button
-                      key={opt.id}
-                      onClick={() => handlePickOption(opt)}
-                      disabled={loading}
-                      className={
-                        "flex items-center justify-between rounded-xl border px-4 py-2.5 text-left text-sm disabled:opacity-50 transition-all hover:scale-[1.01] " +
-                        (m.gateStage === "motion_pending" && opt.id === "approve"
-                          ? "border-red-900/50 bg-red-900/20 hover:bg-red-900/40 text-red-200"
-                          : "border-surface-700/50 bg-surface-800/80 hover:bg-surface-700 text-surface-200")
-                      }
-                    >
-                      <span className="flex items-center gap-3">
-                        {opt.id === "approve" ? (
-                          <svg className="w-5 h-5 text-green-500/80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                        ) : opt.id === "reject" ? (
-                          <svg className="w-5 h-5 text-red-500/80" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                        ) : (
-                          <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-700/50 text-xs font-medium text-surface-400">
-                            {i + 1}
-                          </span>
-                        )}
-                        <span>
-                          <span className="block font-medium">{opt.label}</span>
-                          {opt.description && <span className="block text-xs text-surface-500 mt-0.5">{opt.description}</span>}
-                        </span>
-                      </span>
-                      <svg className="w-4 h-4 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                      </svg>
-                    </button>
-                  ))}
-                  {m.allowFreeText !== false && (
-                    <button
-                      onClick={handleOther}
-                      disabled={loading}
-                      className="flex items-center gap-3 rounded-xl border border-dashed border-surface-700 bg-transparent px-4 py-2.5 text-left text-sm hover:bg-surface-800/50 disabled:opacity-50 transition-all text-surface-400 hover:text-surface-300"
-                    >
-                      <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface-800 text-xs font-medium">
-                        {m.options.length + 1}
-                      </span>
-                      <span>
-                        <span className="block font-medium">Type your own reply below</span>
-                      </span>
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-            </div>
-          </div>
+          <ChatBubble
+            key={m.id}
+            m={m}
+            lastPlanMessageId={lastPlanMessageId}
+            pipelineNodes={pipelineNodes}
+            handlePickOption={handlePickOption}
+            loading={loading}
+          />
         ))}
         {loading && (
           <div className="flex items-center gap-3 text-xs text-surface-500 pl-2 animate-in fade-in duration-300">
@@ -1313,185 +852,26 @@ function ChatPanel(
         </div>
       )}
 
-      <form
-        className="relative mt-4 flex flex-col gap-2 rounded-2xl border border-surface-700/60 bg-surface-800/40 p-2 shadow-inner transition-colors focus-within:border-surface-600 focus-within:bg-surface-800/60"
-        onSubmit={(e) => {
-          e.preventDefault();
-          handleSend();
-        }}
-      >
-        {showLinkPopover && (
-          // Positioned relative to the whole input bar (the <form>), not the tiny 🔗 icon —
-          // anchoring to the icon with a fixed width let the popover overflow past the panel's
-          // own left edge in a narrow chat panel (real, live-found UI bug, 2026-09-28).
-          <div className="absolute bottom-full left-0 right-0 z-10 mb-2 rounded-xl border border-surface-700 bg-surface-900 p-2.5 shadow-xl">
-            <p className="mb-1.5 text-[10px] font-semibold text-surface-400">Paste a company or product link</p>
-            <div className="flex gap-1.5">
-              <input
-                autoFocus
-                className="min-w-0 flex-1 rounded-lg border border-surface-700 bg-surface-800 px-2 py-1.5 text-xs text-surface-50 focus:border-brand-500 focus:outline-none"
-                placeholder="https://..."
-                value={linkInput}
-                onChange={(e) => setLinkInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleTriggerLinkCrawl()}
-              />
-              <button
-                type="button"
-                onClick={handleTriggerLinkCrawl}
-                disabled={linkCrawling || !linkInput.trim()}
-                className="shrink-0 rounded-lg bg-brand-500 px-2.5 py-1.5 text-xs font-semibold text-white disabled:opacity-40"
-              >
-                {linkCrawling ? "…" : "Crawl"}
-              </button>
-            </div>
-          </div>
-        )}
-        <textarea
-          ref={inputRef}
-          rows={1}
-          className="max-h-32 w-full resize-none bg-transparent px-3 py-2 text-sm text-surface-50 placeholder-surface-400 focus:outline-none scrollbar-thin scrollbar-track-transparent scrollbar-thumb-surface-700"
-          placeholder={sessionId ? "What do you want to do?" : "What do you want to create?"}
-          value={input}
-          onChange={(e) => {
-            setInput(e.target.value);
-            const el = e.target;
-            el.style.height = "auto";
-            el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          onPaste={handlePaste}
-          onDrop={handleDrop}
-          onDragOver={(e) => e.preventDefault()}
-          disabled={loading}
-        />
-        <div className="flex items-center justify-between px-2 pb-1">
-          <div className="relative group flex items-center">
-            {/* The approve/auto mode dropdown replaces the old mode selector */}
-            <select
-              className="appearance-none bg-transparent py-1 pl-6 pr-4 text-xs font-medium text-surface-400 hover:text-surface-200 focus:outline-none cursor-pointer transition-colors"
-              value={approvalMode}
-              disabled={loading || changingMode || !sessionId}
-              onChange={async (e) => {
-                const next = e.target.value as "auto" | "approve";
-                const prev = approvalMode;
-                setApprovalMode(next);
-                if (sessionId) {
-                  setChangingMode(true);
-                  try {
-                    await updateApprovalMode(sessionId, next);
-                  } catch (err) {
-                    setApprovalMode(prev);
-                    appendError(err);
-                  } finally {
-                    setChangingMode(false);
-                  }
-                }
-              }}
-            >
-              <option value="auto" className="bg-surface-900 text-surface-200">Auto</option>
-              <option value="approve" className="bg-surface-900 text-surface-200">Approve</option>
-            </select>
-            <div className="pointer-events-none absolute left-1 flex items-center text-surface-500 group-hover:text-surface-300">
-              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
-              </svg>
-            </div>
-            <div className="pointer-events-none absolute right-0 flex items-center text-surface-500 group-hover:text-surface-300">
-              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 9l4-4 4 4m0 6l-4 4-4-4" />
-              </svg>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => setShowLinkPopover((v) => !v)}
-              disabled={!sessionId}
-              className="text-surface-500 hover:text-surface-300 transition-colors disabled:opacity-30"
-              title="Add a brand/product link to auto-extract DNA"
-            >
-              🔗
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) void attachFile(file);
-                e.target.value = "";
-              }}
-            />
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={!sessionId || attaching}
-              className="text-surface-500 hover:text-surface-300 transition-colors disabled:opacity-30"
-              title="Attach an image (or paste/drop one into the message box)"
-            >
-              {attaching ? "…" : "📎"}
-            </button>
-            <button type="button" className="text-surface-500 hover:text-surface-300 transition-colors" title="Voice Input">
-              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-              </svg>
-            </button>
-            {loading ? (
-              <button
-                type="button"
-                onClick={async () => {
-                  if (!sessionId) return;
-                  // Instantly optimistically unlock the UI so the user isn't trapped.
-                  // Also remove any pending "Reconnecting" / "Still working" placeholder
-                  // bubbles left over from a previous mid-turn page refresh — without this,
-                  // they'd stay visible forever since nothing else ever replaces them now.
-                  // `cancelledRef` (see its own comment above `handleSend`) tells the still-
-                  // in-flight `withNarration` call not to append its own, duplicate result
-                  // bubble once the backend's real cancellation confirms via `turn_completed`.
-                  cancelledRef.current = true;
-                  setLoading(false);
-                  setMessages((m) => [
-                    ...m.filter(
-                      (msg) =>
-                        !msg.text.startsWith("Reconnecting") &&
-                        !msg.text.startsWith("Still working"),
-                    ),
-                    { id: newId(), role: "assistant", text: "Generation cancelled by user." },
-                  ]);
-                  try {
-                    await cancelTurn(sessionId);
-                  } catch (e) {
-                    console.error("Failed to cancel", e);
-                    appendError(e);
-                  }
-                }}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-200 text-surface-900 transition-transform hover:scale-105 shadow-sm"
-              >
-                <svg className="h-4 w-4" fill="currentColor" viewBox="0 0 24 24">
-                  <rect x="6" y="6" width="12" height="12" rx="2" />
-                </svg>
-              </button>
-            ) : (
-              <button
-                type="submit"
-                disabled={!input.trim()}
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-brand-500 text-white transition-transform disabled:opacity-30 disabled:hover:scale-100 hover:scale-105 shadow-md shadow-brand-500/25"
-              >
-                <svg className="h-4 w-4 translate-x-[1px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 12h14M12 5l7 7-7 7" />
-                </svg>
-              </button>
-            )}
-          </div>
-        </div>
-      </form>
+      <ChatInput
+        input={input}
+        setInput={setInput}
+        inputRef={inputRef}
+        fileInputRef={fileInputRef}
+        loading={loading}
+        attaching={attaching}
+        sessionId={sessionId}
+        handleSend={handleSend}
+        handlePaste={handlePaste}
+        handleDrop={handleDrop}
+        attachFile={attachFile}
+        showLinkPopover={showLinkPopover}
+        setShowLinkPopover={setShowLinkPopover}
+        linkInput={linkInput}
+        setLinkInput={setLinkInput}
+        linkCrawling={linkCrawling}
+        handleTriggerLinkCrawl={handleTriggerLinkCrawl}
+        handleCancelTurn={handleCancelTurn}
+      />
     </div>
   );
 }

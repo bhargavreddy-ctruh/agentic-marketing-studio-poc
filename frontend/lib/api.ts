@@ -45,7 +45,7 @@ export interface SessionResponse {
   id: string;
   title: string;
   status: string;
-  approval_mode: "auto" | "approve";
+  approval_mode: "approve";
   guardrails_enabled: boolean;
   brief: Record<string, unknown>;
   style_ref_storage_ref?: string | null;
@@ -63,14 +63,11 @@ export interface SessionResponse {
  * is the real, human-chosen workflow name shown on the home page's list — omitted falls back to
  * the model's own "Untitled workflow" default. Requires being logged in (the backend reads the
  * owning user from the session cookie, never from this request body). */
-export async function createSession(
-  approvalMode: "auto" | "approve" = "auto",
-  title?: string,
-): Promise<SessionResponse> {
+export async function createSession(title?: string): Promise<SessionResponse> {
   return request<SessionResponse>("/api/v1/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approval_mode: approvalMode, title }),
+    body: JSON.stringify({ title }),
   });
 }
 
@@ -80,8 +77,7 @@ export async function listSessions(): Promise<SessionResponse[]> {
   return request<SessionResponse[]>("/api/v1/sessions");
 }
 
-/** Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on workflows") —
- * same shape as `updateApprovalMode` below. */
+/** Rename a workflow (2026-09-30, explicit user ask: "add a delete/edit button on workflows"). */
 export async function updateSessionTitle(
   sessionId: string,
   title: string,
@@ -116,23 +112,7 @@ export async function updateSessionStyle(
   });
 }
 
-/** Real, live-found gap (2026-09-24, per an explicit user ask: "in chat box user should be able
- * to select the mode(auto/approve mode)") — mode selection previously only existed on the home
- * page's "new workflow" form, before a session even existed; there was no way to change it for an
- * already-running conversation. */
-export async function updateApprovalMode(
-  sessionId: string,
-  approvalMode: "auto" | "approve",
-): Promise<SessionResponse> {
-  return request<SessionResponse>(`/api/v1/sessions/${sessionId}/approval-mode`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ approval_mode: approvalMode }),
-  });
-}
-
-/** Per-session guardrails on/off (2026-09-25) — same shape as `updateApprovalMode` above. Ported
- * from `poc/frontend/lib/api.ts`. */
+/** Per-session guardrails on/off (2026-09-25). */
 export async function updateGuardrailsEnabled(
   sessionId: string,
   guardrailsEnabled: boolean,

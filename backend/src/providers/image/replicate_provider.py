@@ -56,11 +56,11 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
             if reference_image_bytes:
                 b64_data = base64.b64encode(reference_image_bytes).decode("utf-8")
                 request_input["image"] = f"data:{reference_mime_type or 'image/png'};base64,{b64_data}"
-            if style_reference_bytes:
+                if style_reference_bytes:
+                    log.warning("qwen_image_3_style_reference_dropped", extra={"_reason": "qwen does not support separate style reference when image is provided"})
+            elif style_reference_bytes:
                 b64_style = base64.b64encode(style_reference_bytes).decode("utf-8")
-                request_input["style_reference"] = (
-                    f"data:{style_reference_mime_type or 'image/png'};base64,{b64_style}"
-                )
+                request_input["image"] = f"data:{style_reference_mime_type or 'image/png'};base64,{b64_style}"
             # Use explicit create-and-poll so we don't drop the connection or timeout early
             # and cause the LLM to think it failed and retry.
             model = await self._client.models.async_get("alibaba/qwen-image-3")
@@ -71,9 +71,14 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 input=request_input,
             )
             
+            attempts = 0
+            max_attempts = 150
             while prediction.status not in ["succeeded", "failed", "canceled"]:
+                if attempts >= max_attempts:
+                    raise ProviderUnavailable("replicate", f"Prediction timed out after {max_attempts} attempts.")
                 await asyncio.sleep(2)
                 prediction = await self._client.predictions.async_get(prediction.id)
+                attempts += 1
                 
             if prediction.status != "succeeded":
                 raise ProviderUnavailable("replicate", f"Prediction ended with status: {prediction.status}")
@@ -159,9 +164,14 @@ class ReplicateImageProvider(ImageGenProvider, ImageEditProvider):
                 input=request_input,
             )
             
+            attempts = 0
+            max_attempts = 150
             while prediction.status not in ["succeeded", "failed", "canceled"]:
+                if attempts >= max_attempts:
+                    raise ProviderUnavailable("replicate", f"Prediction timed out after {max_attempts} attempts.")
                 await asyncio.sleep(2)
                 prediction = await self._client.predictions.async_get(prediction.id)
+                attempts += 1
                 
             if prediction.status != "succeeded":
                 raise ProviderUnavailable("replicate", f"Edit prediction ended with status: {prediction.status}")

@@ -34,7 +34,6 @@ export default function HomePage() {
   const [workflowsError, setWorkflowsError] = useState<string | null>(null);
   const [showNewWorkflow, setShowNewWorkflow] = useState(false);
   const [newTitle, setNewTitle] = useState("");
-  const [newApprovalMode, setNewApprovalMode] = useState<"auto" | "approve">("approve");
   // Product/Brand crawler (2026-09-28) — optional, additive: filling either kicks off a crawl
   // right after the session is created, alongside the existing create flow.
   const [newCompanyUrl, setNewCompanyUrl] = useState("");
@@ -121,7 +120,7 @@ export default function HomePage() {
     e.preventDefault();
     setCreating(true);
     try {
-      const created = await createSession(newApprovalMode, newTitle.trim() || undefined);
+      const created = await createSession(newTitle.trim() || undefined);
       // Fire-and-forget — the crawl runs as the session's own background task (same
       // POST /{id}/crawl route ChatPanel's "🔗 Add Link" popover uses); never blocks navigation.
       const crawlingKinds: string[] = [];
@@ -389,17 +388,6 @@ export default function HomePage() {
                   value={newProductUrl}
                   onChange={(e) => setNewProductUrl(e.target.value)}
                 />
-                <label className="flex items-center gap-2 text-sm text-surface-400">
-                  Mode
-                  <select
-                    className="rounded-lg border border-surface-700 bg-surface-800 px-2.5 py-1.5 text-sm text-surface-200 focus:border-brand-500 focus:outline-none"
-                    value={newApprovalMode}
-                    onChange={(e) => setNewApprovalMode(e.target.value as "auto" | "approve")}
-                  >
-                    <option value="auto" className="bg-surface-900">Auto (no pauses)</option>
-                    <option value="approve" className="bg-surface-900">Approve (real HITL gates)</option>
-                  </select>
-                </label>
                 <button
                   type="submit"
                   disabled={creating}
@@ -463,7 +451,6 @@ export default function HomePage() {
                       <p className="truncate font-medium text-surface-50">{w.title}</p>
                       <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
                         <WorkflowStatusBadge status={w.status} />
-                        <ApprovalBadge mode={w.approval_mode} />
                         <span className="text-xs text-surface-500">
                           · updated {new Date(w.updated_at).toLocaleString()}
                         </span>
@@ -671,14 +658,3 @@ function WorkflowStatusBadge({ status }: { status: string }) {
   );
 }
 
-function ApprovalBadge({ mode }: { mode: string }) {
-  return (
-    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
-      mode === "approve"
-        ? "border-amber-700/40 bg-amber-900/30 text-amber-400"
-        : "border-surface-700/50 bg-surface-800 text-surface-500"
-    }`}>
-      {mode}
-    </span>
-  );
-}

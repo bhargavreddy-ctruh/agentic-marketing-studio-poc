@@ -85,9 +85,14 @@ class NanoBananaProvider:
                 input=request_input,
             )
 
+            attempts = 0
+            max_attempts = 150
             while prediction.status not in ["succeeded", "failed", "canceled"]:
+                if attempts >= max_attempts:
+                    raise ProviderUnavailable(_MODEL, f"Prediction timed out after {max_attempts} attempts.")
                 await asyncio.sleep(2)
                 prediction = await self._client.predictions.async_get(prediction.id)
+                attempts += 1
 
             if prediction.status != "succeeded":
                 raise ProviderUnavailable(_MODEL, f"Prediction ended with status: {prediction.status}")

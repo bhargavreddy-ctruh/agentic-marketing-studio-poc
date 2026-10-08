@@ -28,7 +28,7 @@ async def resolve_comment(
     if element is None:
         raise NotFoundError("CanvasElement", element_id)
     session = await sessions.get(element.session_id)
-    approval_mode = session.approval_mode if session else "auto"
+    approval_mode = session.approval_mode if session else "approve"
 
     # A storage_ref means nothing to a text-only specialist — the original generation prompt is
     # the only real grounding for what this element actually depicts (same real bug found live in

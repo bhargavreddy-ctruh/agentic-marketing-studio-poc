@@ -29,9 +29,22 @@ class BrandKitLookupTool(Tool):
         if not user_id:
             return ToolResult(ok=True, data={"facts": "", "configured": False})
 
+        # Resolve the active brand (explicit session pick wins, else first user brand)
+        brand_id = context.get("brand_profile_id")
+        if not brand_id:
+            from ...models.base import async_session_factory
+            from ...repositories.postgres.postgres_brand_repository import PostgresBrandRepository
+            async with async_session_factory() as db:
+                user_brands = await PostgresBrandRepository(db).list_for_user(user_id)
+                if user_brands:
+                    brand_id = user_brands[0].id
+
+        if not brand_id:
+            return ToolResult(ok=True, data={"facts": "", "configured": False})
+
         question = str(args.get("question") or "").strip()
         try:
-            answer = await get_knowledge_provider().query(collection=f"brand_{user_id}", question=question)
+            answer = await get_knowledge_provider().query(collection=f"brand_{brand_id}", question=question)
         except ProviderUnavailable:
             return ToolResult(ok=True, data={"facts": "", "configured": False})
         return ToolResult(ok=True, data={"facts": answer, "configured": True})

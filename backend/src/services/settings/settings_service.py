@@ -12,8 +12,6 @@ from collections.abc import Callable
 
 from ...core.config import settings
 from ...core.middleware.logging import get_logger
-from ...providers.image.cloudflare_flux import reset_cloudflare_flux_provider
-from ...providers.image.huggingface import reset_image_edit_provider
 from ...providers.llm.router import reset_llm_provider
 from ...providers.observability.langsmith import configure_langsmith
 from ...providers.video.replicate import reset_video_provider
@@ -34,12 +32,10 @@ _BOOL_KEYS = {
 # Plain string Settings fields that ARE baked into a provider constructor.
 _STR_SETTINGS_KEYS = {
     "groq_api_key",
-    "huggingface_api_token",
-    "cloudflare_account_id",
-    "cloudflare_api_token",
     "falai_api_key",
     "replicate_api_token",
     "langsmith_api_key",
+    "gemini_api_key",
     # Product/Brand crawler (2026-09-28) — providers/crawlers/firecrawl_provider.py constructs its
     # client fresh on every call (crawls are infrequent, unlike the constantly-called LLM/image
     # providers), reading `settings.firecrawl_api_key` directly each time — so a live override
@@ -63,10 +59,8 @@ WHITELIST: set[str] = _STR_SETTINGS_KEYS | _BOOL_KEYS | set(_ENV_ONLY_KEYS)
 _KEY_TO_RESETTERS: dict[str, list[Callable[[], None]]] = {
     "groq_api_key": [reset_llm_provider],
     "replicate_api_token": [reset_llm_provider, reset_video_provider],
-    "huggingface_api_token": [reset_image_edit_provider],
-    "cloudflare_account_id": [reset_cloudflare_flux_provider],
-    "cloudflare_api_token": [reset_cloudflare_flux_provider],
     "langsmith_api_key": [configure_langsmith],
+    "gemini_api_key": [reset_llm_provider],
 }
 
 _last_applied: dict[str, str] = {}

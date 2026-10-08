@@ -30,14 +30,19 @@ def _fake_llm(response_json: str) -> AsyncMock:
 
 @pytest.mark.asyncio
 async def test_routes_full_video_via_llm_classification():
+    """Real route decision now surfaces as `paused_plan["pending_route"]` — `route()` itself
+    always pauses at `"plan_approval"` once a plan exists (2026-10-07, explicit user ask: "after
+    creating a plan there should be hitl, be it campaign generation or any generation"), never
+    auto-proceeding straight into execution."""
     state = {"user_message": "I want a video ad for my sneaker", "session_id": "s1"}
     with patch(
         "src.services.orchestration.orchestrator.get_llm_provider",
         return_value=_fake_llm('{"route": "full_video", "target_specialist": ""}'),
     ):
         result = await route(state)
-    assert result["route"] == "full_video"
-    assert route_condition(result) == "full_video"
+    assert result["route"] == "plan_approval"
+    assert route_condition(result) == "plan_approval"
+    assert result["paused_plan"]["pending_route"] == "full_video"
 
 
 @pytest.mark.asyncio
@@ -48,8 +53,9 @@ async def test_routes_direct_fix_with_valid_specialist():
         return_value=_fake_llm('{"route": "direct_fix", "target_specialist": "overlay_artist"}'),
     ):
         result = await route(state)
-    assert result["route"] == "direct_fix"
-    assert result["target_specialist"] == "overlay_artist"
+    assert result["route"] == "plan_approval"
+    assert result["paused_plan"]["pending_route"] == "direct_fix"
+    assert result["paused_plan"]["target_specialist"] == "overlay_artist"
 
 
 @pytest.mark.asyncio
@@ -62,8 +68,9 @@ async def test_hallucinated_target_specialist_falls_back_to_full_image():
         return_value=_fake_llm('{"route": "direct_fix", "target_specialist": "made_up_specialist"}'),
     ):
         result = await route(state)
-    assert result["route"] == "full_image"
-    assert result["target_specialist"] is None
+    assert result["route"] == "plan_approval"
+    assert result["paused_plan"]["pending_route"] == "full_image"
+    assert result["paused_plan"]["target_specialist"] is None
 
 
 @pytest.mark.asyncio
@@ -141,8 +148,9 @@ async def test_thumbnail_request_with_reference_accepts_dynamic_illustrator_rout
         return_value=_fake_llm(json.dumps({"route": "dynamic", "target_specialist": None, "plan": plan})),
     ):
         result = await route(state)
-    assert result["route"] == "dynamic"
-    assert result["dynamic_plan"][0]["specialist"] == "illustrator"
+    assert result["route"] == "plan_approval"
+    assert result["paused_plan"]["pending_route"] == "dynamic"
+    assert result["paused_plan"]["dynamic_plan"][0]["specialist"] == "illustrator"
 
 
 @pytest.mark.asyncio
@@ -168,8 +176,9 @@ async def test_video_request_with_reference_accepts_dynamic_camera_director_rout
         return_value=_fake_llm(json.dumps({"route": "dynamic", "target_specialist": None, "plan": plan})),
     ):
         result = await route(state)
-    assert result["route"] == "dynamic"
-    assert result["dynamic_plan"][0]["specialist"] == "camera_director"
+    assert result["route"] == "plan_approval"
+    assert result["paused_plan"]["pending_route"] == "dynamic"
+    assert result["paused_plan"]["dynamic_plan"][0]["specialist"] == "camera_director"
 
 
 # --- Plan preview (2026-10-06, explicit user ask: show what will run before it runs, like Luma,

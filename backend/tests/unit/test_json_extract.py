@@ -27,3 +27,21 @@ def test_literal_raw_newline_inside_a_string_value_does_not_crash_parsing():
     # with "Invalid control character", even though it's otherwise well-formed.
     text = '{\n  "needs_overlay": true,\n  "reasoning": "Line one\nLine two"\n}'
     assert extract_json(text) == {"needs_overlay": True, "reasoning": "Line one\nLine two"}
+
+
+def test_stray_unescaped_quote_inside_a_string_value_does_not_crash_parsing():
+    # Real, live-found failure (2026-10-07, illustrator's pseudo tool-call): the model's prompt
+    # text described on-screen copy with a literal, un-escaped quote (`a sign reading "SALE"`)
+    # instead of escaping it as `\"SALE\"` — this used to fail with "Expecting ',' delimiter"
+    # hundreds of characters in, discarding an otherwise well-formed, clearly-intentioned response.
+    text = '{"tool_call": {"name": "illustrator", "arguments": {"prompt": "a sign reading "SALE" in neon"}}}'
+    assert extract_json(text) == {
+        "tool_call": {"name": "illustrator", "arguments": {"prompt": 'a sign reading "SALE" in neon'}}
+    }
+
+
+def test_stray_quote_repair_leaves_genuinely_well_formed_json_untouched():
+    # The repair must never fire (or must be a no-op) on already-valid JSON — only ever kick in
+    # once normal strict parsing has already failed.
+    text = '{"answer": "the price is \\"not available\\" right now"}'
+    assert extract_json(text) == {"answer": 'the price is "not available" right now'}

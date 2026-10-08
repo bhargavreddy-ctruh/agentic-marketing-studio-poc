@@ -414,6 +414,8 @@ async def run_ideation(state: GraphState) -> GraphState:
     parsed: dict[str, Any] | None = None
     for attempt in range(2):
         try:
+            from ...core.thought_filter import ThoughtFilter
+            filter_obj = ThoughtFilter(lambda node, text: emit("llm_delta", node=node, text=text), "ideation")
             result = await llm.complete(
                 tier=ModelTier.TIER_1,
                 system=_SYSTEM_PROMPT,
@@ -423,7 +425,7 @@ async def run_ideation(state: GraphState) -> GraphState:
                 # content, and got cut off mid-response at the lower budget.
                 max_tokens=1536,
                 # Real live "thinking" text, per the user's explicit ask (2026-09-21).
-                on_delta=lambda delta: emit("llm_delta", node="ideation", text=delta),
+                on_delta=filter_obj.on_delta,
             )
             parsed = extract_json(result.text)
             break

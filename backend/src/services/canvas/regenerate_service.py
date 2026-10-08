@@ -26,7 +26,7 @@ async def regenerate_element(
     if element is None:
         raise NotFoundError("CanvasElement", element_id)
     session = await sessions.get(element.session_id)
-    approval_mode = session.approval_mode if session else "auto"
+    approval_mode = session.approval_mode if session else "approve"
 
     # A storage_ref means nothing to a text-only specialist — it never saw the pixels and has no
     # memory of its own prior run. Real bug found live (Memory.md, Phase 4): without the original

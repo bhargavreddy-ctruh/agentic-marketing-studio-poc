@@ -5624,3 +5624,19 @@ Verified throughout: `pytest` 110/110 after the final fix; `ruff check`/`py_comp
 touched file (pre-existing unrelated lint issues confirmed via line-number cross-check, not
 introduced); new unit tests added (`test_deliverables.py`) for both the multi-key detection and the
 step-scoped context extraction, using the exact real text shapes captured from live logs.
+
+## Agentic Platform Refactor (2026-10-08)
+
+Initiated a major architectural pivot to convert the existing static pipeline into a fully dynamic agentic platform. Created a new branch `feature/fully-agentic-flow` to safely build out these capabilities without breaking the original static flow.
+
+**Key Architectural Shifts Planned & Approved:**
+1. **Agent-to-Agent Delegation:** Introducing a `delegate_task` tool to allow Lead Agents (e.g., `camera_director`) to autonomously call sub-agents (e.g., `sound_designer`, `shot_planner`) instead of relying on a rigid, hardcoded top-down orchestrator sequence.
+2. **Dynamic LangGraph Execution:** Flattening the hardcoded `full_video` and `full_image` paths in `graph.py`. The Orchestrator will now just assign a high-level goal, and the graph will loop through autonomous agent delegations.
+3. **Human-in-the-Loop (HITL) Spend Gates:** Adding strict conversational interrupt gates before any paid API calls are made. 
+   - The Orchestrator will pause for Plan Approval.
+   - Agents will pause for Cost/Video Approval.
+   - A new Bulk Image Approval rule was added (triggering a gate if the user asks for >2 images).
+   - These gates support *conversational negotiation* (e.g., the user can reply "only 1 video of 5 seconds," and the orchestrator dynamically prunes/adjusts the plan constraints).
+4. **Strict Guardrails:** Max recursion depth of 3, max retries of 2, cycle-detection to prevent infinite ping-pong between agents, and a 5-tool-use limit per turn.
+
+**Status:** Branch created, plan documented in `agentic_platform_transformation_plan.md`. Next step is implementing Phase 1 (the `delegate_task` tool).

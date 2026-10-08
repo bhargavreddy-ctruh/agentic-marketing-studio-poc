@@ -291,7 +291,7 @@ from ....services.orchestration.session_service import cancel_running_turn
 async def cancel_turn(
     session_id: str, svc: SessionServiceDep, current_user: CurrentUserDep
 ):
-    session_model = await svc.get_session(session_id, user_id=current_user.id)
+    session_model = await svc._get_owned_session(session_id, user_id=current_user.id)
     cancelled = cancel_running_turn(session_id)
     
     # If the database thinks it's generating but there is no running task

@@ -52,8 +52,22 @@ _ASPECT_RATIO_ENFORCED_TOOLS = frozenset({
 })
 
 
-def deliverable_hint_block(brief: dict | None) -> str:
-    """Returns a system prompt hint block specifying target aspect ratio and specs from brief["deliverable"]."""
+def deliverable_hint_block(brief: dict | None, step_text: str | None = None) -> str:
+    """Returns a system prompt hint block specifying target aspect ratio and specs from
+    brief["deliverable"]. `step_text`, when given, scopes the REGEX FALLBACK to one dynamic-plan
+    step's own instruction instead of the whole turn's raw message/idea.
+
+    Real, live-found bug (2026-10-07, Monster Energy "1:1 vs got 16:9" complaint): this was always
+    called ONCE per turn, before the per-step loop, with the whole turn's `_current_turn_message`/
+    `idea` — so a single campaign message naming TWO different formats (e.g. a 16:9 thumbnail step
+    and a 1:1 post step) produced ONE hint for the whole turn, copied unchanged into every step's
+    context. The hint's own wording ("set aspect_ratio to...") is forceful enough that the model
+    parrots it straight into its own generated prompt text, overriding that step's own correct,
+    explicit per-step instruction. `brief["deliverable"]` stays turn-wide on purpose (it's already
+    deliberately left unset whenever 2+ deliverables are named in one turn — see
+    `detect_deliverable_keys`'s docstring — so when it IS set, it's a genuine single, turn-global
+    deliverable, safe to use as-is); only the regex-text fallback needed per-step scoping.
+    """
     if not brief:
         return ""
     deliverable_key = brief.get("deliverable")
@@ -69,7 +83,7 @@ def deliverable_hint_block(brief: dict | None) -> str:
                 f"Strictly adhere to aspect_ratio='{spec.aspect_ratio}' for all visual generation and layout tools."
             )
     from ..leads.base import aspect_ratio_hint_block
-    return aspect_ratio_hint_block(brief.get("_current_turn_message") or brief.get("idea") or "")
+    return aspect_ratio_hint_block(step_text or brief.get("_current_turn_message") or brief.get("idea") or "")
 
 
 
@@ -159,15 +173,22 @@ def _recover_pseudo_tool_call(text: str, allowed_tools: tuple[str, ...]) -> tupl
     Returns (tool_name, arguments) on a safe, confident recovery, else None (the caller falls
     through to the existing bounded-retry-then-SpecialistFailed path, unchanged)."""
     try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            call = parsed.get("tool_call")
-            if isinstance(call, dict):
-                name = call.get("name")
-                args = call.get("arguments")
-                if isinstance(name, str) and name in allowed_tools and isinstance(args, dict):
-                    return name, args
-    except (json.JSONDecodeError, TypeError):
+        # Real, live-found bug (2026-10-07): this used to call bare `json.loads(text)` — none of
+        # `extract_json`'s own hardening (thought-block stripping, tolerant control characters,
+        # stray-unescaped-quote repair) applied here, so a pseudo tool-call whose `arguments.prompt`
+        # had so much as one unescaped quote in it (a common real occurrence — a long image prompt
+        # describing on-screen text like `a sign reading "SALE"`) failed this recovery silently,
+        # fell through to the regex/AST fallback below (which never matches this JSON shape at all,
+        # since there's no literal `name(...)` call expression in it), and the whole response was
+        # discarded as unrecoverable even though the model's real intent was perfectly clear.
+        parsed = extract_json(text)
+        call = parsed.get("tool_call")
+        if isinstance(call, dict):
+            name = call.get("name")
+            args = call.get("arguments")
+            if isinstance(name, str) and name in allowed_tools and isinstance(args, dict):
+                return name, args
+    except (ValueError, TypeError):
         pass
 
     for name in allowed_tools:
@@ -325,13 +346,33 @@ async def run_specialist_agentic(
     spec = get_specialist(specialist_name)
     system_prompt = spec.load_prompt()
     
-    from ...core.events import get_current_guardrails_xml
+    from ...core.events import get_current_guardrails_xml, _current_session_id
     guardrails_xml = get_current_guardrails_xml()
     if guardrails_xml:
         system_prompt += f"\n\n{guardrails_xml}\n"
 
+    from ...core.config import settings
+    compliance_enabled = settings.compliance_qa_enabled
+    session_id = _current_session_id.get()
+    if compliance_enabled and session_id:
+        from ...models.base import async_session_factory
+        from ...repositories.postgres.postgres_session_repository import PostgresSessionRepository
+        async with async_session_factory() as db:
+            session_model = await PostgresSessionRepository(db).get(session_id)
+            if session_model and not session_model.guardrails_enabled:
+                compliance_enabled = False
+
+    compliance_override = ""
+    if not compliance_enabled:
+        compliance_override = (
+            "CRITICAL RULE 7 — Compliance checking is disabled for this session. "
+            "You MUST NOT call `delegate_task(target=\"compliance_lead\")` or perform any peer review. "
+            "Skip the peer review step entirely.\n"
+        )
+
     system_prompt += (
         "\n\n<MASTER_DIRECTIVE>\n"
+        f"{compliance_override}"
         "You are creating top-tier, crazy, eye-catching, bold marketing material. "
         "CRITICAL RULE 0 — Think Before Acting: You MUST write down your step-by-step reasoning inside a <thought>...</thought> block BEFORE outputting your final JSON response. Always plan your work for the overall goal.\n"
         "CRITICAL RULE 1 — Referenced elements: If a single referenced element "
@@ -365,9 +406,22 @@ async def run_specialist_agentic(
         "real question). Instead return ONLY this JSON: "
         "{\"question\": \"your specific, real question\", \"options\": [{\"id\": \"...\", \"label\": \"...\", \"description\": \"...\"}, ...]} "
         "— `options` is optional (omit it entirely for a free-text question with no natural pickable "
-        "choices). This pauses the turn, shows your real question to the user, and resumes you with "
-        "their real answer once they reply — never invent an answer yourself when this applies.\n"
-        "</MASTER_DIRECTIVE>"
+        "choices). If you are offering options to select between specific elements on the canvas, you MUST set the option `id` to the EXACT `storage_ref` of that element. This pauses the turn, shows your real question to the user, and resumes you with "
+        "their real answer (and the chosen ID) once they reply — never invent an answer yourself when this applies.\n"
+        + (
+            "CRITICAL RULE 6 — Consult the data concierge before asking about a missing FACT: "
+            "if Rule 5 applies because you're missing a concrete FACT (a product detail, a price, "
+            "a brand guideline, what's already on the canvas, a decision made earlier this session) "
+            "rather than a genuine creative/subjective choice, you MUST call `data_concierge` with "
+            "that question FIRST — do not skip straight to asking the user. Only fall back to "
+            "asking the user if `data_concierge` returns `has_data: false` (it genuinely has "
+            "nothing) — never treat its answer as optional color, and never ask the user something "
+            "it could have answered. This does not apply to genuinely subjective/creative "
+            "ambiguity (which image, which style) — that's still Rule 5, unchanged.\n"
+            if "data_concierge" in spec.allowed_tools
+            else ""
+        )
+        + "</MASTER_DIRECTIVE>"
     )
     llm = get_llm_provider()
     tool_schemas = [to_openai_tool_schema(get_tool(name)) for name in spec.allowed_tools]
@@ -432,6 +486,9 @@ async def run_specialist_agentic(
     ) as specialist_run:
         for iteration in range(max_iterations):
             try:
+                from ...core.thought_filter import ThoughtFilter
+                filter_obj = ThoughtFilter(lambda node, text: emit("llm_delta", node=node, text=text), specialist_name)
+
                 result = await asyncio.wait_for(
                     llm.complete(
                         tier=spec.tier,
@@ -444,7 +501,7 @@ async def run_specialist_agentic(
                         # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
                         # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
                         # streams (see base.py's own docstring on this parameter).
-                        on_delta=lambda delta: emit("llm_delta", node=specialist_name, text=delta),
+                        on_delta=filter_obj.on_delta,
                     ),
                     timeout=_SPECIALIST_CALL_TIMEOUT_SECONDS,
                 )
@@ -568,6 +625,7 @@ async def run_specialist_agentic(
                                 if brief:
                                     tool_context = {
                                         k: v for k, v in {
+                                            "_parent_brief": brief,
                                             "user_id": brief.get("user_id"),
                                             # Scopes the `recall` tool (2026-10-05) to this
                                             # session's own chat history — never another session's.
@@ -579,10 +637,7 @@ async def run_specialist_agentic(
                                             # happened to be indexed under, not necessarily the
                                             # one actually relevant this turn).
                                             "product_id": brief.get("resolved_product_id"),
-                                            # The brand's real, uploaded logo asset (2026-09-30,
-                                            # real bug: illustrator had no way to reach the real
-                                            # logo file, only prose brand facts, so it could only
-                                            # ever hallucinate a logo from text).
+                                            "brand_profile_id": brief.get("brand_profile_id"),
                                             "brand_logo_storage_ref": brief.get("brand_logo_storage_ref"),
                                             # product_photo_storage_ref is the safety-net fallback:
                                             # base_image_generator checks ctx first if the LLM
@@ -676,6 +731,57 @@ async def run_specialist_agentic(
             # SpecialistFailed for no real reason. Skip the JSON requirement entirely for that case
             # and accept the raw text directly — `notes` matches the field name several other
             # specialists already use for a short free-text summary (Rules.md section 1: DRY).
+            parsed = None
+            try:
+                parsed = extract_json(result.text)
+            except ValueError as exc:
+                if not spec.required_output_fields:
+                    # It's a raw-text specialist, so raw text is perfectly fine.
+                    parsed = None
+                elif _json_parse_retries_left > 0:
+                    _json_parse_retries_left -= 1
+                    log.warning(
+                        "specialist_final_json_parse_retry",
+                        extra={"_extra_specialist": specialist_name, "_extra_error": str(exc)},
+                    )
+                    messages.append({"role": "assistant", "content": result.text or ""})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your last reply was not valid JSON and had no tool call — "
+                            f"parsing it failed with: {exc}. Return ONLY the required JSON object "
+                            "for your final answer (or call a tool if you're not done yet)."
+                        ),
+                    })
+                    continue
+                else:
+                    raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
+                
+            if parsed is not None:
+                if "error" in parsed and len(parsed.keys()) == 1:
+                    # The model followed the MASTER_DIRECTIVE to fail gracefully
+                    partial = AgenticStepResult(
+                        specialist_name=specialist_name, model=result.model, data=parsed, tool_calls=tool_calls
+                    )
+                    exc = SpecialistFailed(specialist_name, parsed["error"])
+                    exc.partial_result = partial
+                    raise exc
+
+                # Real, live-found gap (2026-09-30): the MASTER_DIRECTIVE already told specialists to
+                # "ask a clarifying question... wait for a response" but nothing downstream recognized
+                # that as anything but a crash — only the single-key {"error": ...} shape above was
+                # ever recognized, so a genuine question got treated identically to a real provider
+                # outage (a generic "Ran into an issue — retry/cancel", discarding the actual
+                # question). This is the real, working alternative shape: a distinct signal, not an
+                # error, carrying the specialist's own real question and (optionally) real options.
+                if "question" in parsed and set(parsed.keys()) <= {"question", "options"}:
+                    options = parsed.get("options")
+                    raise SpecialistNeedsClarification(
+                        specialist_name,
+                        str(parsed["question"]),
+                        options=options if isinstance(options, list) else None,
+                    )
+
             if not spec.required_output_fields:
                 log.info(
                     "specialist_step_ok",
@@ -692,51 +798,6 @@ async def run_specialist_agentic(
                 return AgenticStepResult(
                     specialist_name=specialist_name, model=result.model,
                     data={"notes": (result.text or "").strip()}, tool_calls=tool_calls,
-                )
-
-            try:
-                parsed = extract_json(result.text)
-            except ValueError as exc:
-                if _json_parse_retries_left > 0:
-                    _json_parse_retries_left -= 1
-                    log.warning(
-                        "specialist_final_json_parse_retry",
-                        extra={"_extra_specialist": specialist_name, "_extra_error": str(exc)},
-                    )
-                    messages.append({"role": "assistant", "content": result.text or ""})
-                    messages.append({
-                        "role": "user",
-                        "content": (
-                            "Your last reply was not valid JSON and had no tool call — "
-                            f"parsing it failed with: {exc}. Return ONLY the required JSON object "
-                            "for your final answer (or call a tool if you're not done yet)."
-                        ),
-                    })
-                    continue
-                raise SpecialistFailed(specialist_name, f"could not parse final response: {exc}") from exc
-                
-            if "error" in parsed and len(parsed.keys()) == 1:
-                # The model followed the MASTER_DIRECTIVE to fail gracefully
-                partial = AgenticStepResult(
-                    specialist_name=specialist_name, model=result.model, data=parsed, tool_calls=tool_calls
-                )
-                exc = SpecialistFailed(specialist_name, parsed["error"])
-                exc.partial_result = partial
-                raise exc
-
-            # Real, live-found gap (2026-09-30): the MASTER_DIRECTIVE already told specialists to
-            # "ask a clarifying question... wait for a response" but nothing downstream recognized
-            # that as anything but a crash — only the single-key {"error": ...} shape above was
-            # ever recognized, so a genuine question got treated identically to a real provider
-            # outage (a generic "Ran into an issue — retry/cancel", discarding the actual
-            # question). This is the real, working alternative shape: a distinct signal, not an
-            # error, carrying the specialist's own real question and (optionally) real options.
-            if "question" in parsed and set(parsed.keys()) <= {"question", "options"}:
-                options = parsed.get("options")
-                raise SpecialistNeedsClarification(
-                    specialist_name,
-                    str(parsed["question"]),
-                    options=options if isinstance(options, list) else None,
                 )
 
             # Code-enforced output contract: every specialist's real schema is either ALL of its

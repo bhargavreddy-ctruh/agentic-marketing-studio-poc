@@ -57,6 +57,14 @@ def run_requirements_check(
             allow_free_text=True
         )
 
+    # 2.5 Text-Only Exemption
+    # If the user is explicitly asking to write copy/text, bypass the visual deliverable checks.
+    # This prevents text requests containing platform names (e.g., "write an instagram caption") 
+    # from falsely triggering the image-formatting disambiguation loop.
+    _is_copy_request = bool(re.search(r"\b(write|draft)\b.*\b(caption|description|copy|headline|script)\b", user_message, re.IGNORECASE))
+    if _is_copy_request:
+        return None
+
     # 3. Deliverable Spec Check
     spec = detect_deliverable(user_message)
     if not spec:
@@ -66,7 +74,7 @@ def run_requirements_check(
         # Ambiguous Format Check (e.g. "instagram post")
         if spec.is_ambiguous:
             return IdeationPrompt(
-                message="For an Instagram post, which format do you prefer?",
+                message=f"For an {spec.label.split(' (')[0]}, which format do you prefer?",
                 options=[
                     IdeationOption(id="instagram_square", label="Square (1:1)", description="Standard feed post"),
                     IdeationOption(id="meta_portrait", label="Portrait (4:5)", description="Taller post, takes up more screen space"),

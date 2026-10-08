@@ -24,9 +24,10 @@ class BaseVideoGeneratorTool(Tool):
     name = "base_video_generator"
     description = (
         "Generates a short video clip by animating a source image with a motion prompt. "
+        "This tool CAN generate native synchronized audio (including talking, speech, and environmental sounds). "
+        "Use this native capability instead of triggering a separate audio generation step when natural sound is needed. "
         "model/resolution/duration_seconds/camera_motion are REQUIRED, no silent default — decide "
-        "each explicitly from what was actually asked (e.g. bytedance/seedance-2.0-fast for a "
-        "quick/cheap turnaround, google/veo for richer native audio or higher native resolution)."
+        "each explicitly from what was actually asked."
     )
     input_schema: ClassVar[dict] = {
         "type": "object",
@@ -41,6 +42,14 @@ class BaseVideoGeneratorTool(Tool):
                     "like an unrelated still."
                 ),
             },
+            "audio_storage_ref": {
+                "type": "string",
+                "description": (
+                    "Optional: pass an audio file (e.g. from text_to_speech) here to drive the video generation "
+                    "(e.g., for lip-syncing or audio-reactive video). If you just want native ambient audio, "
+                    "use generate_audio=true instead."
+                ),
+            },
             "camera_motion": {
                 "type": "string",
                 "description": (
@@ -50,10 +59,15 @@ class BaseVideoGeneratorTool(Tool):
                     "known cause of warping/jitter on this model family."
                 ),
             },
-            "aspect_ratio": {"type": "string"},
+            "aspect_ratio": {
+                "type": "string",
+                "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "9:21", "adaptive"],
+                "description": "Optional output aspect ratio. Defaults to 16:9 if omitted.",
+            },
             "resolution": {
                 "type": "string",
-                "description": "REQUIRED, no default — decide explicitly (e.g. '720p') every call.",
+                "enum": ["480p", "720p", "1080p", "1440p", "4K"],
+                "description": "REQUIRED, no default. Note: Seedance only supports up to 720p. You MUST select google/veo for 1080p or higher.",
             },
             "duration_seconds": {
                 "type": "integer",
@@ -65,15 +79,19 @@ class BaseVideoGeneratorTool(Tool):
             "model": {
                 "type": "string",
                 "enum": ["bytedance/seedance-2.0-fast", "google/veo"],
-                "description": "REQUIRED, no default — pick explicitly every call.",
+                "description": (
+                    "REQUIRED, no default — pick explicitly every call. "
+                    "Use 'bytedance/seedance-2.0-fast' for a quick/cheap turnaround (up to 720p only). "
+                    "Use 'google/veo' when the request requires richer native audio or higher native resolution (1080p+)."
+                ),
             },
             "generate_audio": {
                 "type": "boolean",
                 "description": (
                     "Whether the video model should generate its OWN native synchronized audio "
-                    "(ambient/dialogue/background). Set this explicitly: false when a separate "
-                    "scripted voiceover (sound_designer) will be muxed in instead, true/omit when "
-                    "the model's native audio is itself what's wanted."
+                    "(ambient/dialogue/background). Set to true if you want the model to generate its own native, "
+                    "synchronized audio (e.g., for talking or environmental sound). Set to false ONLY if you are "
+                    "explicitly layering a separately scripted voiceover later via a different tool."
                 ),
             },
         },
@@ -108,12 +126,20 @@ class BaseVideoGeneratorTool(Tool):
             if loaded_last_frame is not None:
                 last_frame_bytes = loaded_last_frame[0]
 
+        audio_bytes = None
+        audio_ref = str(args.get("audio_storage_ref") or "").strip()
+        if audio_ref:
+            loaded_audio = await load_asset(audio_ref)
+            if loaded_audio is not None:
+                audio_bytes = loaded_audio[0]
+
         provider = get_video_provider()
         try:
             result = await provider.generate(
                 prompt=prompt,
                 image_bytes=image_bytes,
                 last_frame_bytes=last_frame_bytes,
+                audio_bytes=audio_bytes,
                 duration_seconds=int(duration_seconds),
                 aspect_ratio=str(args.get("aspect_ratio") or "16:9"),
                 resolution=resolution,
