@@ -6,7 +6,7 @@ services:
       dockerfile: Dockerfile
     container_name: ams-backend
     ports:
-      - "8000:8000"
+      - "8080:8000"
     volumes:
       # Real, live-found fix (2026-09-26), made portable: a NAMED volume, not a bind mount of
       # this Mac's own `~/.cache/huggingface` — that path wouldn't exist (or would be empty) on
@@ -111,7 +111,7 @@ services:
         # not silently replaced by the localhost default. NOTE: because this is baked in at BUILD
         # time, changing it requires `docker compose build frontend` again — not picked up by
         # just restarting the container.
-        NEXT_PUBLIC_API_BASE_URL: "${PUBLIC_BACKEND_URL-http://localhost:8000}"
+        NEXT_PUBLIC_API_BASE_URL: "${PUBLIC_BACKEND_URL-http://localhost:8080}"
     container_name: ams-frontend
     ports:
       - "3000:3000"

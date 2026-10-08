@@ -34,7 +34,7 @@ const nextConfig = {
   // relative paths ("/api/v1/...") that this rewrite intercepts, same as the app's own Caddy
   // reverse-proxy setup already relies on for a shared-origin deployment.
   async rewrites() {
-    const backendOrigin = process.env.BACKEND_ORIGIN || "http://127.0.0.1:8000";
+    const backendOrigin = process.env.BACKEND_ORIGIN || "http://127.0.0.1:8080";
     console.log("Rewrites called. BACKEND_ORIGIN:", backendOrigin);
     return [{ source: "/api/:path*", destination: `${backendOrigin}/api/:path*` }];
   },

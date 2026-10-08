@@ -57,10 +57,10 @@ jobs:
             git reset --hard origin/main
             docker compose down
             
-            # Find and stop any specific container holding port 8000
-            CONFLICTING_CONTAINER=$(docker ps -q --filter "publish=8000")
+            # Find and stop any specific container holding port 8080
+            CONFLICTING_CONTAINER=$(docker ps -q --filter "publish=8080")
             if [ -n "$CONFLICTING_CONTAINER" ]; then
-              echo "Stopping container $CONFLICTING_CONTAINER that is holding port 8000..."
+              echo "Stopping container $CONFLICTING_CONTAINER that is holding port 8080..."
               docker stop $CONFLICTING_CONTAINER || true
               docker rm -f $CONFLICTING_CONTAINER || true
             fi
@@ -86,7 +86,7 @@ jobs:
             set -e
             cd ~/agentic-marketing-studio/poc
             for i in $(seq 1 12); do
-              if curl -sf http://localhost:8000/health >/dev/null; then
+              if curl -sf http://localhost:8080/health >/dev/null; then
                 echo "Backend healthy"
                 exit 0
               fi
