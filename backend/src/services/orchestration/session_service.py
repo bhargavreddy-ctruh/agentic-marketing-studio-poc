@@ -266,7 +266,7 @@ class SessionService:
         
         # Re-derive guardrails immediately so the frontend sees the new brand's DNA
         # rather than falling back to the old one.
-        from ....services.knowledge.guardrail_service import GuardrailService
+        from ..knowledge.guardrail_service import GuardrailService
         guardrail_svc = GuardrailService()
         await guardrail_svc.get_or_derive_for_session(session_id)
         

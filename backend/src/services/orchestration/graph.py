@@ -62,7 +62,7 @@ async def _emit_intermediate_element(
     import uuid
 
     from ...models.base import async_session_factory
-    from ...repositories.models import CanvasElementModel
+    from ...models.canvas_element import CanvasElementModel
     from ...repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
     from .session_service import _run_compliance_background
 
