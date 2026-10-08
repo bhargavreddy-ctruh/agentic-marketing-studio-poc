@@ -134,7 +134,8 @@ async def health() -> dict:
     return {
         "status": "ok",
         "langsmith_configured": bool(settings.langsmith_api_key),
-        "openrouter_configured": bool(settings.openrouter_api_key),
+        "gemini_configured": bool(settings.gemini_api_key),
+        "groq_configured": bool(settings.groq_api_key),
         "huggingface_configured": bool(settings.huggingface_api_token),
         "falai_configured": bool(settings.falai_api_key),
     }
