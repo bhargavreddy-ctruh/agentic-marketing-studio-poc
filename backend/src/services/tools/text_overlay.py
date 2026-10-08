@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import ClassVar
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from ...core.local_storage import load_asset, save_asset
 from .base import Tool, ToolResult
