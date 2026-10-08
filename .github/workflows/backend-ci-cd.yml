@@ -56,6 +56,10 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
             docker compose down
+            # Force-kill any orphaned container or process holding port 8000 before starting
+            docker rm -f $(docker ps -q -f "expose=8000") || true
+            fuser -k 8000/tcp || sudo fuser -k 8000/tcp || true
+            sleep 3
             docker compose up -d --build backend ollama
             docker image prune -f
 
