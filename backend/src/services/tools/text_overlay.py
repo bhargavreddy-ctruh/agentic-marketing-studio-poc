@@ -15,7 +15,7 @@ import urllib.request
 from pathlib import Path
 from typing import ClassVar
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from ...core.local_storage import load_asset, save_asset
 from .base import Tool, ToolResult
@@ -104,6 +104,35 @@ def _sanitize_for_default_font(text: str) -> str:
     return text.encode("ascii", errors="ignore").decode("ascii")
 
 
+def _auto_placement(image: Image.Image) -> str:
+    """Uses edge detection to find the flattest/emptiest zone in the image for perfect text placement."""
+    img = image.convert("L")
+    w, h = img.size
+    edges = img.filter(ImageFilter.FIND_EDGES)
+    
+    zones = {
+        "top left": (0, 0, w//3, h//3),
+        "top center": (w//3, 0, 2*w//3, h//3),
+        "top right": (2*w//3, 0, w, h//3),
+        "bottom left": (0, 2*h//3, w//3, h),
+        "bottom center": (w//3, 2*h//3, 2*w//3, h),
+        "bottom right": (2*w//3, 2*h//3, w, h),
+    }
+    
+    best_zone = "bottom center"
+    min_energy = float('inf')
+    
+    for name, box in zones.items():
+        region = edges.crop(box)
+        hist = region.histogram()
+        energy = sum(i * count for i, count in enumerate(hist))
+        if energy < min_energy:
+            min_energy = energy
+            best_zone = name
+            
+    return best_zone
+
+
 _PLACEMENTS = {
     "lower third": lambda w, h, tw, th: ((w - tw) // 2, int(h * 0.85) - th),
     "lower third, centered": lambda w, h, tw, th: ((w - tw) // 2, int(h * 0.85) - th),
@@ -134,8 +163,9 @@ class TextOverlayTool(Tool):
             "text": {"type": "string"},
             "placement": {
                 "type": "string", 
-                "enum": ["lower third", "lower third, centered", "bottom center", "top center", "bottom right", "bottom left", "top left", "top right"],
-                "default": "lower third"
+                "enum": ["auto", "lower third", "lower third, centered", "bottom center", "top center", "bottom right", "bottom left", "top left", "top right"],
+                "default": "auto",
+                "description": "Where to place the text. Use 'auto' to intelligently find free space."
             },
             "font_family": {
                 "type": "string", 
@@ -182,7 +212,11 @@ class TextOverlayTool(Tool):
             base = opened.convert("RGBA")
         width, height = base.size
 
-        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
+        if placement == "auto":
+            placement = _auto_placement(base)
+            print(f"Auto-selected placement: {placement}")
+
+        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["bottom center"])
 
         lines = [l.strip() for l in text.split('\n') if l.strip()]
         if not lines:
