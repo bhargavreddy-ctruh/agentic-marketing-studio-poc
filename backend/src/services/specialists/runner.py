@@ -346,7 +346,7 @@ async def run_specialist_agentic(
     spec = get_specialist(specialist_name)
     system_prompt = spec.load_prompt()
     
-    from ...core.events import get_current_guardrails_xml, _current_session_id
+    from ...core.events import _current_session_id, get_current_guardrails_xml
     guardrails_xml = get_current_guardrails_xml()
     if guardrails_xml:
         system_prompt += f"\n\n{guardrails_xml}\n"

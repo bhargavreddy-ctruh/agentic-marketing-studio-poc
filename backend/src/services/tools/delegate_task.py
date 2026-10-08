@@ -6,13 +6,13 @@ Includes strict guardrails: cycle detection (anti-ping-pong), depth limit (max 3
 from __future__ import annotations
 
 from contextvars import ContextVar
-from typing import ClassVar, Any
+from typing import Any, ClassVar
 
 from .base import Tool, ToolResult
 from .registry import register_tool
 
 # Track the call stack to prevent infinite recursion and cycles.
-_delegation_stack: ContextVar[list[str]] = ContextVar("_delegation_stack", default=[])
+_delegation_stack: ContextVar[list[str]] = ContextVar("_delegation_stack")
 MAX_DELEGATION_DEPTH = 3
 
 @register_tool("delegate_task")
@@ -57,8 +57,7 @@ class DelegateTaskTool(Tool):
         # Idempotency Check: if this job_id was already completed successfully, return the cached result.
         if job_id and job_id in self._completed_jobs:
             return ToolResult(ok=True, data=self._completed_jobs[job_id])
-
-        stack = _delegation_stack.get()
+        stack = _delegation_stack.get([])
 
         # Guardrail 1: Cycle Detection
         if target_name in stack:
@@ -82,7 +81,7 @@ class DelegateTaskTool(Tool):
 
         try:
             # Deferred import to prevent circular dependency since run_specialist_agentic uses tools.
-            from ..specialists.runner import run_specialist_agentic, _STEP_INSTRUCTION_MARKER
+            from ..specialists.runner import _STEP_INSTRUCTION_MARKER, run_specialist_agentic
             
             ctx = context or {}
             
@@ -112,7 +111,7 @@ class DelegateTaskTool(Tool):
         except Exception as e:
             # Safely catch SpecialistFailed and other errors to return cleanly to the delegator,
             # allowing the parent agent to handle the failure (e.g., retry or fallback).
-            return ToolResult(ok=False, data={}, error=f"Delegation to {target_name} failed: {str(e)}")
+            return ToolResult(ok=False, data={}, error=f"Delegation to {target_name} failed: {e!s}")
         finally:
             # Always reset the stack context when leaving
             _delegation_stack.reset(token)

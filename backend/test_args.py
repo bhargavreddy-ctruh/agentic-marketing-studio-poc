@@ -1,6 +1,7 @@
-from google import genai
 import inspect
-import sys
+
+from google import genai
+
 client = genai.Client(api_key='fake_key')
 sig = inspect.signature(client.interactions.create)
 print(sig.parameters)

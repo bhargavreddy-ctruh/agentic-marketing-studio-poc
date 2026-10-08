@@ -31,7 +31,7 @@ from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable, VisionPayloadTooLarge
 from ...core.middleware.logging import get_logger
 from ._openai_compatible import call_openai_compatible_chat
-from .base import LLMResult, ModelTier
+from .base import LLMResult
 from .key_cooldown import is_cooling_down, mark_rate_limited
 
 log = get_logger(__name__)

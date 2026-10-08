@@ -1,5 +1,8 @@
 import asyncio
+
 from google import genai
+
+
 async def main():
     client = genai.Client(api_key='fake_key')
     try:

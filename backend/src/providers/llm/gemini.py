@@ -71,7 +71,7 @@ class GeminiProvider(LLMProvider):
             if role == "system":
                 continue
                 
-            if "content" in m and m["content"]:
+            if m.get("content"):
                 parts.append({"text": str(m["content"])})
                 
             if "tool_calls" in m:
@@ -169,5 +169,5 @@ class GeminiProvider(LLMProvider):
                 return LLMResult(text=content, model=model, tool_calls=tool_calls)
 
         except Exception as e:
-            log.exception(f"Gemini API Error: {str(e)}")
-            raise ProviderUnavailable("gemini", f"{model} failed: {str(e)}")
+            log.exception("Gemini API Error")
+            raise ProviderUnavailable("gemini", f"{model} failed: {e!s}")

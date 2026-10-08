@@ -22,6 +22,7 @@ from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 from .gemini import GeminiProvider
 from .groq import GroqProvider
+
 log = get_logger(__name__)
 
 # Real, live-found noise/waste (2026-09-26, explicit user report — a screenshot showing the SAME

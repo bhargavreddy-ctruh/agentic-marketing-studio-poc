@@ -1,6 +1,9 @@
 import asyncio
-from src.core.config import settings
+
 from google import genai
+
+from src.core.config import settings
+
 
 async def main():
     api_key = settings.gemini_api_key

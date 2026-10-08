@@ -22,23 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
-from typing import Any
 
 from langgraph.graph import END, StateGraph
 
-from ...core.approval import is_approval, is_cancel
-from ...core.config import settings
 from ...core.element_context import get_verified_image_description
 from ...core.element_descriptions import NO_DESCRIPTION_SENTINEL
 from ...core.events import emit
 from ...core.exceptions import SpecialistFailed, SpecialistNeedsClarification, SpecialistNotFound
-from ...core.json_extract import extract_json
 from ...core.middleware.logging import get_logger
-from ...providers.llm.base import ModelTier
-from ...providers.llm.router import get_llm_provider
 from ...providers.observability.langsmith import traceable
 from ..ideation.ideation_service import run_ideation
 from ..leads.base import available_context_block
@@ -68,7 +59,6 @@ async def _emit_intermediate_element(
     product_id: str | None = None,
     parent_element_id: str | None = None,
 ):
-    import asyncio
     import uuid
 
     from ...models.base import async_session_factory

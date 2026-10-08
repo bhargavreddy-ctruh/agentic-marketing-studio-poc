@@ -1,8 +1,9 @@
-import pytest
 from unittest.mock import patch
 
-from src.providers.llm.base import ModelTier
+import pytest
 from src.providers.llm.replicate_llm import ReplicateLLMProvider
+
+from src.providers.llm.base import ModelTier
 
 
 def _fake_stream(model, input):

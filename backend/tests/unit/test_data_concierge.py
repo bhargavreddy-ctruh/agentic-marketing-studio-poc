@@ -1,10 +1,11 @@
-import pytest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.services.tools.registry import load_all_tools, get_tool
-from src.services.specialists.registry import load_all_specialists, SPECIALIST_REGISTRY
+import pytest
+
 from src.services.knowledge.data_concierge_service import DataConciergeService
+from src.services.specialists.registry import SPECIALIST_REGISTRY, load_all_specialists
+from src.services.tools.registry import get_tool, load_all_tools
+
 
 def test_data_concierge_tool_registration():
     load_all_tools()
