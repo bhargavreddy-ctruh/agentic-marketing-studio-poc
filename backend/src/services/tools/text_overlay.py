@@ -82,6 +82,9 @@ _UNSUPPORTED_GLYPHS = {
     "‘": "'", "’": "'",  # curly single quotes
     "“": '"', "”": '"',  # curly double quotes
     "…": "...",  # ellipsis
+    "₹": "Rs. ",
+    "€": "EUR ",
+    "£": "GBP ",
 }
 
 
@@ -92,6 +95,7 @@ def _sanitize_for_default_font(text: str) -> str:
     overlay string used an em dash and it rendered as a visible '☒' in the actual output image.
     Swaps the common "smart typography" characters an LLM is likely to produce for their ASCII
     equivalents rather than letting them render as broken boxes."""
+    text = text.replace('\\n', '\n')
     for bad, good in _UNSUPPORTED_GLYPHS.items():
         text = text.replace(bad, good)
     # Anything else outside ASCII (an emoji, an unusual currency symbol, etc.) is dropped rather
