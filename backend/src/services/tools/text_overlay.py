@@ -184,41 +184,94 @@ class TextOverlayTool(Tool):
 
         place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
 
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        if not lines:
+            lines = [text]
+
+        # Use Pillow to accurately measure and wrap text regardless of backend
+        dummy_img = Image.new("RGBA", (1, 1))
+        dummy_draw = ImageDraw.Draw(dummy_img)
+        max_w = int(width * 0.85)
+
+        def fit_text(text_lines, target_size):
+            size = target_size
+            while size >= 14:
+                font = _get_font(font_family, size)
+                wrapped_lines = []
+                for line in text_lines:
+                    words = line.split()
+                    curr = []
+                    for w in words:
+                        test_line = " ".join(curr + [w])
+                        if dummy_draw.textlength(test_line, font=font) <= max_w:
+                            curr.append(w)
+                        else:
+                            if curr:
+                                wrapped_lines.append(" ".join(curr))
+                                curr = [w]
+                            else:
+                                wrapped_lines.append(w)
+                                curr = []
+                    if curr:
+                        wrapped_lines.append(" ".join(curr))
+                if not any(dummy_draw.textlength(line, font=font) > max_w for line in wrapped_lines):
+                    return wrapped_lines, font, size
+                size -= 4
+            return text_lines, _get_font(font_family, 14), 14
+
+        headline_size = max(24, width // 15)
+        headline_lines, font_headline, final_h_size = fit_text([lines[0]], headline_size)
+        
+        subhead_size = max(16, int(final_h_size * 0.6))
+        subhead_lines, font_subhead, final_s_size = fit_text(lines[1:], subhead_size) if len(lines) > 1 else ([], None, 0)
+        
+        # Calculate bounding boxes
+        h_bbox = dummy_draw.multiline_textbbox((0,0), "\n".join(headline_lines), font=font_headline)
+        h_w, h_h = h_bbox[2] - h_bbox[0], h_bbox[3] - h_bbox[1]
+        
+        s_w, s_h = 0, 0
+        if subhead_lines:
+            s_bbox = dummy_draw.multiline_textbbox((0,0), "\n".join(subhead_lines), font=font_subhead)
+            s_w, s_h = s_bbox[2] - s_bbox[0], s_bbox[3] - s_bbox[1]
+            
+        total_w = max(h_w, s_w)
+        total_h = h_h + s_h + (subhead_size // 2 if subhead_lines else 0)
+        
+        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
+        x, y = place_fn(width, height, total_w, total_h)
+        
+        if "left" in placement:
+            align = "left"
+            hx = int(width * 0.075)
+            sx = int(width * 0.075)
+        elif "right" in placement:
+            align = "right"
+            hx = int(width * 0.925) - h_w
+            sx = int(width * 0.925) - s_w
+        else:
+            align = "center"
+            hx = x + (total_w - h_w) // 2
+            sx = x + (total_w - s_w) // 2
+
         # Try SVG backend if requested and cairosvg is installed
         if backend == "svg" and _CAIROSVG_AVAILABLE:
             try:
                 font_path = _ensure_font_file(font_family)
                 font_src = f"file://{font_path.absolute()}" if font_path else ""
                 
-                lines = [l.strip() for l in text.split('\n') if l.strip()]
-                if not lines:
-                    lines = [text]
-
-                headline = lines[0]
-                subheads = lines[1:]
-
-                headline_size = max(32, width // 12)
-                subhead_size = max(20, width // 26)
-
-                # Approximate total height for placement
-                total_text_h = headline_size + (len(subheads) * subhead_size * 1.3)
-                # Approximate width using the longest string
-                max_chars = max(len(l) for l in lines)
-                approx_text_w = max_chars * (headline_size * 0.6)
-
-                place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
-                x, y = place_fn(width, height, approx_text_w, total_text_h)
-                
-                # Determine text alignment and anchor X coordinate
-                if "left" in placement:
+                # SVG uses middle anchors for center alignment, start for left, end for right
+                if align == "left":
                     text_anchor = "start"
-                    anchor_x = int(width * 0.08)
-                elif "right" in placement:
+                    anchor_hx = hx
+                    anchor_sx = sx
+                elif align == "right":
                     text_anchor = "end"
-                    anchor_x = int(width * 0.92)
+                    anchor_hx = hx + h_w
+                    anchor_sx = sx + s_w
                 else:
                     text_anchor = "middle"
-                    anchor_x = width // 2
+                    anchor_hx = hx + (h_w // 2)
+                    anchor_sx = sx + (s_w // 2)
                 
                 font_face_rule = f"@font-face {{ font-family: '{font_family}'; src: url('{font_src}'); }}" if font_src else ""
 
@@ -230,7 +283,6 @@ class TextOverlayTool(Tool):
                 luminance = 0.299 * text_color[0] + 0.587 * text_color[1] + 0.114 * text_color[2]
                 grad_base = "255,255,255" if luminance < 128 else "0,0,0"
 
-                # A subtle, elegant gradient to ground the text, fading to transparent
                 gradient_svg = f"""
                   <linearGradient id="overlay-grad" x1="0%" y1="{grad_y1}" x2="0%" y2="{grad_y2}">
                     <stop offset="0%" stop-color="rgba({grad_base},0.8)" />
@@ -242,9 +294,17 @@ class TextOverlayTool(Tool):
                 """
 
                 # Build tspan elements
-                tspan_html = f'<tspan x="{anchor_x}" dy="0" class="overlay-headline">{headline}</tspan>'
-                for sub in subheads:
-                    tspan_html += f'\n<tspan x="{anchor_x}" dy="{subhead_size * 1.6}" class="overlay-subhead">{sub}</tspan>'
+                tspan_html = ""
+                for i, hl in enumerate(headline_lines):
+                    dy = 0 if i == 0 else int(final_h_size * 1.2)
+                    tspan_html += f'\n<tspan x="{anchor_hx}" dy="{dy}" class="overlay-headline">{hl}</tspan>'
+                
+                for i, sub in enumerate(subhead_lines):
+                    # add extra gap before first subhead
+                    dy = int(final_s_size * 1.6) if i == 0 else int(final_s_size * 1.2)
+                    if i == 0 and not headline_lines:
+                        dy = 0
+                    tspan_html += f'\n<tspan x="{anchor_sx}" dy="{dy}" class="overlay-subhead">{sub}</tspan>'
 
                 svg_content = f"""<svg width="{width}" height="{height}" xmlns="http://www.w3.org/2000/svg">
                   <defs>
@@ -252,14 +312,14 @@ class TextOverlayTool(Tool):
                       {font_face_rule}
                       .overlay-headline {{
                         font-family: '{font_family}', sans-serif;
-                        font-size: {headline_size}px;
+                        font-size: {final_h_size}px;
                         font-weight: 800;
                         fill: {text_color_hex};
                         letter-spacing: -0.02em;
                       }}
                       .overlay-subhead {{
                         font-family: '{font_family}', sans-serif;
-                        font-size: {subhead_size}px;
+                        font-size: {final_s_size}px;
                         font-weight: 400;
                         fill: {text_color_hex};
                         opacity: 0.9;
@@ -267,7 +327,7 @@ class TextOverlayTool(Tool):
                     </style>
                   </defs>
                   {gradient_svg}
-                  <text x="{anchor_x}" y="{y + headline_size}" text-anchor="{text_anchor}">{tspan_html}</text>
+                  <text x="0" y="{y + final_h_size}" text-anchor="{text_anchor}">{tspan_html}</text>
                 </svg>"""
 
                 png_bytes = cairosvg.svg2png(bytestring=svg_content.encode("utf-8"))
@@ -293,72 +353,6 @@ class TextOverlayTool(Tool):
         # Fallback / Pillow backend
         overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(overlay)
-        
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
-        if not lines:
-            lines = [text]
-
-        max_w = int(width * 0.85)
-        
-        def fit_text(text_lines, target_size):
-            size = target_size
-            while size >= 14:
-                font = _get_font(font_family, size)
-                wrapped_lines = []
-                for line in text_lines:
-                    words = line.split()
-                    curr = []
-                    for w in words:
-                        test_line = " ".join(curr + [w])
-                        if draw.textlength(test_line, font=font) <= max_w:
-                            curr.append(w)
-                        else:
-                            if curr:
-                                wrapped_lines.append(" ".join(curr))
-                                curr = [w]
-                            else:
-                                wrapped_lines.append(w)
-                                curr = []
-                    if curr:
-                        wrapped_lines.append(" ".join(curr))
-                if not any(draw.textlength(line, font=font) > max_w for line in wrapped_lines):
-                    return wrapped_lines, font, size
-                size -= 4
-            return text_lines, _get_font(font_family, 14), 14
-
-        headline_size = max(24, width // 15)
-        headline_lines, font_headline, final_h_size = fit_text([lines[0]], headline_size)
-        
-        subhead_size = max(16, int(final_h_size * 0.6))
-        subhead_lines, font_subhead, _ = fit_text(lines[1:], subhead_size) if len(lines) > 1 else ([], None, 0)
-        
-        # Calculate bounding boxes
-        h_bbox = draw.multiline_textbbox((0,0), "\n".join(headline_lines), font=font_headline)
-        h_w, h_h = h_bbox[2] - h_bbox[0], h_bbox[3] - h_bbox[1]
-        
-        s_w, s_h = 0, 0
-        if subhead_lines:
-            s_bbox = draw.multiline_textbbox((0,0), "\n".join(subhead_lines), font=font_subhead)
-            s_w, s_h = s_bbox[2] - s_bbox[0], s_bbox[3] - s_bbox[1]
-            
-        total_w = max(h_w, s_w)
-        total_h = h_h + s_h + (subhead_size // 2 if subhead_lines else 0)
-        
-        place_fn = _PLACEMENTS.get(placement, _PLACEMENTS["lower third"])
-        x, y = place_fn(width, height, total_w, total_h)
-        
-        if "left" in placement:
-            align = "left"
-            hx = int(width * 0.075)
-            sx = int(width * 0.075)
-        elif "right" in placement:
-            align = "right"
-            hx = int(width * 0.925) - h_w
-            sx = int(width * 0.925) - s_w
-        else:
-            align = "center"
-            hx = x + (total_w - h_w) // 2
-            sx = x + (total_w - s_w) // 2
 
         # Smooth alpha gradient background
         is_top = "top" in placement
