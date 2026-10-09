@@ -98,7 +98,7 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 7c. **Genuinely ambiguous between 7a/7b:** if the message gives no real signal either way (no format keyword, no "turn this into X", just a vague "do something with this"), treat it as 7a (direct_fix) — the safer default — rather than guessing a new deliverable format that wasn't asked for.
 Examples: "strike out the old price on this" -> 7a, direct_fix -> composition_artist. "add a 20% off badge to this" -> 7a, direct_fix -> overlay_artist. "make a youtube thumbnail out of this product photo" -> 7b, dynamic -> illustrator (image-to-image, 16:9, dramatic). "turn this product shot into an Instagram story" -> 7b, dynamic -> illustrator (image-to-image, 9:16). "make an exciting unboxing video of this product photo" -> 7b-video, dynamic -> camera_director (single shot, animates the referenced photo). "tell a 3-shot story about this product launching, ending on this photo" -> dynamic -> camera_director (genuine multi-shot narrative). "a crazy collab image with a banner reading 'SALE' in bold neon letters" -> 5b in-scene case, dynamic -> illustrator only (render the neon sign as part of the scene in its own image prompt; do NOT add an overlay_artist step). "a product shot with a 20% off price badge in the corner" -> 5b flat-overlay case, dynamic -> illustrator then overlay_artist (the price badge is a precise flat overlay).
 8. **Cross-Referencing & Memory:** You will be provided with retrieved long-term memory and multiple referenced elements if applicable. Use this history and cross-reference information to build highly accurate 'dynamic' plans or pick the right 'direct_fix' specialist.
-9. **Element Disambiguation:** When several existing elements are shown as candidates rather than one confirmed reference, determine WHICH elements (if any) the message explicitly targets. If the request applies to multiple elements (e.g., "add a logo to both", "change the text on these"), you MUST set `resolved_element_ids` to an array of those IDs and spawn a 'dynamic' plan that executes the change on each targeted ID concurrently. If the request is an edit or tweak but genuinely ambiguous about which element to modify (e.g., "make it pop", "recolor it" with 2+ candidates and no target specified), do NOT guess or default blindly to the latest tile. Set `resolved_element_ids` to `null` and instruct the first specialist in your plan to ask the user for clarification. Only set `resolved_element_ids` when the user's message or context makes the target elements unambiguous.
+9. **Element Disambiguation:** When several existing elements are shown as candidates rather than one confirmed reference, determine WHICH elements (if any) the message explicitly targets. If the request applies to multiple elements (e.g., "add a logo to both", "change the text on these"), you MUST set `resolved_element_ids` to an array of those IDs and spawn a 'dynamic' plan that executes the change on each targeted ID concurrently. If the request is an edit or tweak but genuinely ambiguous about which element to modify (e.g., "make it pop", "recolor it" with 2+ candidates and no target specified), do NOT guess or default blindly to the latest tile. Simply set `resolved_element_ids` to `null` and return a standard generation plan as if the target were known; the system will automatically pause and ask the user to clarify before executing it. Only set `resolved_element_ids` when the user's message or context makes the target elements unambiguous.
 10. **Parallel Steps (only in a 'dynamic' plan, only when genuinely independent):** If two or more steps each generate a completely FRESH, independent asset from scratch that do NOT depend on each other's output (e.g. two separate illustrator variants for A/B options, or an illustrator image alongside an unrelated sound_designer voiceover) — no need for one to have finished before the other starts — give them the SAME `parallel_group` number so they can run concurrently. NEVER put a step that EDITS an existing asset (composition_artist, prop_stylist, lighting_designer, overlay_artist) in a group with anything else, and NEVER group a step that needs another step's own not-yet-produced storage_ref — those must stay ungrouped (omit `parallel_group`, or give it a number no other step shares) so they run in your intended order. When genuinely unsure whether two steps are independent, leave `parallel_group` unset — sequential is always correct, grouping wrongly is not.
 11. **Sticky Focus:** If context states which specialist handled the PREVIOUS turn, and the user's current message is a short follow-up tweak with no new subject/domain named (e.g. "make it bigger", "a bit more to the left", "try that again but bolder") — prefer `direct_fix` straight back to that SAME specialist rather than reclassifying from scratch. Only move away from it when the message clearly names a different deliverable type, a different subject, or a new piece of work entirely — this is your own judgment call, not a hard rule to apply blindly when the intent has genuinely shifted.
 </rules>
@@ -299,6 +299,26 @@ async def route(state: GraphState) -> GraphState:
                 if el:
                     matched.append(el)
             
+            if not matched:
+                # The model couldn't disambiguate. Pause and ask the user directly!
+                options = [
+                    {"id": str(el.get("id")), "label": str(el.get("element_type", "Element")).title(), "description": str(el.get("description", ""))}
+                    for el in referenced_elements
+                ]
+                state["paused_plan"] = {
+                    "route": "element_disambiguation",
+                    "original_message": user_message,
+                    "referenced_elements": referenced_elements,
+                }
+                state["result"] = {
+                    "message": "Which element from the canvas would you like to use?",
+                    "options": options,
+                    "allow_free_text": True,
+                }
+                state["route"] = "element_disambiguation"
+                emit("lead_paused", lead="orchestrator", question=state["result"]["message"])
+                return state
+
             brief["referenced_elements_context"] = matched
             brief.pop("_element_disambiguation_needed", None)
             state["brief"] = brief

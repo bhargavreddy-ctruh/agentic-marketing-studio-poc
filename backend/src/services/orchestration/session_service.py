@@ -990,6 +990,18 @@ class SessionService:
                             "user_message": combined_message, "brief": resume_brief,
                         }
                     )
+            elif paused_plan.get("route") == "element_disambiguation":
+                original_message = paused_plan.get("original_message", "")
+                combined_message = f"{original_message}\n[User clarified their target element: {answer_text}]".strip()
+                resume_brief["idea"] = combined_message
+                resume_state["user_message"] = combined_message
+                graph = get_graph()
+                result_state = await graph.ainvoke(
+                    {
+                        "session_id": session.id, "user_id": session.user_id,
+                        "user_message": combined_message, "brief": resume_brief,
+                    }
+                )
             elif paused_plan.get("route") == "direct_fix":
                 emit("ideation_started")
                 emit("ideation_completed", ready=True)
