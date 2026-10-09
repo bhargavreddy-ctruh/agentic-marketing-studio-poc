@@ -279,7 +279,13 @@ export function ChatBubble({ m, lastPlanMessageId, pipelineNodes, handlePickOpti
               ))}
               {m.allowFreeText && (
                 <button
-                  onClick={() => handlePickOption?.({ id: "free_text", label: "✎", description: "Answer below..." })}
+                  onClick={() => {
+                    if (handleOther) {
+                      handleOther();
+                    } else {
+                      handlePickOption?.({ id: "free_text", label: "✎", description: "Answer below..." });
+                    }
+                  }}
                   disabled={loading}
                   className="flex items-center gap-3 rounded-xl border border-dashed border-surface-700 bg-transparent px-4 py-2.5 text-left text-sm hover:bg-surface-800/50 disabled:opacity-50 transition-all text-surface-400 hover:text-surface-300"
                 >

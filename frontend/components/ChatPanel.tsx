@@ -683,6 +683,7 @@ function ChatPanel(
             lastPlanMessageId={lastPlanMessageId}
             pipelineNodes={pipelineNodes}
             handlePickOption={handlePickOption}
+            handleOther={handleOther}
             loading={loading}
           />
         ))}
