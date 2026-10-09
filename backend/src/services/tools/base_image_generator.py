@@ -1,8 +1,7 @@
 """
 Base Image Generator tool — Architecture.md section 1b. Wraps whichever ImageGenProvider is
-currently active (`alibaba/qwen-image-3` via Replicate today — see `replicate_provider.py`;
-Gemini/Vertex/Bedrock/Pollinations provider files exist but are unwired). The specialist calling
-this never knows which provider actually ran.
+currently active (`alibaba/qwen-image-3` via Replicate today — see `replicate_provider.py`). The
+specialist calling this never knows which provider actually ran.
 """
 from __future__ import annotations
 

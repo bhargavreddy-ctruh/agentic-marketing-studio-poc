@@ -109,15 +109,9 @@ class Settings(BaseSettings):
     kokoro_voice: str = "af_heart"
 
     # --- Video generation ---
-    falai_api_key: str | None = None
-    falai_base_url: str = "https://queue.fal.run"
-    falai_model: str = "fal-ai/kling-video/v1.6/standard/image-to-video"
-    falai_poll_interval_seconds: float = 4.0
-    falai_max_poll_attempts: int = 60  # ~4 minutes, matching the ~5 minute video job target
-
-    # Replicate — added as a second video provider option (Memory.md, Phase 2): fal.ai's account
-    # balance was found exhausted during real testing, so this exists as an alternative to try
-    # once a real key is added, not because fal.ai's provider code was wrong.
+    # fal.ai (Kling) was removed (2026-10-09) — its API key/account balance came back revoked
+    # during testing and it was never actually wired into `get_video_provider()`; dead
+    # config/provider code, not a real fallback. Replicate is the only video provider now.
     # bytedance/seedance-2.0-fast (2026-09-25, replacing prunaai/p-video — see
     # providers/video/replicate.py's own docstring): real duration/resolution/aspect_ratio input
     # fields, confirmed live against the model's own schema, not a text-to-video guess.

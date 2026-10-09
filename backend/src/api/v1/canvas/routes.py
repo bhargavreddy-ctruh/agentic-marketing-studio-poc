@@ -12,11 +12,15 @@ import uuid
 from fastapi import APIRouter, UploadFile
 from fastapi.responses import Response
 
-from ....core.exceptions import NotFoundError, ValidationFailed
+from ....core.exceptions import Forbidden, NotFoundError, ValidationFailed
 from ....core.local_storage import load_asset, save_asset
 from ....core.mime_sniff import sniff_image_mime
 from ....mappers.canvas_mapper import CanvasMapper
 from ....models.canvas_element import CanvasElementModel
+from ....models.session import SessionModel
+from ....models.user import UserModel
+from ....repositories.postgres.postgres_canvas_repository import PostgresCanvasRepository
+from ....repositories.postgres.postgres_session_repository import PostgresSessionRepository
 from ....schemas.canvas.requests import (
     CommentRequest,
     CreateElementRequest,
@@ -37,6 +41,7 @@ from ....services.compliance.compliance_gate import run_compliance_gate
 from ...dependencies import (
     CanvasRepositoryDep,
     CanvasVersionRepositoryDep,
+    CurrentUserDep,
     ProductRepositoryDep,
     SessionRepositoryDep,
     VersioningServiceDep,
@@ -45,8 +50,44 @@ from ...dependencies import (
 router = APIRouter(prefix="/api/v1/canvas", tags=["canvas"])
 
 
+async def _owned_session(
+    session_id: str, sessions: PostgresSessionRepository, current_user: UserModel
+) -> SessionModel:
+    """Every canvas route that's keyed by a session_id goes through this first (closing a real,
+    disclosed gap — this whole router used to have no auth dependency at all, so anyone who knew
+    or guessed a session id could read/mutate its canvas). Same ownership rule
+    `session_service.py`'s own `_get_owned_session` already enforces for every session-level route;
+    duplicated here rather than imported because this router never otherwise depends on
+    `SessionService` itself."""
+    session = await sessions.get(session_id)
+    if session is None:
+        raise NotFoundError("Session", session_id)
+    if session.user_id != current_user.id:
+        raise Forbidden("This workflow belongs to a different user")
+    return session
+
+
+async def _owned_element(
+    element_id: str,
+    canvas: PostgresCanvasRepository,
+    sessions: PostgresSessionRepository,
+    current_user: UserModel,
+) -> CanvasElementModel:
+    """Every canvas route that's keyed by an element_id goes through this — resolves the element,
+    then checks ownership via the SESSION it belongs to (elements have no `user_id` column of
+    their own)."""
+    element = await canvas.get_element(element_id)
+    if element is None:
+        raise NotFoundError("CanvasElement", element_id)
+    await _owned_session(element.session_id, sessions, current_user)
+    return element
+
+
 @router.get("/{session_id}", response_model=CanvasStateResponse)
-async def get_canvas_state(session_id: str, repo: CanvasRepositoryDep) -> CanvasStateResponse:
+async def get_canvas_state(
+    session_id: str, repo: CanvasRepositoryDep, sessions: SessionRepositoryDep, current_user: CurrentUserDep
+) -> CanvasStateResponse:
+    await _owned_session(session_id, sessions, current_user)
     elements = await repo.list_for_session(session_id)
     return await CanvasMapper.to_state_response(session_id, elements)
 
@@ -65,16 +106,12 @@ async def create_element(
     canvas: CanvasRepositoryDep,
     sessions: SessionRepositoryDep,
     products: ProductRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> CanvasElementResponse:
     """The real backend half of "Upload Media" / "New Image" / "New Video" / "New Audio" / "Paste"
     (right-click canvas menu, 2026-09-22) — places an already-uploaded asset (`POST /assets`)
-    directly onto the canvas as a brand-new element, no specialist/model call involved. No auth
-    dependency here, matching every other route in this router today (a real, pre-existing,
-    disclosed gap — see Tasks_Workflows.md #3's note on canvas routes) rather than introducing
-    inconsistent enforcement in one route alone."""
-    session = await sessions.get(session_id)
-    if session is None:
-        raise NotFoundError("Session", session_id)
+    directly onto the canvas as a brand-new element, no specialist/model call involved."""
+    session = await _owned_session(session_id, sessions, current_user)
     loaded = await load_asset(body.storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", body.storage_ref)
@@ -151,16 +188,16 @@ async def group_element(
     element_id: str,
     body: GroupElementRequest,
     canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
     products: ProductRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> CanvasElementResponse:
     """The manual grouping/correction path Fix 6 adds (2026-09-26) — until now, an element's
     `product_id` was write-once (set only at generation/upload time, sometimes wrong, never
     correctable). `body.product_id: null` explicitly ungroups; a real id groups/regroups — the
     real name is looked up server-side, never trusted from the client, same as every other
     product-id-accepting route in this app."""
-    element = await canvas.get_element(element_id)
-    if element is None:
-        raise NotFoundError("CanvasElement", element_id)
+    element = await _owned_element(element_id, canvas, sessions, current_user)
     if body.product_id is None:
         element.product_id = None
         element.product_name = None
@@ -175,24 +212,28 @@ async def group_element(
 
 
 @router.delete("/elements/{element_id}", status_code=204)
-async def delete_element(element_id: str, canvas: CanvasRepositoryDep) -> Response:
+async def delete_element(
+    element_id: str, canvas: CanvasRepositoryDep, sessions: SessionRepositoryDep, current_user: CurrentUserDep
+) -> Response:
     """Permanently removes one canvas element and its version history (per-element delete, not
     the whole session) — same shape as `DELETE /sessions/{id}` (`api/v1/sessions/routes.py`):
-    404 if it never existed, bare 204 on success. No ownership check here, matching every other
-    route in this file today (a disclosed, pre-existing gap — `create_element`'s own docstring
-    already notes canvas routes have no auth dependency yet)."""
-    element = await canvas.get_element(element_id)
-    if element is None:
-        raise NotFoundError("CanvasElement", element_id)
+    404 if it never existed, bare 204 on success."""
+    await _owned_element(element_id, canvas, sessions, current_user)
     await canvas.delete_element(element_id)
     return Response(status_code=204)
 
 
 @router.get("/assets/{storage_ref}")
-async def get_asset(storage_ref: str) -> Response:
+async def get_asset(storage_ref: str, current_user: CurrentUserDep) -> Response:
     """Streams the real bytes behind a storage_ref (Phase 4b) — every other endpoint here returns
     metadata only (storage_ref strings), so this is the one route the frontend canvas actually
-    loads pixels/video/audio from, e.g. `<img src="/api/v1/canvas/assets/{storage_ref}">`."""
+    loads pixels/video/audio from, e.g. `<img src="/api/v1/canvas/assets/{storage_ref}">`.
+
+    Requires login, but NOT per-owner checked — a `storage_ref` has no reverse index back to the
+    canvas element(s)/session that reference it, so a real ownership check here would mean scanning
+    every canvas element for a match on every image load, which is not worth the cost for a random,
+    unguessable, content-addressed blob id. This still closes the real gap (fully anonymous access)
+    while leaving pixel data behind the same login every other canvas route now requires."""
     loaded = await load_asset(storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", storage_ref)
@@ -201,16 +242,21 @@ async def get_asset(storage_ref: str) -> Response:
 
 
 @router.post("/elements/{element_id}/compliance", response_model=ComplianceGateResponse)
-async def check_compliance(element_id: str, repo: CanvasRepositoryDep) -> ComplianceGateResponse:
+async def check_compliance(
+    element_id: str, repo: CanvasRepositoryDep, sessions: SessionRepositoryDep, current_user: CurrentUserDep
+) -> ComplianceGateResponse:
+    await _owned_element(element_id, repo, sessions, current_user)
     result = await run_compliance_gate(canvas=repo, element_id=element_id)
     return ComplianceGateResponse(**result)
 
 
 @router.post("/assets", response_model=AssetUploadResponse)
-async def upload_asset(file: UploadFile) -> AssetUploadResponse:
+async def upload_asset(file: UploadFile, current_user: CurrentUserDep) -> AssetUploadResponse:
     """Persists a client-produced asset (e.g. a direct edit's resulting image, cropped/retouched
     in the browser) and returns its storage_ref — the seam between client-side pixel work and the
-    server-side canvas element it gets attached to via PUT .../direct-edit below."""
+    server-side canvas element it gets attached to via PUT .../direct-edit below. Requires login
+    (no session/element context exists yet at this point to check ownership against — the same
+    shape as `POST /elements` further up)."""
     data = await file.read()
     mime = sniff_image_mime(data, file.content_type)
     storage_ref = await save_asset(data, mime, metadata={"source": "direct_edit_upload"})
@@ -224,13 +270,12 @@ async def direct_edit_element(
     canvas: CanvasRepositoryDep,
     versioning: VersioningServiceDep,
     sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> CanvasElementResponse:
     """A direct edit — no model call (Architecture.md section 1c). The actual crop/retouch/recolor
     happens client-side; this records the already-uploaded result — staged for explicit approval
     (Memory.md, Phase 4; "auto" mode removed 2026-10-07)."""
-    element = await canvas.get_element(element_id)
-    if element is None:
-        raise NotFoundError("CanvasElement", element_id)
+    element = await _owned_element(element_id, canvas, sessions, current_user)
     session = await sessions.get(element.session_id)
     updated = await versioning.apply_or_stage(
         element,
@@ -249,9 +294,11 @@ async def targeted_regenerate(
     canvas: CanvasRepositoryDep,
     versions: CanvasVersionRepositoryDep,
     sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> CanvasElementResponse:
     """Targeted regenerate — invokes exactly the ONE specialist that produced this element, not
     the whole Lead (Architecture.md section 1c)."""
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await regenerate_element(
         canvas=canvas, versions=versions, sessions=sessions, element_id=element_id, instruction=body.instruction
     )
@@ -265,10 +312,12 @@ async def comment_on_element(
     canvas: CanvasRepositoryDep,
     versions: CanvasVersionRepositoryDep,
     sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> CanvasElementResponse:
     """A comment — resolved into a scoped instruction against whichever specialist the comment's
     real content matches, not necessarily the one that originally produced the element
     (Architecture.md section 1c)."""
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await resolve_comment(
         canvas=canvas, versions=versions, sessions=sessions, element_id=element_id, comment=body.text
     )
@@ -276,36 +325,69 @@ async def comment_on_element(
 
 
 @router.post("/elements/{element_id}/approve-edit", response_model=CanvasElementResponse)
-async def approve_pending_edit(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
+async def approve_pending_edit(
+    element_id: str,
+    versioning: VersioningServiceDep,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
+) -> CanvasElementResponse:
     """"approve" mode only (Memory.md, Phase 4): commits a staged regenerate/comment/direct-edit
     result as the new current version. A no-op error if there's nothing pending."""
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await versioning.approve_pending_edit(element_id)
     return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/reject-edit", response_model=CanvasElementResponse)
-async def reject_pending_edit(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
+async def reject_pending_edit(
+    element_id: str,
+    versioning: VersioningServiceDep,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
+) -> CanvasElementResponse:
     """"approve" mode only: discards a staged edit — the current version is untouched."""
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await versioning.reject_pending_edit(element_id)
     return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/undo", response_model=CanvasElementResponse)
-async def undo_element(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
+async def undo_element(
+    element_id: str,
+    versioning: VersioningServiceDep,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
+) -> CanvasElementResponse:
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await versioning.undo(element_id)
     return await CanvasMapper.to_response(updated)
 
 
 @router.post("/elements/{element_id}/redo", response_model=CanvasElementResponse)
-async def redo_element(element_id: str, versioning: VersioningServiceDep) -> CanvasElementResponse:
+async def redo_element(
+    element_id: str,
+    versioning: VersioningServiceDep,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
+) -> CanvasElementResponse:
+    await _owned_element(element_id, canvas, sessions, current_user)
     updated = await versioning.redo(element_id)
     return await CanvasMapper.to_response(updated)
 
 
 @router.get("/elements/{element_id}/versions", response_model=list[CanvasElementVersionResponse])
 async def list_element_versions(
-    element_id: str, versioning: VersioningServiceDep
+    element_id: str,
+    versioning: VersioningServiceDep,
+    canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ) -> list[CanvasElementVersionResponse]:
+    await _owned_element(element_id, canvas, sessions, current_user)
     versions = await versioning.list_versions(element_id)
     return [
         CanvasElementVersionResponse(version=v.version, storage_ref=v.storage_ref, created_at=v.created_at)
@@ -332,6 +414,9 @@ AD_SPECS = {
 
 @router.get("/ad-specs")
 async def list_ad_specs():
+    """Static, non-user-specific reference data (supported export dimensions) — left open
+    deliberately, unlike every other route in this file; there's no session/element/product id and
+    nothing here varies per user."""
     return AD_SPECS
 
 
@@ -347,11 +432,10 @@ async def masked_edit_element(
     canvas: CanvasRepositoryDep,
     versioning: VersioningServiceDep,
     sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ):
-    element = await canvas.get_element(element_id)
-    if element is None:
-        raise NotFoundError("CanvasElement", element_id)
-        
+    element = await _owned_element(element_id, canvas, sessions, current_user)
+
     src_loaded = await load_asset(element.storage_ref)
     mask_loaded = await load_asset(body.mask_storage_ref)
     if src_loaded is None or mask_loaded is None:
@@ -389,11 +473,11 @@ async def masked_edit_element(
 async def export_all_ad_specs(
     element_id: str,
     canvas: CanvasRepositoryDep,
+    sessions: SessionRepositoryDep,
+    current_user: CurrentUserDep,
 ):
-    element = await canvas.get_element(element_id)
-    if element is None:
-        raise NotFoundError("CanvasElement", element_id)
-        
+    element = await _owned_element(element_id, canvas, sessions, current_user)
+
     loaded = await load_asset(element.storage_ref)
     if loaded is None:
         raise NotFoundError("Asset", element.storage_ref)

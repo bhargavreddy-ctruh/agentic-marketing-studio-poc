@@ -1,14 +1,12 @@
 """
-THE ONLY file that talks to Replicate's API — a second video-generation option alongside fal.ai
-(Architecture.md's provider-registry pattern: adding this is one new file, zero changes to any
-other provider, tool, or specialist).
-
-Added specifically because real testing found fal.ai's account balance exhausted (Memory.md,
-Phase 2) — not because fal.ai's own provider code was wrong.
+THE ONLY file that talks to Replicate's API — the sole video-generation provider
+(Architecture.md's provider-registry pattern: adding a provider is one new file, zero changes to
+any other provider, tool, or specialist). A fal.ai provider existed earlier but was removed
+(2026-10-09) after its account balance came back revoked during testing and it never shipped.
 
 Uses the official `replicate` Python SDK directly (matches Replicate's own documented usage for
 this exact model, and the SDK handles uploading local image bytes automatically — no manual
-base64 data-URI construction needed, unlike fal.ai's raw-REST provider).
+base64 data-URI construction needed).
 
 Default model: `bytedance/seedance-2.0-fast` (2026-09-25, replacing `prunaai/p-video` — real,
 current schema confirmed live against api.replicate.com/v1/models/bytedance/seedance-2.0-fast, per
@@ -185,9 +183,8 @@ _singleton: ReplicateVideoProvider | None = None
 
 def get_video_provider() -> VideoGenProvider:
     """The active VideoGenProvider — callers depend on this, never the concrete class directly
-    (Rules.md section 1: Dependency Inversion). fal.ai stays a registered provider file but isn't
-    wired here (its key came back revoked on live testing — Memory.md, Phase 2); pointing this at
-    a different provider later is a one-line change here, not in every tool that generates video."""
+    (Rules.md section 1: Dependency Inversion). Pointing this at a different provider later is a
+    one-line change here, not in every tool that generates video."""
     global _singleton
     if _singleton is None:
         _singleton = ReplicateVideoProvider()

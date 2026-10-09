@@ -32,7 +32,6 @@ _BOOL_KEYS = {
 # Plain string Settings fields that ARE baked into a provider constructor.
 _STR_SETTINGS_KEYS = {
     "groq_api_key",
-    "falai_api_key",
     "replicate_api_token",
     "langsmith_api_key",
     "gemini_api_key",
@@ -56,6 +55,9 @@ _ENV_ONLY_KEYS = {"cloudinary_url": "CLOUDINARY_URL"}
 # reachable LLM chain). Kept in the DB briefly for consistency with a prior investigation, but
 # there's no reason to keep listing keys that affect nothing live — see the plan's own note on
 # deleting the now-stale rows from `app_settings` directly in Supabase.
+# 2026-10-09: `falai_api_key` removed the same way — fal.ai was never wired into
+# `get_video_provider()` (its account balance came back revoked during testing), so this key
+# affected nothing live either. The provider file itself (`providers/video/falai.py`) was deleted.
 WHITELIST: set[str] = _STR_SETTINGS_KEYS | _BOOL_KEYS | set(_ENV_ONLY_KEYS)
 
 _KEY_TO_RESETTERS: dict[str, list[Callable[[], None]]] = {

@@ -3,10 +3,9 @@ Base Video Generator tool — Architecture.md section 1b. Wraps whichever VideoG
 currently active.
 
 Replicate (`bytedance/seedance-2.0-fast`, 2026-09-25 — replacing `prunaai/p-video`, see
-`providers/video/replicate.py`'s own docstring) is the active provider and the only
-currently-funded video credential; fal.ai stays registered as a provider file but is not wired
-here (its key came back revoked on live testing). Swapping providers later is a one-line change in
-this file, per Rules.md section 1/2 — no specialist or Lead file changes.
+`providers/video/replicate.py`'s own docstring) is the only video provider. Swapping providers
+later is a one-line change in this file, per Rules.md section 1/2 — no specialist or Lead file
+changes.
 """
 from __future__ import annotations
 

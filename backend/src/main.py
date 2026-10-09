@@ -136,6 +136,5 @@ async def health() -> dict:
         "langsmith_configured": bool(settings.langsmith_api_key),
         "gemini_configured": bool(settings.gemini_api_key),
         "groq_configured": bool(settings.groq_api_key),
-        "falai_configured": bool(settings.falai_api_key),
         "replicate_configured": bool(settings.replicate_api_token),
     }
