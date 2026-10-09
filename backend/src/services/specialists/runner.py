@@ -966,13 +966,38 @@ async def run_concurrent_specialists(
     names = list(branches.keys())
     results = await asyncio.gather(*branches.values(), return_exceptions=True)
     out: dict[str, AgenticStepResult] = {}
+    clarifications = []
+    for name, result in zip(names, results):
+        if isinstance(result, SpecialistNeedsClarification):
+            clarifications.append((name, result))
+            
+    if clarifications:
+        if len(clarifications) == 1:
+            raise clarifications[0][1]
+        else:
+            combined_q = "Several specialists need your input before they can proceed:\n\n"
+            for name, exc in clarifications:
+                combined_q += f"- **{name}**: {exc.question}\n"
+            # Raise a single merged exception. We default to free text since merging structured options is complex.
+            first_exc = clarifications[0][1]
+            merged_exc = SpecialistNeedsClarification(
+                specialist_name="Multiple Specialists",
+                question=combined_q.strip(),
+                options=[], 
+                allow_free_text=True
+            )
+            # Carry over the step index of the first one so the graph knows where to resume
+            merged_exc.step_index = getattr(first_exc, "step_index", 0)
+            merged_exc.specialist_name_at_step = "Multiple Specialists"
+            raise merged_exc
+
     for name, result in zip(names, results):
         if isinstance(result, BaseException):
             # A genuine question (2026-09-30) is never a "this one branch failed, degrade
             # gracefully" situation — silently swallowing it into an empty result would discard
             # the specialist's real question entirely, worse than surfacing nothing at all.
             # Always re-raised regardless of `critical`, so the whole plan genuinely pauses.
-            if isinstance(result, SpecialistNeedsClarification) or name in critical:
+            if name in critical:
                 raise result
             log.warning(
                 "concurrent_specialist_degraded",
