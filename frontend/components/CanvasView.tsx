@@ -401,7 +401,7 @@ function CanvasView({
     const el = elements.find((e) => e.id === tileId);
     if (!el) return;
 
-    const currentlyReferenced = elements
+    let currentlyReferenced = elements
       .filter(e => referencedElementIds?.includes(e.id))
       .map(e => ({
         id: e.id,
@@ -411,6 +411,16 @@ function CanvasView({
         productId: e.product_id,
         productName: e.product_name,
       }));
+
+    // Enforce single product: if clicking a different product, clear the selection
+    if (currentlyReferenced.length > 0 && currentlyReferenced[0].productId !== el.product_id) {
+      currentlyReferenced = [];
+    }
+
+    // Enforce max 2 references: shift the oldest one out if we are full
+    if (currentlyReferenced.length >= 2) {
+      currentlyReferenced.shift();
+    }
 
     onReferenceElements?.([...currentlyReferenced, {
       id: el.id,
