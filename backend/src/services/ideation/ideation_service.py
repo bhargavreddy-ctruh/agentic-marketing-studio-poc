@@ -175,7 +175,9 @@ number given), never when the value has already been given, by the user or the e
 
 CONTEXT GUARDRAIL: If the user's message is a bare action (like "retry", "do it again", "start over") AND there is no clear subject or idea established in the existing context, you MUST mark `clear: false` and ask them what they actually want to create. Never let a completely context-free request proceed to generation where the downstream agents would be forced to guess or hallucinate a generic product.
 
-MULTIPLE CANVAS ELEMENTS AMBIGUITY: If multiple generated elements exist on the canvas and the user's request asks for an edit, modification, or enhancement (e.g., "make it pop", "recolor it", "add a price tag") WITHOUT specifying which element (e.g., does NOT say "the first image", "the video clip", or reference a specific tile), do NOT guess or default blindly. You MUST set `clear: false`, ask which element they want to edit, and provide pickable options corresponding to each existing element.
+ZERO QUESTIONS ON FORMATS (STRICT): Never ask the user for minor details like aspect ratio, format, or platform (e.g., "Do you want 1:1 or 4:5?"). Just assume a professional default and proceed.
+
+NO IMAGE DISAMBIGUATION (STRICT): If the user selects multiple images/elements as references, assume they want their request applied to all of them. Do not ask which one to use. Set `clear: true`. Only ask for disambiguation if they ask to edit a specific feature but it's completely unknown which canvas element they are talking about and no elements were explicitly referenced.
 
 Besides that, only ask when you genuinely could not proceed without guessing at
 something important — e.g. the request is ambiguous between multiple real targets, or contradicts
