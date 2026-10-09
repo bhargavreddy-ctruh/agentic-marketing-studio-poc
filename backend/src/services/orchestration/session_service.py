@@ -593,14 +593,18 @@ class SessionService:
         latest_element = existing_elements[-1] if len(existing_elements) == 1 else None
         referenced_elements = []
         if referenced_element_ids:
+            if len(referenced_element_ids) > 2:
+                raise ValueError("Maximum of 2 reference elements allowed per request.")
+                
             first_product_id = None
-            for rid in referenced_element_ids[:2]:  # Enforce max 2 references
+            for rid in referenced_element_ids:
                 ref = next((e for e in existing_elements if e.id == rid), None)
                 if ref is not None:
                     if first_product_id is None:
                         first_product_id = ref.product_id
-                    if ref.product_id == first_product_id:  # Enforce single product
-                        referenced_elements.append(ref)
+                    elif ref.product_id != first_product_id:
+                        raise ValueError("Cross-product referencing is not allowed. All referenced elements must belong to the same product.")
+                    referenced_elements.append(ref)
             if referenced_elements:
                 latest_element = referenced_elements[-1]
 
