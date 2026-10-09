@@ -46,6 +46,12 @@ class UpdateTitleRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class PlanStepEdit(BaseModel):
+    specialist: str
+    instruction: str | None = None
+    parallel_group: int | None = None
+
+
 class PostTurnRequest(BaseModel):
     # Exactly one of these should be set — a card pick, or free text (Architecture.md section 1d).
     picked_option_id: str | None = None
@@ -72,6 +78,15 @@ class PostTurnRequest(BaseModel):
     # as if nothing were referenced at all. Defaults false — today's inherit-by-default behavior is
     # unchanged unless the user explicitly asks otherwise.
     start_new_product: bool = False
+    # Plan editing (explicit user ask: "make sure user can directly edit the plan if they dont
+    # find it fitting users goal") — the user's own rewrite of the proposed plan's steps, sent
+    # alongside `picked_option_id: "approve"`. `None`/omitted means "run the plan exactly as
+    # proposed" (today's behavior, unchanged). Only consulted by `session_service.py` on the
+    # `plan_approval` resume path; harmless (ignored) on any other turn. Each step mirrors
+    # `orchestrator.py`'s own `_build_plan_preview` shape — `specialist` must already be one of
+    # `SPECIALIST_REGISTRY`'s real names (re-validated server-side, never trusted blindly), and a
+    # step the user deleted in the UI is simply absent from this list rather than null-ed out.
+    edited_plan: list[PlanStepEdit] | None = None
 
 class CampaignDetails(BaseModel):
     campaignIdea: str | None = None

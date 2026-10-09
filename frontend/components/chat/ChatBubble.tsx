@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ReferencedElement } from "@/components/CanvasView";
 import { PlanStep, PipelineNode } from "@/lib/events";
 import { assetUrl } from "@/lib/http";
@@ -20,6 +21,7 @@ export interface ChatMessage {
   referencedElements?: ReferencedElement[];
   thinking?: string;
   thinkingSeconds?: number;
+  formatBadge?: string;
 }
 
 export function newId(): string {
@@ -48,22 +50,29 @@ function humanizeSpecialist(name: string): string {
 }
 
 function groupPlanSteps(plan: PlanStep[]): PlanStep[][] {
-  const groups: PlanStep[][] = [];
+  return groupPlanStepsWithIndex(plan).map((group) => group.map((g) => g.step));
+}
+
+/** Same grouping as `groupPlanSteps`, but keeps each step's index into the ORIGINAL (ungrouped)
+ * array alongside it — the plan editor below needs that real index to mutate the right entry in
+ * `draftSteps`, since `parallel_group` reshuffles display order away from array order. */
+function groupPlanStepsWithIndex(plan: PlanStep[]): { step: PlanStep; index: number }[][] {
+  const groups: { step: PlanStep; index: number }[][] = [];
   const indexByGroup = new Map<number, number>();
-  for (const step of plan) {
+  plan.forEach((step, index) => {
     const gid = step.parallel_group;
     if (gid == null) {
-      groups.push([step]);
-      continue;
+      groups.push([{ step, index }]);
+      return;
     }
     const existing = indexByGroup.get(gid);
     if (existing != null) {
-      groups[existing].push(step);
+      groups[existing].push({ step, index });
     } else {
       indexByGroup.set(gid, groups.length);
-      groups.push([step]);
+      groups.push([{ step, index }]);
     }
-  }
+  });
   return groups;
 }
 
@@ -78,12 +87,42 @@ interface ChatBubbleProps {
   m: ChatMessage;
   lastPlanMessageId?: string;
   pipelineNodes?: PipelineNode[];
-  handlePickOption?: (opt: IdeationOption) => void;
+  // Second arg is the user's own edited plan (ChatBubble's inline editor below) — only ever
+  // non-undefined for the "approve" option on a bubble whose plan is still editable; every other
+  // call site (cancel, any non-plan option) passes nothing, unchanged from before this existed.
+  handlePickOption?: (opt: IdeationOption, editedPlan?: PlanStep[]) => void;
   handleOther?: () => void;
   loading?: boolean;
 }
 
 export function ChatBubble({ m, lastPlanMessageId, pipelineNodes, handlePickOption, handleOther, loading }: ChatBubbleProps) {
+  const [isScrollMode, setIsScrollMode] = useState(true);
+  // A plan is only ever editable on the live bubble still awaiting the user's approve/cancel
+  // choice (explicit user ask: "make sure user can directly edit the plan if they dont find it
+  // fitting users goal") — a restored/completed turn's plan bubble carries no `options`, so this
+  // is naturally false there, same signal `m.role === "plan"` bubbles already rely on implicitly.
+  const canEditPlan = Boolean(m.planSteps && m.planSteps.length > 0 && m.options?.some((o) => o.id === "approve"));
+  const [isEditingPlan, setIsEditingPlan] = useState(false);
+  // Seeded once from the proposed plan and mutated locally — `postTurn` only ever sees this when
+  // the user actually clicks Approve, never streamed back mid-edit, so there's no backend call per
+  // keystroke. Initialized lazily (function form) so it only runs once per bubble instance, not on
+  // every re-render (e.g. while `pipelineNodes` status ticks update this same component).
+  const [draftSteps, setDraftSteps] = useState<PlanStep[]>(() => (m.planSteps ? m.planSteps.map((s) => ({ ...s })) : []));
+  const hasEdits = canEditPlan && JSON.stringify(draftSteps) !== JSON.stringify(m.planSteps);
+  const displaySteps = canEditPlan ? draftSteps : m.planSteps;
+
+  function updateDraftInstruction(index: number, instruction: string) {
+    setDraftSteps((prev) => prev.map((s, i) => (i === index ? { ...s, instruction } : s)));
+  }
+
+  function removeDraftStep(index: number) {
+    setDraftSteps((prev) => (prev.length > 1 ? prev.filter((_, i) => i !== index) : prev));
+  }
+
+  function resetDraftSteps() {
+    setDraftSteps(m.planSteps ? m.planSteps.map((s) => ({ ...s })) : []);
+  }
+
   return (
     <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
       {m.thinking && (
@@ -122,45 +161,139 @@ export function ChatBubble({ m, lastPlanMessageId, pipelineNodes, handlePickOpti
               {m.gateStage === "motion_pending" ? "Spend approval needed" : "Approval needed"}
             </p>
           )}
-          {m.role === "plan" && m.planSteps && m.planSteps.length > 0 && (
-            <div>
-              <p className="mb-2 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
-                <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">📋</span>
-                Here&apos;s the plan
-              </p>
-              <div className="space-y-2 rounded-xl border border-surface-700/50 bg-surface-900/50 p-3 text-xs shadow-inner">
-                {groupPlanSteps(m.planSteps).map((group, gi) => (
-                  <div key={gi} className={group.length > 1 ? "rounded-lg border border-surface-700/40 p-2" : ""}>
-                    {group.length > 1 && (
-                      <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-surface-500">
-                        ⚡ run together
-                      </p>
-                    )}
-                    <ul className="ml-4 space-y-1 list-disc text-surface-400">
-                      {group.map((step, si) => {
-                        const status = m.id === lastPlanMessageId ? planStepStatus(step, pipelineNodes) : undefined;
-                        return (
-                          <li key={si} className="flex items-start gap-1.5">
-                            <span className="flex-1">
-                              <span className="font-medium text-surface-300">{humanizeSpecialist(step.specialist)}</span>
-                              {step.instruction && <> — {truncate(step.instruction, 140)}</>}
-                            </span>
-                            {status === "running" && (
-                              <span className="shrink-0 text-amber-400" title="Running">●</span>
+          {displaySteps && displaySteps.length > 0 && (
+            <div className="mb-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-surface-400">
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-surface-700 text-[10px]">📋</span>
+                  Proposed Plan ({displaySteps.length} {displaySteps.length === 1 ? "step" : "steps"})
+                  {hasEdits && <span className="normal-case text-amber-400/90 font-normal">· edited</span>}
+                </p>
+                <div className="flex items-center gap-1.5">
+                  {canEditPlan && hasEdits && !isEditingPlan && (
+                    <button
+                      type="button"
+                      onClick={resetDraftSteps}
+                      className="text-[11px] font-medium text-surface-400 hover:text-surface-200 transition-colors px-2 py-0.5 rounded bg-surface-800/80 border border-surface-700/50"
+                      title="Discard your edits and restore the originally proposed plan"
+                    >
+                      Reset
+                    </button>
+                  )}
+                  {canEditPlan && (
+                    <button
+                      type="button"
+                      onClick={() => setIsEditingPlan(!isEditingPlan)}
+                      className={
+                        "text-[11px] font-medium transition-colors flex items-center gap-1 px-2 py-0.5 rounded border " +
+                        (isEditingPlan
+                          ? "text-emerald-300 bg-emerald-950/40 border-emerald-800/40 hover:bg-emerald-900/40"
+                          : "text-surface-400 hover:text-surface-200 bg-surface-800/80 border-surface-700/50")
+                      }
+                      title={isEditingPlan ? "Finish editing" : "Doesn't fit your goal? Edit any step before approving"}
+                    >
+                      {isEditingPlan ? "✓ Done" : "✎ Edit plan"}
+                    </button>
+                  )}
+                  {!isEditingPlan && displaySteps.length > 2 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsScrollMode(!isScrollMode)}
+                      className="text-[11px] font-medium text-surface-400 hover:text-surface-200 transition-colors flex items-center gap-1 px-2 py-0.5 rounded bg-surface-800/80 border border-surface-700/50"
+                      title={isScrollMode ? "Show all steps in full" : "Switch to scrollable view"}
+                    >
+                      {isScrollMode ? "↕ Expand view" : "↕ Scroll view"}
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div
+                className={`rounded-xl border border-surface-700/50 bg-surface-900/60 p-3 text-xs shadow-inner space-y-2.5 transition-all ${
+                  isScrollMode && !isEditingPlan ? "max-h-80 overflow-y-auto pr-1.5 overscroll-contain" : ""
+                }`}
+              >
+                {groupPlanStepsWithIndex(displaySteps).map((group, gi) => (
+                  <div key={gi} className="space-y-2">
+                    {group.map(({ step, index }) => {
+                      const status = m.id === lastPlanMessageId ? planStepStatus(step, pipelineNodes) : undefined;
+                      return (
+                        <div
+                          key={index}
+                          className="rounded-lg bg-surface-800/40 border border-surface-700/40 p-2.5 space-y-1.5 transition-colors hover:bg-surface-800/60"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-surface-200 text-xs px-2 py-0.5 rounded bg-surface-700/50 border border-surface-600/40">
+                                {humanizeSpecialist(step.specialist)}
+                              </span>
+                              {group.length > 1 && (
+                                <span className="text-[10px] font-medium uppercase tracking-wide text-amber-400/90 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-800/30">
+                                  ⚡ parallel
+                                </span>
+                              )}
+                            </div>
+                            {isEditingPlan ? (
+                              <button
+                                type="button"
+                                onClick={() => removeDraftStep(index)}
+                                disabled={draftSteps.length <= 1}
+                                title={draftSteps.length <= 1 ? "A plan needs at least one step" : "Remove this step"}
+                                className="shrink-0 text-[11px] text-red-400/80 hover:text-red-300 disabled:opacity-30 disabled:cursor-not-allowed px-1.5 py-0.5 rounded hover:bg-red-950/30"
+                              >
+                                ✕ Remove
+                              </button>
+                            ) : (
+                              <>
+                                {status === "running" && (
+                                  <span className="shrink-0 flex items-center gap-1.5 text-[11px] text-amber-400 font-medium">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse"></span>
+                                    In progress
+                                  </span>
+                                )}
+                                {status === "completed" && (
+                                  <span className="shrink-0 text-emerald-400 text-xs font-medium">✓ Completed</span>
+                                )}
+                                {status === "failed" && (
+                                  <span className="shrink-0 text-red-400 text-xs font-medium">✗ Failed</span>
+                                )}
+                                {!status && (
+                                  <span className="shrink-0 text-surface-500 text-[10px]">Queued</span>
+                                )}
+                              </>
                             )}
-                            {status === "completed" && (
-                              <span className="shrink-0 text-emerald-400" title="Completed">✓</span>
-                            )}
-                            {status === "failed" && (
-                              <span className="shrink-0 text-red-400" title="Failed">✗</span>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
+                          </div>
+                          {isEditingPlan ? (
+                            <textarea
+                              value={step.instruction ?? ""}
+                              onChange={(e) => updateDraftInstruction(index, e.target.value)}
+                              rows={3}
+                              placeholder="What should this step do?"
+                              className="w-full resize-y rounded-md bg-surface-900/70 border border-surface-700/60 text-surface-200 text-xs leading-relaxed p-2 focus:outline-none focus:ring-1 focus:ring-brand-500/60 focus:border-brand-500/60"
+                            />
+                          ) : (
+                            step.instruction && (
+                              <p className="text-surface-300 text-xs leading-relaxed whitespace-pre-wrap break-words pl-0.5">
+                                {step.instruction}
+                              </p>
+                            )
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 ))}
               </div>
+              {isEditingPlan ? (
+                <p className="mt-1 text-[10px] text-surface-500 pr-1">
+                  Rewrite any step&apos;s instructions or remove one entirely — your edits are sent exactly as you leave them when you hit Approve.
+                </p>
+              ) : (
+                isScrollMode && displaySteps.length > 3 && (
+                  <p className="mt-1 text-[10px] text-surface-500 text-right pr-1">
+                    ↕ Scroll inside box to see all {displaySteps.length} steps
+                  </p>
+                )
+              )}
             </div>
           )}
           {m.role === "user" && m.referencedElements && m.referencedElements.length > 0 && (
@@ -191,6 +324,13 @@ export function ChatBubble({ m, lastPlanMessageId, pipelineNodes, handlePickOpti
                   )}
                 </div>
               ))}
+            </div>
+          )}
+          {m.formatBadge && (
+            <div className="mb-1.5 flex items-center">
+              <span className="inline-flex items-center gap-1 rounded-md bg-brand-500/20 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-brand-300 border border-brand-500/30">
+                📐 {m.formatBadge}
+              </span>
             </div>
           )}
           <div className="whitespace-pre-wrap">{m.text}</div>
@@ -260,8 +400,9 @@ export function ChatBubble({ m, lastPlanMessageId, pipelineNodes, handlePickOpti
               {m.options.map((opt) => (
                 <button
                   key={opt.id}
-                  onClick={() => handlePickOption?.(opt)}
-                  disabled={loading}
+                  onClick={() => handlePickOption?.(opt, canEditPlan && opt.id === "approve" ? draftSteps : undefined)}
+                  disabled={loading || (isEditingPlan && opt.id === "approve")}
+                  title={isEditingPlan && opt.id === "approve" ? "Finish editing (✓ Done) before approving" : undefined}
                   className={
                     "flex items-center justify-between rounded-xl border px-4 py-2.5 text-left text-sm disabled:opacity-50 transition-all hover:scale-[1.01] " +
                     (m.gateStage === "motion_pending" && opt.id === "approve"

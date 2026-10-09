@@ -1,9 +1,10 @@
 from __future__ import annotations
-from typing import Any
+
 import re
+
 from ...core.middleware.logging import get_logger
-from .gemini import GeminiProvider
 from .base import ModelTier
+from .gemini import GeminiProvider
 
 log = get_logger(__name__)
 

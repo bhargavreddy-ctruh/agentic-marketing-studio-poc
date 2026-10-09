@@ -40,7 +40,7 @@ class LLMProvider(Protocol):
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         """`on_delta`, when given, is called with each real streamed text fragment as it arrives from

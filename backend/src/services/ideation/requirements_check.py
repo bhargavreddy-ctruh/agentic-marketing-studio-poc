@@ -4,7 +4,7 @@ Detects missing assets, ambiguous formats, and vague asks deterministically befo
 """
 import re
 
-from ...core.deliverables import detect_deliverable
+from ...core.deliverables import detect_deliverable, detect_deliverable_keys
 from ...schemas.sessions.responses import IdeationOption, IdeationPrompt
 
 _VAGUE_REFINEMENT_RE = re.compile(
@@ -65,6 +65,31 @@ def run_requirements_check(
     if _is_copy_request:
         return None
 
+    # 2.6 Campaign / Multi-Deliverable Exemption
+    # If the user asks for a campaign, package, or multiple platforms/deliverables,
+    # do NOT trap them in a single-format disambiguation modal or demand a subject image.
+    # The Orchestrator will autonomously assemble multi-platform assets and marketing copy.
+    lower_msg = user_message.lower()
+    brief_ctx = f"{brief.get('primary_user_request', '')} {brief.get('idea', '')}".lower()
+    combined_ctx = f"{lower_msg} {brief_ctx}"
+    
+    is_campaign = any(
+        w in combined_ctx
+        for w in (
+            "campaign", "package", "multi-platform", "social package", "promo package", 
+            "sale package", "sale", "promo", "promotion", "launch", "advertisement", "ad set"
+        )
+    )
+    named_deliverables = detect_deliverable_keys(user_message)
+    
+    # Check if multiple platforms/channels are mentioned
+    platform_keywords = ("instagram", "insta", "twitter", "tweet", "youtube", "tiktok", "facebook", "linkedin")
+    platforms_mentioned = sum(1 for p in platform_keywords if p in lower_msg)
+    is_multi_platform = len(named_deliverables) > 1 or platforms_mentioned > 1 or ("twitter" in combined_ctx and "instagram" in combined_ctx)
+    
+    if is_campaign or is_multi_platform:
+        return None
+
     # 3. Deliverable Spec Check
     spec = detect_deliverable(user_message)
     if not spec:
@@ -72,7 +97,9 @@ def run_requirements_check(
         
     if spec:
         # Ambiguous Format Check (e.g. "instagram post")
-        if spec.is_ambiguous:
+        # Do not prompt if the user's message already states the format/aspect ratio explicitly
+        has_explicit_format = bool(re.search(r"\b(1:1|4:5|9:16|16:9|square|portrait|landscape|banner|story|reel)\b", lower_msg))
+        if spec.is_ambiguous and not has_explicit_format:
             return IdeationPrompt(
                 message=f"For an {spec.label.split(' (')[0]}, which format do you prefer?",
                 options=[

@@ -32,7 +32,7 @@ class GeminiProvider(LLMProvider):
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         model = self._get_model_for_tier(tier)

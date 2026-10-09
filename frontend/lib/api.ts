@@ -7,6 +7,7 @@
  * client type covers all of them — no separate shape per gate.
  */
 import { ApiError, request, requestNoContent, API_BASE_URL } from "./http";
+import { PlanStep } from "./events";
 
 export { ApiError };
 
@@ -142,6 +143,12 @@ export async function postTurn(
     // defeats that inheritance even when an element IS referenced. See
     // `PostTurnRequest.start_new_product`'s own docstring (backend) for the full reasoning.
     startNewProduct?: boolean;
+    // The user's own rewrite of a pending "Proposed Plan" card's steps (ChatBubble.tsx's inline
+    // plan editor), sent alongside `pickedOptionId: "approve"` — explicit user ask: "make sure
+    // user can directly edit the plan if they dont find it fitting users goal". Omitted (or sent
+    // unmodified) runs the plan exactly as originally proposed; the backend re-validates every
+    // `specialist` name against the real registry rather than trusting this blindly.
+    editedPlan?: PlanStep[];
   },
 ): Promise<SessionResponse> {
   return request<SessionResponse>(`/api/v1/sessions/${sessionId}/turns`, {
@@ -153,6 +160,11 @@ export async function postTurn(
       referenced_element_ids: args.referencedElementIds,
       target_product_id: args.targetProductId,
       start_new_product: args.startNewProduct ?? false,
+      edited_plan: args.editedPlan?.map((s) => ({
+        specialist: s.specialist,
+        instruction: s.instruction,
+        parallel_group: s.parallel_group,
+      })),
     }),
   });
 }

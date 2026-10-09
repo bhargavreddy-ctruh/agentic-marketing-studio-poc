@@ -36,6 +36,8 @@ _STR_SETTINGS_KEYS = {
     "replicate_api_token",
     "langsmith_api_key",
     "gemini_api_key",
+    "grok_api_key",
+    "xai_api_key",
     # Product/Brand crawler (2026-09-28) — providers/crawlers/firecrawl_provider.py constructs its
     # client fresh on every call (crawls are infrequent, unlike the constantly-called LLM/image
     # providers), reading `settings.firecrawl_api_key` directly each time — so a live override
@@ -61,6 +63,8 @@ _KEY_TO_RESETTERS: dict[str, list[Callable[[], None]]] = {
     "replicate_api_token": [reset_llm_provider, reset_video_provider],
     "langsmith_api_key": [configure_langsmith],
     "gemini_api_key": [reset_llm_provider],
+    "grok_api_key": [reset_llm_provider],
+    "xai_api_key": [reset_llm_provider],
 }
 
 _last_applied: dict[str, str] = {}

@@ -281,6 +281,7 @@ async def post_turn(
         referenced_element_ids=body.referenced_element_ids,
         target_product_id=body.target_product_id,
         start_new_product=body.start_new_product,
+        edited_plan=[step.model_dump() for step in body.edited_plan] if body.edited_plan else None,
     )
 
 

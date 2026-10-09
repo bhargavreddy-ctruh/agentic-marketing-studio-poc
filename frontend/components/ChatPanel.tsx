@@ -21,7 +21,7 @@ import { LiveEvent, PipelineNode, PlanStep, describeEvent, openEventStream } fro
 import { CanvasElement, getCanvasState, uploadAndPlaceElement } from "@/lib/canvas";
 
 import { ChatMessage, GateStage, ChatBubble, newId, isGatewayTimeoutLikeError, truncate } from "@/components/chat/ChatBubble";
-import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatInput, FORMAT_OPTIONS } from "@/components/chat/ChatInput";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useChatStream } from "@/hooks/useChatStream";
 
@@ -68,12 +68,17 @@ function describeResponse(
     };
   }
   if (res.next_prompt) {
+    const proposalPlan =
+      (res.next_prompt as { proposal?: { plan?: PlanStep[] } })?.proposal?.plan ||
+      (res.brief as { plan_preview?: PlanStep[] })?.plan_preview ||
+      (res.brief as { paused_plan?: { plan_preview?: PlanStep[] } })?.paused_plan?.plan_preview;
     return {
       id: newId(),
       role: "assistant",
       text: res.next_prompt.message,
       options: res.next_prompt.options,
       allowFreeText: res.next_prompt.allow_free_text,
+      planSteps: Array.isArray(proposalPlan) && proposalPlan.length > 0 ? proposalPlan : undefined,
       ...thinkingFields,
     };
   }
@@ -136,6 +141,7 @@ function ChatPanel(
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [selectedFormat, setSelectedFormat] = useState<string>("auto");
   const [loading, setLoadingState] = useState(false);
   const loadingRef = useRef(false);
   function setLoading(v: boolean) { loadingRef.current = v; setLoadingState(v); }
@@ -250,8 +256,8 @@ function ChatPanel(
 
 
 
-  function appendUser(text: string, referencedElements?: ReferencedElement[]) {
-    setMessages((m) => [...m, { id: newId(), role: "user", text, referencedElements }]);
+  function appendUser(text: string, referencedElements?: ReferencedElement[], formatBadge?: string) {
+    setMessages((m) => [...m, { id: newId(), role: "user", text, referencedElements, formatBadge }]);
   }
 
   /** Real, live-found bug (2026-09-23), broader than the "Try again" case fixed earlier today:
@@ -289,15 +295,25 @@ function ChatPanel(
   }
 
   async function handleSend(freeTextOverride?: string) {
-    const text = freeTextOverride ?? input.trim();
-    if (!text || loading) return;
+    const rawText = freeTextOverride ?? input.trim();
+    if (!rawText || loading) return;
+
+    let textToSend = rawText;
+    let badge: string | undefined = undefined;
+
+    const formatOpt = FORMAT_OPTIONS.find((f) => f.id === selectedFormat);
+    if (!freeTextOverride && formatOpt && formatOpt.promptSuffix) {
+      textToSend = `${rawText} [${formatOpt.promptSuffix}]`;
+      badge = formatOpt.label;
+    }
+
     const wasContinuation = isContinuationOfPrompt();
     setInput("");
     // Collapse the auto-grown textarea back to one row — its height is set imperatively via
     // inline style (`onChange` above), so clearing `input` alone wouldn't reset it.
     if (inputRef.current) inputRef.current.style.height = "auto";
     stripOptionsFromLastMessage();
-    appendUser(text, referencedElements && referencedElements.length > 0 ? referencedElements : undefined);
+    appendUser(rawText, referencedElements && referencedElements.length > 0 ? referencedElements : undefined, badge);
     setLoading(true);
     // Hoisted above the try (2026-09-30) so the catch block below can still reach the real
     // session id for the gateway-timeout reconnect fallback — a `let` declared inside `try` isn't
@@ -335,7 +351,7 @@ function ChatPanel(
 
       const { result: res, thinking, seconds } = await withNarration(sid, () =>
         postTurn(sid!, {
-          freeText: text,
+          freeText: textToSend,
           referencedElementIds: idsToSend,
           // Pass the product group so the generated element lands in the same group as the
           // referenced source. Omit (undefined) when startNewProduct is true so the backend's
@@ -374,7 +390,7 @@ function ChatPanel(
     },
   }));
 
-  async function handlePickOption(option: IdeationOption) {
+  async function handlePickOption(option: IdeationOption, editedPlan?: PlanStep[]) {
     if (!sessionId || loading) return;
     const wasContinuation = isContinuationOfPrompt();
     stripOptionsFromLastMessage();
@@ -405,6 +421,7 @@ function ChatPanel(
           referencedElementIds: idsToSend,
           targetProductId: useStartNewProduct ? undefined : (productIdToSend ?? undefined),
           startNewProduct: useStartNewProduct,
+          editedPlan,
         }),
       );
       // See `cancelledRef`'s own comment above — a user-initiated Stop already appended its own
@@ -443,16 +460,28 @@ function ChatPanel(
       // Wire the real session title (4a) — already fetched above, just never stored before.
       setSessionTitle(session.title ?? "Untitled workflow");
 
-      const restored: ChatMessage[] = turns.flatMap((turn: ChatTurn) => [
-        { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
-        // The plan-preview bubble, reconstructed from its own persisted field (2026-10-06) —
-        // reproduces the exact live ordering (user -> plan -> result) so a refresh shows the same
-        // conversation shape the live view did.
-        ...(turn.plan && turn.plan.length > 0
-          ? [{ id: newId(), role: "plan" as const, text: "", planSteps: turn.plan }]
-          : []),
-        { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
-      ]);
+      // The last turn's assistant bubble gets overwritten below by `describeResponse(session, ...)`
+      // (only when the session isn't still "generating" — see that branch further down), which
+      // re-attaches this SAME `turn.plan` as `planSteps` on that bubble (from
+      // `session.brief.plan_preview`/`next_prompt.proposal.plan`). Adding the dedicated "plan" bubble
+      // here too would render the identical plan twice for that turn — skip it only when that
+      // overwrite is actually going to happen; earlier turns (and the "generating" branch, which
+      // never overwrites) still need their own dedicated bubble since their assistant text stays plain.
+      const lastTurnPlanWillBeOverwritten = session.status !== "generating";
+      const restored: ChatMessage[] = turns.flatMap((turn: ChatTurn, idx: number) => {
+        const isLastTurn = idx === turns.length - 1;
+        const skipPlanBubble = isLastTurn && lastTurnPlanWillBeOverwritten;
+        return [
+          { id: newId(), role: "user" as const, text: turn.user_text, referencedElements: turn.referenced_elements },
+          // The plan-preview bubble, reconstructed from its own persisted field (2026-10-06) —
+          // reproduces the exact live ordering (user -> plan -> result) so a refresh shows the same
+          // conversation shape the live view did.
+          ...(!skipPlanBubble && turn.plan && turn.plan.length > 0
+            ? [{ id: newId(), role: "plan" as const, text: "", planSteps: turn.plan }]
+            : []),
+          { id: newId(), role: "assistant" as const, text: turn.assistant_text ?? "", thinking: turn.thinking_text ?? undefined },
+        ];
+      });
 
       // A full page back (same size as what was asked for) means there's likely more behind it;
       // a short page means we've already seen every turn this session has. Re-derived fresh on
@@ -872,6 +901,8 @@ function ChatPanel(
         linkCrawling={linkCrawling}
         handleTriggerLinkCrawl={handleTriggerLinkCrawl}
         handleCancelTurn={handleCancelTurn}
+        selectedFormat={selectedFormat}
+        setSelectedFormat={setSelectedFormat}
       />
     </div>
   );

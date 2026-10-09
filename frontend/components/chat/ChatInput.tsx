@@ -1,6 +1,65 @@
 "use client";
 
-import { RefObject } from "react";
+import { RefObject, useEffect, useRef, useState } from "react";
+
+export interface FormatOption {
+  id: string;
+  label: string;
+  ratio: string;
+  icon: string;
+  description: string;
+  promptSuffix?: string;
+}
+
+export const FORMAT_OPTIONS: FormatOption[] = [
+  {
+    id: "auto",
+    label: "Auto (Smart AI)",
+    ratio: "Auto",
+    icon: "⚡",
+    description: "AI decides the optimal deliverable and ratio",
+  },
+  {
+    id: "square",
+    label: "Square Post (1:1)",
+    ratio: "1:1",
+    icon: "⏹️",
+    description: "Universal square post / product visual (1080x1080)",
+    promptSuffix: "deliverable format: 1:1 square visual",
+  },
+  {
+    id: "portrait",
+    label: "Vertical Portrait (4:5)",
+    ratio: "4:5",
+    icon: "📱",
+    description: "Vertical high-impact feed visual (1080x1350)",
+    promptSuffix: "deliverable format: 4:5 vertical portrait",
+  },
+  {
+    id: "vertical_story",
+    label: "Full Screen Story (9:16)",
+    ratio: "9:16",
+    icon: "🎬",
+    description: "Full vertical mobile / story / reel (1080x1920)",
+    promptSuffix: "deliverable format: 9:16 vertical story/reel",
+  },
+  {
+    id: "landscape_banner",
+    label: "Hero Banner (16:9)",
+    ratio: "16:9",
+    icon: "🖥️",
+    description: "Landscape hero banner / e-commerce header (1920x1080)",
+    promptSuffix: "deliverable format: 16:9 landscape hero banner",
+  },
+  {
+    id: "campaign_package",
+    label: "Full Campaign Suite",
+    ratio: "Campaign",
+    icon: "🚀",
+    description: "Multi-deliverable campaign with visuals, badges, and copy",
+    promptSuffix: "full marketing campaign with hero visuals, promotional badges, and marketing copy",
+  },
+];
 
 interface ChatInputProps {
   input: string;
@@ -21,6 +80,8 @@ interface ChatInputProps {
   linkCrawling: boolean;
   handleTriggerLinkCrawl: () => void;
   handleCancelTurn: () => void;
+  selectedFormat?: string;
+  setSelectedFormat?: (val: string) => void;
 }
 
 export function ChatInput({
@@ -42,7 +103,27 @@ export function ChatInput({
   linkCrawling,
   handleTriggerLinkCrawl,
   handleCancelTurn,
+  selectedFormat = "auto",
+  setSelectedFormat,
 }: ChatInputProps) {
+  const [showFormatMenu, setShowFormatMenu] = useState(false);
+  const formatMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (formatMenuRef.current && !formatMenuRef.current.contains(event.target as Node)) {
+        setShowFormatMenu(false);
+      }
+    }
+    if (showFormatMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showFormatMenu]);
+
+  const activeFormat = FORMAT_OPTIONS.find((f) => f.id === selectedFormat) || FORMAT_OPTIONS[0];
   return (
     <form
       className="relative mt-4 flex flex-col gap-2 rounded-2xl glass-input p-2.5"
@@ -98,7 +179,7 @@ export function ChatInput({
         disabled={loading}
       />
       <div className="flex items-center justify-between px-2 pb-1">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => setShowLinkPopover((v) => !v)}
@@ -128,11 +209,71 @@ export function ChatInput({
           >
             {attaching ? "…" : "📎"}
           </button>
-          <button type="button" className="text-surface-500 hover:text-surface-300 transition-colors" title="Voice Input">
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
-            </svg>
-          </button>
+
+          {/* Format / Aspect Ratio Selector Pill */}
+          <div className="relative" ref={formatMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowFormatMenu((v) => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-all ${
+                selectedFormat !== "auto"
+                  ? "bg-brand-500/20 text-brand-300 border border-brand-500/40 shadow-sm"
+                  : "bg-surface-800/80 text-surface-400 hover:text-surface-200 hover:bg-surface-800 border border-surface-700/60"
+              }`}
+              title="Target aspect ratio / platform format"
+            >
+              <span>{activeFormat.icon}</span>
+              <span className="font-medium tracking-tight">{activeFormat.ratio}</span>
+              <svg
+                className={`w-3 h-3 opacity-60 transition-transform ${showFormatMenu ? "rotate-180" : ""}`}
+                viewBox="0 0 20 20"
+                fill="currentColor"
+              >
+                <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+              </svg>
+            </button>
+
+            {showFormatMenu && (
+              <div className="absolute bottom-full left-0 z-30 mb-2 w-72 rounded-xl border border-surface-700 bg-surface-900/95 p-1.5 shadow-2xl backdrop-blur-md">
+                <div className="px-2 py-1 text-[10px] font-semibold tracking-wider text-surface-400 uppercase">
+                  Deliverable Format / Ratio
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {FORMAT_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedFormat?.(opt.id);
+                        setShowFormatMenu(false);
+                      }}
+                      className={`flex items-start gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors ${
+                        selectedFormat === opt.id
+                          ? "bg-brand-500/20 text-brand-200"
+                          : "text-surface-300 hover:bg-surface-800 hover:text-surface-100"
+                      }`}
+                    >
+                      <span className="text-sm mt-0.5">{opt.icon}</span>
+                      <div className="flex flex-col flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="font-medium truncate">{opt.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface-800 text-surface-400 font-mono">
+                            {opt.ratio}
+                          </span>
+                        </div>
+                        <span className="text-[10px] text-surface-400 leading-tight">
+                          {opt.description}
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
           {loading ? (
             <button
               type="button"

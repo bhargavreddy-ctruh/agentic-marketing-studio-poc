@@ -56,12 +56,9 @@ Given a running brief (what the user has told you so far) and their latest messa
      (label = short style name, description = what it looks like). Do not do this for minor/generic
    requests where one sensible default is obviously fine — most requests should NOT stop to ask.
 
-4. BRAND & PRODUCT DNA (CRITICAL): Both Brand and Product guidelines MUST exist for every session.
-   - Look at the running brief's "guardrails" array. If there are no brand and product guardrails present, and the user hasn't provided any in their latest message, you MUST set `ready: false` and explicitly ask them to provide their brand and product guidelines (or to select them from the UI).
-   - If the user's message CONTAINS new information about the brand (e.g. "our brand colors are...", "we are a modern...") or the product (e.g. "the product is a new shoe...", "never show XYZ in the product"), extract these as distinct, actionable rules in `new_guardrails`.
-   - The same applies if they explicitly ask to update their Product DNA from the chat.
+4. BRAND & PRODUCT DNA: If brand/product guidelines exist in the brief's guardrails or user message, respect and apply them. If none are provided yet, make sensible, high-impact creative assumptions and proceed (`ready: true`). Do NOT stop the user or ask them to provide brand/product guidelines unless they explicitly asked to configure them. If the user's message CONTAINS new brand or product guidelines (e.g. "our brand colors are...", "we are a modern...", "the product is a new shoe..."), extract them as distinct, actionable rules in `new_guardrails`. The same applies if they explicitly ask to update their Product DNA from the chat.
 
-5. **ZERO QUESTIONS ON FORMATS (STRICT LAZY AI):** You are STRICTLY FORBIDDEN from asking the user for minor details like aspect ratio, specific format, or platform. If a request is broad, or if they name a platform (like "Instagram") but omit the aspect ratio, YOU MUST invent a professional default (e.g., 4:5 or 1:1 for Instagram) and proceed. Set `ready: true` immediately. Furthermore, if the user explicitly asks for MULTIPLE platforms (e.g., "Instagram and Twitter"), you MUST capture ALL of them in your merged brief. DO NOT focus on just one and ask questions about it.
+5. **ZERO QUESTIONS ON FORMATS (STRICT AUTONOMOUS AI):** You are STRICTLY FORBIDDEN from asking the user for minor details like aspect ratio, specific format, or platform. If a request is broad (e.g. "make a diwali campaign for the amazon sale"), YOU MUST autonomously select the most impactful marketing deliverables (e.g., hero banner, promotional visuals, and marketing copy) without forcing any specific platform or asking questions. Set `ready: true` immediately. Only if the user explicitly names platforms (e.g., "Twitter and Instagram"), capture those platforms in your merged brief. DO NOT force or default to Instagram if it was not requested.
 6. **DYNAMIC GUARDRAILS FIRST:** It is very important to create guardrails first based on the user's inputs. If the user specifies any strict requirement, constraint, style preference, or describes their product/brand (e.g. "winter campaign", "must be red"), extract these immediately into `new_guardrails`.
 7. **CAMPAIGN SUMMARY:** Separately from `idea`, also fill `audience` (who this is for, e.g. "young adults into streetwear") and `goal` (what this campaign is trying to achieve, e.g. "drive holiday sales", "build brand awareness") whenever the message makes either genuinely clear — even a implicit signal counts (a "winter sale" message implies the goal is driving sales). Leave either as an empty string when truly not inferable; never invent a generic-sounding one just to fill the field.
 8. **NO IMAGE DISAMBIGUATION:** If the user selects multiple images/elements, assume they want the campaign applied to all of them. Do not ask which one to use. Set `ready: true`.
@@ -149,21 +146,13 @@ _FOLLOWUP_CLARITY_PROMPT = """You are reviewing ONE follow-up request against an
 marketing asset. Your only job: decide whether it's clear enough to act on directly, or whether
 something genuinely material is missing or ambiguous that would meaningfully change the result.
 
-Default to NOT asking. Most follow-up requests — edits, tweaks, "recolor it red", "add a logo",
-small stylistic choices ("calm music" is already a real, sufficient instruction — never ask it to
-be more specific than that) — are clear enough to act on as-is, using sensible creative defaults
-for anything genuinely left unspecified. Do NOT nitpick wording that is already a real instruction
-just because it isn't maximally precise.
+Default strongly to `clear: true`. Most follow-up requests — edits, tweaks, "recolor it red", "add a logo",
+small stylistic choices, copy additions, and campaign expansions — are clear enough to act on directly by using
+sensible, premium creative defaults. Do NOT nitpick wording or interrupt the user with questions just because
+details were not specified with 100% precision. Keep the creative momentum going!
 
-The one category that IS genuinely material, every time: the request implies a FACTUAL CLAIM
-(a spec, a number, a price, a named feature) with NO SOURCE GIVEN ANYWHERE for it — neither in the
-user's own message nor in the existing brief. This app's own generation guardrails elsewhere never
-let a specialist invent a number/fact with no real data behind it — this is the same principle
-applied one step earlier, before generation even starts. Concretely: "make a video of it racing on
-track with voice over talk about its specs" — no actual spec numbers are given anywhere, so a
-voiceover naming them would be invented from nothing; THIS is worth asking about (e.g. "I don't
-have real specs on file for this — want me to use general/no specific claims, or do you have real
-numbers I should use?").
+If the request implies factual features or specs that aren't specified, focus on high-level brand benefits or general
+compelling value propositions rather than pausing to question the user. Only ask if it is genuinely impossible to act without guessing a critical unknown.
 
 CRITICAL EXCEPTION — if the user's OWN message directly states the actual value themselves (e.g.
 "change the price text to $49.99", "the discount is 15% off"), that value IS the real source — the
@@ -423,7 +412,7 @@ async def run_ideation(state: GraphState) -> GraphState:
                 # 512 was too tight in practice (Memory.md, Phase 1): several free-tier models spend
                 # real tokens on internal reasoning before or interleaved with the visible JSON
                 # content, and got cut off mid-response at the lower budget.
-                max_tokens=1536,
+                max_tokens=3072,
                 # Real live "thinking" text, per the user's explicit ask (2026-09-21).
                 on_delta=filter_obj.on_delta,
             )

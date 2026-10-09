@@ -47,12 +47,32 @@ class DelegateTaskTool(Tool):
     _completed_jobs: ClassVar[dict[str, dict[str, Any]]] = {}
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        target_name = args.get("target_specialist_name", "").strip()
-        instruction = args.get("task_instruction", "").strip()
-        job_id = args.get("job_id", "").strip()
+        target_name = (
+            args.get("target_specialist_name")
+            or args.get("target")
+            or args.get("specialist")
+            or args.get("target_specialist")
+            or args.get("agent")
+            or args.get("name")
+            or ""
+        ).strip()
+        if "." in target_name or ":" in target_name:
+            target_name = target_name.split(".")[-1].split(":")[-1].strip()
 
-        if not target_name or not instruction:
-            return ToolResult(ok=False, data={}, error="target_specialist_name and task_instruction are required")
+        instruction = (
+            args.get("task_instruction")
+            or args.get("instruction")
+            or args.get("task")
+            or args.get("prompt")
+            or args.get("query")
+            or args.get("message")
+            or (f"Execute sub-task for {target_name} based on current brief and canvas context." if target_name else "")
+        ).strip()
+
+        job_id = (args.get("job_id") or args.get("id") or "").strip()
+
+        if not target_name:
+            return ToolResult(ok=False, data={}, error="target_specialist_name is required")
 
         # Idempotency Check: if this job_id was already completed successfully, return the cached result.
         if job_id and job_id in self._completed_jobs:
@@ -91,16 +111,24 @@ class DelegateTaskTool(Tool):
             # Combine the generic preamble with the specific instruction using the expected marker
             combined_context = f"{_STEP_INSTRUCTION_MARKER}{instruction}"
 
-            # Run the agent! Max iterations is set to 2 (Guardrail 2: Max Tries per Agent)
+            # Run the agent with adequate iterations to lookup context, execute tool, and return cleanly
             result = await run_specialist_agentic(
                 specialist_name=target_name,
                 context=combined_context,
-                max_iterations=2,
+                max_iterations=4,
                 brief=brief
             )
             
             # If the agent succeeded, get its resulting JSON data
-            output_data = result.data
+            output_data = dict(result.data) if isinstance(result.data, dict) else {"result": result.data}
+
+            # Surface any asset produced by tool calls (e.g. storage_ref, asset_id, audio_ref, video_ref)
+            if hasattr(result, "tool_calls") and result.tool_calls:
+                for tc in reversed(result.tool_calls):
+                    if tc.ok and isinstance(tc.data, dict):
+                        for k in ("storage_ref", "asset_id", "audio_ref", "video_ref", "mask_ref", "image_url", "url"):
+                            if k in tc.data and k not in output_data:
+                                output_data[k] = tc.data[k]
             
             # Cache the result if job_id was provided
             if job_id:

@@ -377,6 +377,7 @@ class SessionService:
         referenced_element_ids: list[str] | None = None,
         target_product_id: str | None = None,
         start_new_product: bool = False,
+        edited_plan: list[dict] | None = None,
     ) -> SessionResponse:
         """Fire-and-forget variant of post_turn (2026-10-06) — does all validation and preparation
         synchronously, marks status='generating', then dispatches _run_turn as a detached asyncio
@@ -465,6 +466,26 @@ class SessionService:
         user_message = free_text or (session.brief.get("_last_option_labels", {}) or {}).get(
             picked_option_id, picked_option_id
         )
+
+        # Context preservation: never lose the user's creative prompt across intermediate clarification rounds
+        pending_clarification = session.brief.pop("_pending_clarification_user_message", None)
+        primary_creative_req = session.brief.get("primary_user_request")
+
+        is_substantive_free_text = bool(
+            free_text and len(free_text.strip().split()) >= 4
+            and not is_approval(free_text) and not is_cancel(free_text)
+        )
+
+        if is_substantive_free_text:
+            session.brief["primary_user_request"] = free_text.strip()
+        elif not is_approval(user_message) and not is_cancel(user_message):
+            if pending_clarification:
+                user_message = f"{pending_clarification}\n(User specified preference: {user_message})"
+                session.brief["primary_user_request"] = user_message
+            elif primary_creative_req and primary_creative_req not in user_message and len(user_message.split()) <= 6:
+                user_message = f"{primary_creative_req}\n(User specified preference: {user_message})"
+                session.brief["primary_user_request"] = user_message
+
         if not free_text and (user_message or "").strip().lower() == _BARE_RETRY_LABEL:
             past_turns = await self._chat_turns.list_for_session(session.id)
             real_message, real_refs = _find_real_user_message_and_refs(past_turns)
@@ -478,6 +499,13 @@ class SessionService:
         session.next_prompt_json = None
         if picked_option_id:
             session.brief["_last_picked_option_id"] = picked_option_id
+        # One-shot plan-edit override (explicit user ask: "make sure user can directly edit the
+        # plan") — only meaningful when this turn is actually resolving a `plan_approval` pause
+        # (consumed and stripped there, see below); stashing it on `session.brief` rather than
+        # threading it through every call in between is the same shape `_last_picked_option_id`
+        # already uses for this exact "survive the fire-and-forget background dispatch" problem.
+        if edited_plan:
+            session.brief["_edited_plan_override"] = edited_plan
         session = await self._sessions.update(session)
 
         # Fire-and-forget: dispatch the actual turn in a background task with its own DB session.
@@ -722,10 +750,20 @@ class SessionService:
         # dynamic-plan step falls back to its own per-step instruction-derived aspect ratio
         # (illustrator.md's own rule already handles "set aspect_ratio to match the actual
         # requested format") instead of one shared, wrong value.
-        if len(detect_deliverable_keys(user_message)) <= 1:
+        lower_user_msg = (user_message or "").lower()
+        is_campaign_request = (
+            any(w in lower_user_msg for w in ("campaign", "package", "multi-platform", "social package"))
+            or len(detect_deliverable_keys(user_message)) > 1
+            or ("twitter" in lower_user_msg and "instagram" in lower_user_msg)
+        )
+        if not is_campaign_request and len(detect_deliverable_keys(user_message)) <= 1:
             detected_spec = detect_deliverable(user_message)
-            if detected_spec:
+            if detected_spec and not detected_spec.is_ambiguous:
                 brief_for_graph["deliverable"] = detected_spec.key
+        else:
+            brief_for_graph.pop("deliverable", None)
+            if "deliverable" in session.brief:
+                session.brief = {k: v for k, v in session.brief.items() if k != "deliverable"}
             
         # Fallback fields for backwards compatibility with parts of graph that expect latest_element
         if latest_element:
@@ -924,6 +962,12 @@ class SessionService:
         # once this resume actually completes or fails outright (see below) — a fresh pause on a
         # NEW question overwrites it instead, so a chain of clarifications resumes correctly too.
         paused_plan = session.brief.get("paused_plan")
+        # One-shot plan-edit override, consumed here and nowhere else — stripped from
+        # `session.brief` immediately regardless of whether this turn actually ends up on the
+        # `plan_approval` branch below, so a stray value never leaks into an unrelated later turn.
+        edited_plan_override = session.brief.get("_edited_plan_override")
+        if "_edited_plan_override" in session.brief:
+            session.brief = {k: v for k, v in session.brief.items() if k != "_edited_plan_override"}
         if paused_plan:
             picked_id = brief_for_graph.pop("_last_picked_option_id", None)
             answer_text = f"{user_message} (Option ID: {picked_id})" if picked_id else user_message
@@ -949,16 +993,44 @@ class SessionService:
                     resume_brief.pop("clarification_answer", None)
                     resume_state["brief"] = resume_brief
                     
+                    # User-edited plan (explicit user ask: "make sure user can directly edit the
+                    # plan if they dont find it fitting users goal") — re-validated against the
+                    # real specialist registry rather than trusted as-is (the frontend only lets
+                    # the user rewrite instruction text/reorder/drop steps, never invent a
+                    # specialist name, but a stale/tampered request could still send garbage).
+                    # `dynamic_plan`/`target_specialist` on `paused_plan` are the fallback — a
+                    # vanilla "Approve" with no `edited_plan` sent runs the exact plan the user saw,
+                    # unchanged, same as before this feature existed.
+                    effective_plan_preview = paused_plan.get("plan_preview")
+                    if edited_plan_override:
+                        from ..specialists.registry import SPECIALIST_REGISTRY
+                        valid_edited = [
+                            {
+                                "specialist": step.get("specialist"),
+                                "instruction": (step.get("instruction") or "").strip() or None,
+                                "parallel_group": step.get("parallel_group"),
+                            }
+                            for step in edited_plan_override
+                            if step.get("specialist") in SPECIALIST_REGISTRY
+                            and (step.get("instruction") or "").strip()
+                        ]
+                        if valid_edited:
+                            effective_plan_preview = valid_edited
+
                     # Re-emit structural events so Node Mode redraws the flow leading up to this resume point
                     # rather than appearing cleared out.
                     emit("ideation_started")
                     emit("ideation_completed", ready=True)
-                    if paused_plan.get("plan_preview"):
-                        emit("plan_proposed", route=pending_route, plan=paused_plan["plan_preview"])
+                    if effective_plan_preview:
+                        emit("plan_proposed", route=pending_route, plan=effective_plan_preview)
                     emit("route_decided", route=pending_route, target_specialist=paused_plan.get("target_specialist"))
 
                     if pending_route == "direct_fix":
                         resume_state["target_specialist"] = paused_plan.get("target_specialist")
+                        if effective_plan_preview is not paused_plan.get("plan_preview") and effective_plan_preview:
+                            edited_instruction = effective_plan_preview[0].get("instruction")
+                            if edited_instruction:
+                                resume_state["user_message"] = edited_instruction
                         result_state = await _direct_fix_node(resume_state)
                     elif pending_route == "full_image":
                         from .graph import _visual_design_lead_node
@@ -970,7 +1042,10 @@ class SessionService:
                         from .graph import _full_audio_node
                         result_state = await _full_audio_node(resume_state)
                     else:
-                        resume_state["dynamic_plan"] = paused_plan.get("dynamic_plan")
+                        dynamic_plan = paused_plan.get("dynamic_plan")
+                        if effective_plan_preview is not paused_plan.get("plan_preview") and effective_plan_preview:
+                            dynamic_plan = effective_plan_preview
+                        resume_state["dynamic_plan"] = dynamic_plan
                         result_state = await _dynamic_executor_node(resume_state)
                 elif is_cancel(user_message):
                     session.brief = {k: v for k, v in session.brief.items() if k != "paused_plan"}
@@ -982,11 +1057,24 @@ class SessionService:
                         },
                     }
                 else:
-                    # Anything else is revision feedback, not a clear approve/cancel — re-run the
-                    # real orchestrator with the revision appended, so a NEW plan is proposed and
-                    # the SAME gate fires again; a revision is never silently applied as if it were
-                    # the original, already-rejected plan.
-                    combined_message = f"{original_message}\nUser revision feedback: {user_message}".strip()
+                    # Distinguish between narrow tweak on the paused plan vs. a brand-new command/campaign
+                    lower_msg = (user_message or "").lower().strip()
+                    is_fresh_request = (
+                        any(w in lower_msg for w in ("campaign", "package", "multi-platform", "banner", "poster", "video", "audio", "ad"))
+                        or any(lower_msg.startswith(prefix) for prefix in ("make ", "create ", "generate ", "design ", "build ", "produce ", "start "))
+                        or len(user_message.split()) > 4
+                    )
+
+                    if is_fresh_request:
+                        # User is pivoting to a new deliverable or campaign — discard the old paused plan and deliverable
+                        session.brief = {k: v for k, v in session.brief.items() if k not in ("paused_plan", "deliverable")}
+                        resume_brief.pop("paused_plan", None)
+                        resume_brief.pop("deliverable", None)
+                        combined_message = user_message
+                    else:
+                        # Narrow revision tweak (e.g. "make it darker", "bolder text")
+                        combined_message = f"{original_message}\nUser revision feedback: {user_message}".strip()
+
                     resume_brief["idea"] = combined_message
                     resume_state["user_message"] = combined_message
                     resume_state.pop("target_specialist", None)
@@ -1067,6 +1155,10 @@ class SessionService:
             req_prompt = run_requirements_check(user_message, brief_for_graph, existing_elements, referenced_elements)
 
             if req_prompt:
+                session.brief["_pending_clarification_user_message"] = user_message
+                brief_for_graph["_pending_clarification_user_message"] = user_message
+                session.brief["primary_user_request"] = user_message
+                brief_for_graph["primary_user_request"] = user_message
                 result_state = {
                     "brief": brief_for_graph,
                     "result": {

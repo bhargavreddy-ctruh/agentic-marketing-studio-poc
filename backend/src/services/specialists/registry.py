@@ -151,7 +151,7 @@ def load_all_specialists() -> None:
         name="palette_strategist",
         # text_card_writer added 2026-10-05 — same reasoning as reference_curator above.
         prompt_file="palette_strategist.md",
-        allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("color_palette_extractor", "visual_palette_analyzer", "brand_kit_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Decides a color direction — standalone-reachable via direct_fix, as a real canvas text card.",
         required_output_fields=("color_palette", "text_card_storage_ref"),
@@ -236,11 +236,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="sound_designer",
         prompt_file="sound_designer.md",
-        # mux_audio_into_video is no longer in this list (Tasks.md #1, 2026-09-22): muxing is now
-        # performed directly by motion_lead.py's executor, a deterministic ffmpeg step with no
-        # agentic reasoning at call time — sound_designer only decides WHETHER via its own
-        # `should_mux` judgment, made without ever seeing the video (real parallel execution).
-        allowed_tools=("brand_kit_lookup", "text_to_speech", "data_concierge"),
+        allowed_tools=("brand_kit_lookup", "text_to_speech", "data_concierge", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Produces voiceover/narration audio (text_to_speech) independently of the video itself — decides whether it should later be muxed in, but never touches video directly.",
         required_output_fields=("audio_recommendation", "voiceover_line", "should_mux", "notes"),
@@ -250,7 +246,7 @@ def load_all_specialists() -> None:
         prompt_file="overlay_artist.md",
         allowed_tools=(
             "product_lookup", "discount_claims_calculator", "discount_math_calculator",
-            "brand_kit_lookup", "data_concierge", "text_overlay",
+            "brand_kit_lookup", "data_concierge", "text_overlay", "delegate_task",
         ),
         tier=ModelTier.TIER_1,
         description="Adds a SIMPLE text label or headline onto an image as a floating overlay (NOT baked into the image), at the SAME aspect ratio/size as the source — cannot reshape, recompose, or restyle. ONLY use when the user explicitly asks to 'add text', 'add a headline', or 'add a caption' as a separate layer on an image that otherwise stays the same. Do NOT use for image edits, price modifications, striking through prices, or any visual modification of the image content itself (those go to composition_artist), and do NOT use for a thumbnail/poster/hero-banner/story-style request that uses an existing photo as reference material for a new, differently-shaped deliverable (that goes to illustrator for an image-to-image generation) — even if the request also mentions bold text, since the image itself needs to change, not just gain a text layer.",
@@ -259,10 +255,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="shot_planner",
         prompt_file="shot_planner.md",
-        # text_card_writer added 2026-09-22 — writes the real, visible "shot_list" text card as a
-        # genuine tool call, the same agentic pattern every other generation capability already
-        # uses, per an explicit user ask.
-        allowed_tools=("web_trend_search", "brand_kit_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("web_trend_search", "brand_kit_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_2,
         description="Plans shot composition for the full_video pipeline BEFORE any footage is generated — never produces or edits a media asset itself, but does write the real shot-list text card.",
         required_output_fields=("overall_story", "shots"),
@@ -271,32 +264,15 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="script_writer",
         prompt_file="script_writer.md",
-        # recall added 2026-10-05 (tiered conversation memory) — an on-demand lookup for an exact
-        # earlier decision/number the current window+digests summary doesn't already carry.
-        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer", "recall"),
+        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer", "recall", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Writes the narration/voiceover SCRIPT TEXT for the full_video pipeline — text only, produces no audio or video itself (sound_designer turns this into real audio) — as a real canvas text card.",
         required_output_fields=("has_script", "script_line", "text_card_storage_ref"),
     ))
-    # Copy Lead group (2026-09-29, Architecture.md's Copy Lead table) — all four are pure-JSON,
-    # lookup-only specialists (see `is_lookup_only`/`_LOOKUP_ONLY_TOOLS` above), standalone-reachable
-    # via direct_fix per the architecture doc's own examples ("just give me 5 headline options",
-    # "write the caption, I already have the image", "make this copy more minimal/more playful",
-    # "double-check the discount math before this goes out").
-    #
-    # text_card_writer added to all four (2026-09-30, per explicit user ask: "we need their output
-    # as canvas element") — each now writes its real result as a visible canvas text card, the
-    # same real tool call narrator.md already uses, rather than surfacing only as a chat message.
-    # This also makes each of them NOT `is_lookup_only` anymore (their allowed_tools include a
-    # real asset-producing tool) — they now flow through the ordinary "found a real storage_ref"
-    # path every asset-producing specialist already uses, no special-casing needed.
     register_specialist(SpecialistSpec(
         name="headline_writer",
         prompt_file="headline_writer.md",
-        # product_lookup added 2026-10-05 (fidelity audit): a headline claiming/implying a product
-        # fact (a spec, a price, a feature) needs the same real grounding every other copy
-        # specialist already has — see headline_writer.md's own mandatory-lookup rule.
-        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Writes short, high-impact headlines/lead lines and alternatives for a campaign, as a real canvas text card.",
         required_output_fields=("primary_headline", "alternative_headlines", "hook_strategy", "text_card_storage_ref"),
@@ -304,7 +280,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="caption_writer",
         prompt_file="caption_writer.md",
-        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("brand_kit_lookup", "product_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Writes the full social caption — body copy, call-to-action, and hashtags — for an already-approved headline/concept, as a real canvas text card.",
         required_output_fields=("caption_body", "call_to_action", "hashtags", "text_card_storage_ref"),
@@ -313,7 +289,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="tone_calibrator",
         prompt_file="tone_calibrator.md",
-        allowed_tools=("brand_kit_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("brand_kit_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Calibrates brand voice up/down for a specific audience segment (e.g. 'make this more minimal/more playful'), as a real canvas text card.",
         required_output_fields=("target_segment", "tone_profile", "voice_guidelines", "text_card_storage_ref"),
@@ -321,7 +297,7 @@ def load_all_specialists() -> None:
     register_specialist(SpecialistSpec(
         name="copy_claims_checker",
         prompt_file="copy_claims_checker.md",
-        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup", "data_concierge", "text_card_writer"),
+        allowed_tools=("product_lookup", "discount_claims_calculator", "brand_kit_lookup", "data_concierge", "text_card_writer", "delegate_task"),
         tier=ModelTier.TIER_1,
         description="Verifies prices, discounts, specs, and claims stated in marketing copy against real product facts — flags each as verified/invalid/unconfirmed with a correction, as a real canvas text card.",
         required_output_fields=("verified", "flagged_claims", "verification_notes", "text_card_storage_ref"),

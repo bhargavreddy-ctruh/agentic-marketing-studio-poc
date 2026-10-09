@@ -38,7 +38,13 @@ class DataConciergeTool(Tool):
         self._service = DataConciergeService()
 
     async def run(self, args: dict, context: dict | None = None) -> ToolResult:
-        query = str(args.get("query") or "").strip()
+        query = str(
+            args.get("query")
+            or args.get("question")
+            or args.get("prompt")
+            or args.get("search")
+            or ""
+        ).strip()
         if not query:
             return ToolResult(ok=False, data={}, error="query argument is required")
 

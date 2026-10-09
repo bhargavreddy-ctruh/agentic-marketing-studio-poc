@@ -16,37 +16,26 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from ...core.config import settings
 from ...core.events import emit
 from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 from .gemini import GeminiProvider
+from .grok import GrokProvider
 from .groq import GroqProvider
 
 log = get_logger(__name__)
 
-# Real, live-found noise/waste (2026-09-26, explicit user report — a screenshot showing the SAME
-# "groq unavailable — switching to replicate_llm" line repeated 4 times in a row for one
-# specialist's run): Groq's own per-call retry already tries every configured key once and gives
-# up fast (`groq.py`'s `retries=0`) — correct for a single call. But `LLMRouter` had no memory
-# ACROSS calls, so every iteration of the same specialist's multi-tool-call agentic loop
-# re-attempted Groq from scratch, hit the exact same rate limit again, and re-logged/re-emitted
-# the identical fallback message — wasted requests and repeated noise, not a retry that could ever
-# plausibly succeed sooner than the rate limit actually resets. A rate-limit window is normally on
-# the order of a minute, not milliseconds, so "try again next call" was never a real recovery
-# chance anyway.
-_GROQ_COOLDOWN_SECONDS = 60.0
+_GEMINI_COOLDOWN_SECONDS = 30.0
 
 
 class LLMRouter(LLMProvider):
     def __init__(self):
-        self._primary = GroqProvider()
-        self._fallback = GeminiProvider()
-        # Monotonic timestamp until which Groq is skipped entirely (0 = never tripped / already
-        # expired). Instance-level, not per-call — `get_llm_provider()` is a singleton, so this
-        # state is naturally shared across every specialist/tool-calling iteration in the process,
-        # which is exactly the scope a rate limit actually applies at.
-        self._groq_cooldown_until: float = 0.0
+        self._primary = GeminiProvider()
+        self._fallback_grok = GrokProvider()
+        self._fallback_groq = GroqProvider()
+        self._gemini_cooldown_until: float = 0.0
 
     async def complete(
         self,
@@ -55,35 +44,57 @@ class LLMRouter(LLMProvider):
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         now = time.monotonic()
-        if now < self._groq_cooldown_until:
-            return await self._fallback.complete(
-                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
-                on_delta=on_delta,
-            )
+        last_error: Exception | None = None
 
-        try:
-            result = await self._primary.complete(
-                tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
-                on_delta=on_delta,
-            )
-            self._groq_cooldown_until = 0.0  # a real success clears any earlier trip
-            return result
-        except ProviderUnavailable as exc:
-            self._groq_cooldown_until = now + _GROQ_COOLDOWN_SECONDS
-            log.warning(
-                "llm_router_falling_back_to_gemini",
-                extra={"_extra_tier": tier.name, "_extra_groq_error": exc.message},
-            )
-            emit("llm_provider_fallback", tier=tier.name, from_provider="groq", to_provider="gemini")
+        # 1. Main Provider: Gemini
+        if now >= self._gemini_cooldown_until:
+            try:
+                result = await self._primary.complete(
+                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                    on_delta=on_delta,
+                )
+                self._gemini_cooldown_until = 0.0
+                return result
+            except ProviderUnavailable as exc:
+                self._gemini_cooldown_until = now + _GEMINI_COOLDOWN_SECONDS
+                last_error = exc
+                log.warning(
+                    "llm_router_gemini_failed",
+                    extra={"_extra_tier": tier.name, "_extra_gemini_error": exc.message},
+                )
 
-        return await self._fallback.complete(
-            tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
-            on_delta=on_delta,
-        )
+        # 2. Fallback: Grok (xAI)
+        grok_key = self._fallback_grok._api_key or settings.grok_api_key or settings.xai_api_key
+        if grok_key:
+            try:
+                emit("llm_provider_fallback", tier=tier.name, from_provider="gemini", to_provider="grok")
+                return await self._fallback_grok.complete(
+                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                    on_delta=on_delta,
+                )
+            except ProviderUnavailable as exc:
+                last_error = exc
+                log.warning(
+                    "llm_router_grok_failed",
+                    extra={"_extra_tier": tier.name, "_extra_grok_error": exc.message},
+                )
+
+        # 3. Tertiary fallback: Groq
+        if settings.groq_api_key:
+            try:
+                emit("llm_provider_fallback", tier=tier.name, from_provider="gemini", to_provider="groq")
+                return await self._fallback_groq.complete(
+                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
+                    on_delta=on_delta,
+                )
+            except ProviderUnavailable as exc:
+                last_error = exc
+
+        raise last_error or ProviderUnavailable("llm_router", "All configured LLM providers failed")
 
 
 _singleton: LLMRouter | None = None

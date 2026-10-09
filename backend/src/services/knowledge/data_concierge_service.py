@@ -129,14 +129,32 @@ class DataConciergeService:
             except Exception as exc:
                 log.debug("data_concierge_session_memory_failed", extra={"_extra_error": str(exc)})
 
-        # 4. Canvas Referenced Elements
+        # 4. Canvas Elements (both referenced elements and live session elements)
         if referenced_elements:
             elem_summary = "\n".join(
                 f"- Type: {el.get('element_type')}, Description: {el.get('description')}, StorageRef: {el.get('storage_ref')}"
                 for el in referenced_elements
             )
-            context_chunks.append(f"[CANVAS ELEMENTS]\n{elem_summary}")
-            sources.append("canvas_elements")
+            context_chunks.append(f"[REFERENCED CANVAS ELEMENTS]\n{elem_summary}")
+            sources.append("referenced_canvas_elements")
+
+        if session_id:
+            try:
+                from ...repositories.postgres.postgres_canvas_repository import (
+                    PostgresCanvasRepository,
+                )
+                async with async_session_factory() as db:
+                    canvas_repo = PostgresCanvasRepository(db)
+                    session_elements = await canvas_repo.list_for_session(session_id)
+                    if session_elements:
+                        canvas_summary = "\n".join(
+                            f"- Type: {el.element_type}, Produced by: {el.produced_by_specialist}, StorageRef: {el.storage_ref}, Metadata: {el.metadata_json}"
+                            for el in session_elements[-6:]
+                        )
+                        context_chunks.append(f"[CURRENT SESSION GENERATED ASSETS ON CANVAS]\n{canvas_summary}")
+                        sources.append("live_session_canvas")
+            except Exception as exc:
+                log.debug("data_concierge_session_canvas_failed", extra={"_extra_error": str(exc)})
 
         if not context_chunks:
             return {

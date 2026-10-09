@@ -421,6 +421,16 @@ async def run_specialist_agentic(
             if "data_concierge" in spec.allowed_tools
             else ""
         )
+        + (
+            "CRITICAL RULE 7 — Peer Collaboration & Delegation: "
+            "You are part of a collaborative creative agent team working toward a shared collective goal. "
+            "If you need another specialist's assistance to produce a sub-deliverable (e.g. asking `headline_writer` for copy, "
+            "`caption_writer` for social text, `sound_designer` for audio, `shot_planner` for scene beats, or `compliance_lead` for verification), "
+            "you MUST call `delegate_task(target_specialist_name=..., task_instruction=...)`. "
+            "Inspect the peer agent's returned data and integrate it seamlessly into your deliverable.\n"
+            if "delegate_task" in spec.allowed_tools
+            else ""
+        )
         + "</MASTER_DIRECTIVE>"
     )
     llm = get_llm_provider()
@@ -497,7 +507,7 @@ async def run_specialist_agentic(
                         tools=tool_schemas or None,
                         # 1024 was too tight in practice (Memory.md, Phase 1) — same reasoning-overhead
                         # finding as ideation_service.py, and again with Groq's gpt-oss models.
-                        max_tokens=2048,
+                        max_tokens=4096,
                         # Real live "thinking" text, per the user's explicit ask (2026-09-21) — a
                         # no-op unless STREAM_LLM_THINKING_ENABLED is on and the provider actually
                         # streams (see base.py's own docstring on this parameter).
@@ -687,7 +697,16 @@ async def run_specialist_agentic(
                     tool_calls.append(record)
                     tool_content = {"ok": record.ok, "data": record.data, "error": record.error}
                     if not record.ok:
-                        tool_content["_system_note"] = "If a tool fails, do not repeat the exact same call. If you cannot fulfill the request, return your final JSON response immediately."
+                        tool_content["_system_note"] = (
+                            "The tool call encountered an issue. Analyze the error carefully, adjust your arguments, "
+                            "fix any invalid values or missing parameters, or try an alternative approach. "
+                            "Do not give up immediately — you have multiple iterations to self-correct."
+                        )
+                    elif record.ok and record.data.get("storage_ref"):
+                        tool_content["_system_note"] = (
+                            f"Asset created successfully (storage_ref: {record.data['storage_ref']}). "
+                            "You may now evaluate or refine this asset, perform peer review if needed, or output your final JSON response."
+                        )
                     
                     messages.append({
                         "role": "tool",

@@ -38,9 +38,6 @@ export function useChatStream(
           thinking += event.text;
           setLiveThinking(thinking);
         }
-        if (event.type === "plan_proposed" && Array.isArray(event.plan)) {
-          setMessages((m) => [...m, { id: newId(), role: "plan", text: "", planSteps: event.plan as PlanStep[] }]);
-        }
         onTurnEvent?.(event);
 
         if (event.type === "turn_completed") {

@@ -23,12 +23,6 @@ from ._openai_compatible import call_openai_compatible_chat
 from .base import LLMProvider, LLMResult, ModelTier
 from .key_cooldown import is_cooling_down, mark_rate_limited
 
-_TIER_TO_MODELS: dict[ModelTier, str | None] = {
-    ModelTier.TIER_1: settings.groq_model_tier_1,
-    ModelTier.TIER_2: settings.groq_model_tier_2,
-    ModelTier.TIER_3: settings.groq_model_tier_3,
-}
-
 
 class GroqProvider(LLMProvider):
     def __init__(self, api_key: str | None = None, base_url: str | None = None):
@@ -36,7 +30,12 @@ class GroqProvider(LLMProvider):
         self._base_url = (base_url or settings.groq_base_url).rstrip("/")
 
     def _resolve_models(self, tier: ModelTier) -> list[str]:
-        raw = _TIER_TO_MODELS.get(tier)
+        tier_to_models = {
+            ModelTier.TIER_1: settings.groq_model_tier_1,
+            ModelTier.TIER_2: settings.groq_model_tier_2,
+            ModelTier.TIER_3: settings.groq_model_tier_3,
+        }
+        raw = tier_to_models.get(tier)
         if not raw:
             raise ProviderUnavailable(
                 "groq", f"no model configured for {tier.name} — set groq_model_tier_{tier.value} in .env"
@@ -50,7 +49,7 @@ class GroqProvider(LLMProvider):
         system: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         if not self._api_key:

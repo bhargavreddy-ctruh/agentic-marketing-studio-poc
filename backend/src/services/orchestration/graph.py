@@ -140,8 +140,11 @@ _PLAN_CONTEXT_WORTHY_FIELDS = frozenset(
     {
         "tone_profile", "voice_guidelines", "target_segment",
         "color_palette", "reference_summary",
-        "primary_headline", "alternative_headlines", "hook_strategy",
-        "overall_story", "shots", "pacing_target",
+        "primary_headline", "alternative_headlines", "headline", "subheadline", "hook_strategy",
+        "caption_body", "caption", "call_to_action", "hashtags", "body_copy", "copy", "text", "tagline",
+        "overall_story", "shots", "pacing_target", "script",
+        "image_prompt", "aesthetic_direction", "palette_direction", "motion_prompt", "camera_motion",
+        "overlay_text", "notes",
         "verified", "flagged_claims", "verification_notes",
     }
 )
@@ -517,6 +520,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
     last_completed_specialist = resume_completed.get("last_completed_specialist")
     all_metadata = dict(resume_completed.get("all_metadata") or {})
     extra_elements = list(resume_completed.get("extra_elements") or [])
+    last_completed_target_element_id: str | None = None
 
     if brief.get("clarification_answer"):
         current_context.append({
@@ -599,7 +603,11 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
 
         if latest_ref_snapshot:
             instruction_text += f"\n\nThe previous step generated/modified an asset. Its storage_ref is: {latest_ref_snapshot}. Use this asset as your source image/video if applicable."
-        elif not referenced_elements:
+        if extra_elements:
+            other_refs = [f"{el.get('produced_by_specialist', 'step')} ({el.get('element_type', 'asset')}: {el['storage_ref']})" for el in extra_elements if el.get("storage_ref")]
+            if other_refs:
+                instruction_text += f"\n\nAdditional assets already produced in this campaign plan: {', '.join(other_refs)}."
+        if not referenced_elements and not latest_ref_snapshot and not extra_elements:
             # Real, live-found bug (2026-09-25, live-reproduced: a fresh request with nothing
             # to reference yet — e.g. "make a mclaren campaign post" — reached `palette_strategist`
             # right after `reference_curator` produced no real asset). Nothing in this step's

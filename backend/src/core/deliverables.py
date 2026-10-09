@@ -30,7 +30,7 @@ DELIVERABLES = {
     ),
     "instagram_square": DeliverableSpec(
         key="instagram_square",
-        label="Instagram Feed (1:1)",
+        label="Square Post (1:1)",
         aspect_ratio="1:1",
         width=1080,
         height=1080,
@@ -39,7 +39,7 @@ DELIVERABLES = {
     ),
     "meta_portrait": DeliverableSpec(
         key="meta_portrait",
-        label="Meta Feed Portrait (4:5)",
+        label="Portrait Post (4:5)",
         aspect_ratio="4:5",
         width=1080,
         height=1350,
@@ -48,7 +48,7 @@ DELIVERABLES = {
     ),
     "instagram_story": DeliverableSpec(
         key="instagram_story",
-        label="Instagram Story / Reels (9:16)",
+        label="Vertical Story / Reel (9:16)",
         aspect_ratio="9:16",
         width=1080,
         height=1920,
@@ -81,11 +81,29 @@ DELIVERABLES = {
         required_slots=["subject_image"],
         optional_slots=["title_text"],
     ),
+    "twitter_post": DeliverableSpec(
+        key="twitter_post",
+        label="Twitter / X Post (16:9)",
+        aspect_ratio="16:9",
+        width=1200,
+        height=675,
+        required_slots=["subject_image"],
+        optional_slots=["title_text", "logo"],
+    ),
+    "twitter_header": DeliverableSpec(
+        key="twitter_header",
+        label="Twitter / X Header (3:1)",
+        aspect_ratio="3:1",
+        width=1500,
+        height=500,
+        required_slots=["subject_image"],
+        optional_slots=["title_text", "logo"],
+    ),
     "instagram_post_ambiguous": DeliverableSpec(
-        key="instagram_post_ambiguous",
-        label="Instagram Post (Format Needed)",
-        aspect_ratio="1:1", # fallback
-        is_ambiguous=True,
+        key="instagram_square",
+        label="Square Post",
+        aspect_ratio="1:1",
+        is_ambiguous=False,
     )
 }
 
@@ -108,10 +126,13 @@ _REGEX_MAPPINGS = [
 
     # Vaguer keyword-only patterns — checked only once no explicit ratio/dimension matched.
     # Tightened to avoid false positives on single nouns that can be subjects (e.g., "banner", "poster", "landscape", "square", "portrait", "story")
-    (r"\b(instagram post|insta post|ig post|instagram image|instagram)\b", "instagram_post_ambiguous"),
+    # Instagram defaults directly to 1:1 square without halting the user for format disambiguation
+    (r"\b(instagram post|insta post|ig post|instagram image|instagram)\b", "instagram_square"),
     (r"\b(instagram story|insta story|ig story|instagram reel|insta reel|ig reel|facebook story|fb story)\b", "instagram_story"),
     (r"\b(youtube thumbnail|yt thumbnail)\b", "youtube_thumbnail"),
     (r"\b(youtube video|yt video|landscape video|web banner|website banner)\b", "landscape_banner"),
+    (r"\b(twitter post|twitter image|twitter banner|tweet|twitter|x post|x banner)\b", "twitter_post"),
+    (r"\b(twitter header|x header)\b", "twitter_header"),
     (r"\b(movie poster|campaign poster)\b", "poster"),
     (r"\b(meta portrait|facebook portrait|fb portrait)\b", "meta_portrait"),
     (r"\b(linkedin post|linkedin)\b", "linkedin_post"),

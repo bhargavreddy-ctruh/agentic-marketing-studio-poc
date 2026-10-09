@@ -82,14 +82,18 @@ class Settings(BaseSettings):
     # term; Groq's catalog changes over time same as OpenRouter's.
     groq_api_key: str | None = None
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model_tier_1: str = "llama-3.1-8b-instant"
-    groq_model_tier_2: str | None = "llama-3.1-70b-versatile"
-    groq_model_tier_3: str | None = "llama-3.1-70b-versatile"
-    # A dedicated vision-capable model, deliberately separate from the Tier 1/2/3 system — vision
-    # is a CAPABILITY question ("can this model see an image at all"), not a "how smart" tier
-    # choice, and none of the Tier models above support image input. Confirmed live and free
-    # (Memory.md, Phase 4): a real image correctly described, including spotting a watermark.
+    groq_model_tier_1: str = "openai/gpt-oss-20b"
+    groq_model_tier_2: str | None = "openai/gpt-oss-120b"
+    groq_model_tier_3: str | None = "openai/gpt-oss-120b"
     groq_vision_model: str = "llama-3.2-90b-vision-preview"
+
+    # --- xAI / Grok provider settings ---
+    grok_api_key: str | None = None
+    xai_api_key: str | None = None
+    grok_base_url: str = "https://api.x.ai/v1"
+    grok_model_tier_1: str = "grok-2-latest"
+    grok_model_tier_2: str = "grok-2-latest"
+    grok_model_tier_3: str = "grok-2-latest"
 
 
 
