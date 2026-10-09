@@ -87,14 +87,6 @@ class Settings(BaseSettings):
     groq_model_tier_3: str | None = "openai/gpt-oss-120b"
     groq_vision_model: str = "llama-3.2-90b-vision-preview"
 
-    # --- xAI / Grok provider settings ---
-    grok_api_key: str | None = None
-    xai_api_key: str | None = None
-    grok_base_url: str = "https://api.x.ai/v1"
-    grok_model_tier_1: str = "grok-2-latest"
-    grok_model_tier_2: str = "grok-2-latest"
-    grok_model_tier_3: str = "grok-2-latest"
-
 
 
     # --- Text-to-speech (local, not a remote provider) ---

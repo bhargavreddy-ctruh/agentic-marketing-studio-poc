@@ -1,9 +1,14 @@
 """
-LLMRouter — combines GroqProvider (primary) and ReplicateLLMProvider (final fallback) behind the
-single LLMProvider protocol.
+LLMRouter — combines GeminiProvider (primary) and GroqProvider (fallback) behind the single
+LLMProvider protocol.
 
-Every tier: tries Groq first (one attempt per key, never retries — fail fast and move on). On
-failure, falls back to ReplicateLLM, which retries with exponential backoff.
+Every tier: tries Gemini first. On failure, falls back to Groq (one attempt per key, never
+retries — fail fast and move on).
+
+Grok (xAI) was removed entirely (2026-10-09, explicit user decision) — it sat as a middle fallback
+between Gemini and Groq with no evidence it was ever actually needed; removing it also removes one
+more provider's worth of surface area (its own API key, its own failure mode) for no observed
+benefit.
 
 Local Ollama was removed entirely (2026-09-28, explicit user decision) — it was already unused in
 practice (every one of this app's 9 TIER_1 specialists had opted out via `prefer_local=False`
@@ -22,7 +27,6 @@ from ...core.exceptions import ProviderUnavailable
 from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 from .gemini import GeminiProvider
-from .grok import GrokProvider
 from .groq import GroqProvider
 
 log = get_logger(__name__)
@@ -33,7 +37,6 @@ _GEMINI_COOLDOWN_SECONDS = 30.0
 class LLMRouter(LLMProvider):
     def __init__(self):
         self._primary = GeminiProvider()
-        self._fallback_grok = GrokProvider()
         self._fallback_groq = GroqProvider()
         self._gemini_cooldown_until: float = 0.0
 
@@ -48,7 +51,13 @@ class LLMRouter(LLMProvider):
         on_delta: Callable[[str], None] | None = None,
     ) -> LLMResult:
         now = time.monotonic()
-        last_error: Exception | None = None
+        # Real, live-found bug (2026-10-09): this used to keep only the LAST provider's error and
+        # `raise last_error` when every provider failed — so a turn where Gemini also failed
+        # surfaced only Groq's error to the user, with zero indication Gemini was even tried, let
+        # alone why IT failed. Misleading for anyone debugging a failure from the specialist card
+        # alone. Now collects every attempted provider's own failure reason and raises one
+        # combined, accurate message instead.
+        failures: list[str] = []
 
         # 1. Main Provider: Gemini
         if now >= self._gemini_cooldown_until:
@@ -61,29 +70,15 @@ class LLMRouter(LLMProvider):
                 return result
             except ProviderUnavailable as exc:
                 self._gemini_cooldown_until = now + _GEMINI_COOLDOWN_SECONDS
-                last_error = exc
+                failures.append(f"gemini: {exc.message}")
                 log.warning(
                     "llm_router_gemini_failed",
                     extra={"_extra_tier": tier.name, "_extra_gemini_error": exc.message},
                 )
+        else:
+            failures.append("gemini: skipped (still in cooldown from a recent failure)")
 
-        # 2. Fallback: Grok (xAI)
-        grok_key = self._fallback_grok._api_key or settings.grok_api_key or settings.xai_api_key
-        if grok_key:
-            try:
-                emit("llm_provider_fallback", tier=tier.name, from_provider="gemini", to_provider="grok")
-                return await self._fallback_grok.complete(
-                    tier=tier, system=system, messages=messages, tools=tools, max_tokens=max_tokens,
-                    on_delta=on_delta,
-                )
-            except ProviderUnavailable as exc:
-                last_error = exc
-                log.warning(
-                    "llm_router_grok_failed",
-                    extra={"_extra_tier": tier.name, "_extra_grok_error": exc.message},
-                )
-
-        # 3. Tertiary fallback: Groq
+        # 2. Fallback: Groq
         if settings.groq_api_key:
             try:
                 emit("llm_provider_fallback", tier=tier.name, from_provider="gemini", to_provider="groq")
@@ -92,9 +87,11 @@ class LLMRouter(LLMProvider):
                     on_delta=on_delta,
                 )
             except ProviderUnavailable as exc:
-                last_error = exc
+                failures.append(f"groq: {exc.message}")
+        else:
+            failures.append("groq: skipped (no API key configured)")
 
-        raise last_error or ProviderUnavailable("llm_router", "All configured LLM providers failed")
+        raise ProviderUnavailable("llm_router", "all providers failed — " + "; ".join(failures))
 
 
 _singleton: LLMRouter | None = None

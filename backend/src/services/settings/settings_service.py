@@ -35,8 +35,6 @@ _STR_SETTINGS_KEYS = {
     "replicate_api_token",
     "langsmith_api_key",
     "gemini_api_key",
-    "grok_api_key",
-    "xai_api_key",
     # Product/Brand crawler (2026-09-28) — providers/crawlers/firecrawl_provider.py constructs its
     # client fresh on every call (crawls are infrequent, unlike the constantly-called LLM/image
     # providers), reading `settings.firecrawl_api_key` directly each time — so a live override
@@ -58,6 +56,9 @@ _ENV_ONLY_KEYS = {"cloudinary_url": "CLOUDINARY_URL"}
 # 2026-10-09: `falai_api_key` removed the same way — fal.ai was never wired into
 # `get_video_provider()` (its account balance came back revoked during testing), so this key
 # affected nothing live either. The provider file itself (`providers/video/falai.py`) was deleted.
+# `grok_api_key`/`xai_api_key` removed the same day, same reasoning — Grok (xAI) was pulled out of
+# `router.py`'s fallback chain entirely (explicit user decision), so these keys affect nothing live
+# either. `providers/llm/grok.py` was deleted.
 WHITELIST: set[str] = _STR_SETTINGS_KEYS | _BOOL_KEYS | set(_ENV_ONLY_KEYS)
 
 _KEY_TO_RESETTERS: dict[str, list[Callable[[], None]]] = {
@@ -65,8 +66,6 @@ _KEY_TO_RESETTERS: dict[str, list[Callable[[], None]]] = {
     "replicate_api_token": [reset_llm_provider, reset_video_provider],
     "langsmith_api_key": [configure_langsmith],
     "gemini_api_key": [reset_llm_provider],
-    "grok_api_key": [reset_llm_provider],
-    "xai_api_key": [reset_llm_provider],
 }
 
 _last_applied: dict[str, str] = {}
