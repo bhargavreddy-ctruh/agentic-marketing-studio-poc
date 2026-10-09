@@ -668,6 +668,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         return groups
 
     emit("lead_started", lead="dynamic_executor")
+    intermediate_ref_to_target_id = {}
     try:
         for group_indices in _group_plan_steps(plan):
             group_indices = [gi for gi in group_indices if plan[gi].get("specialist")]
@@ -721,18 +722,34 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
                 # Determine the specific target element ID this step operated on, if any.
                 # (Fixes the "generated images all go to the first product" bug when editing multiple elements)
                 target_element_id = None
-                if referenced_elements:
+                if referenced_elements or intermediate_ref_to_target_id:
                     for c in step_result.tool_calls:
-                        ref = c.args.get("storage_ref") or c.args.get("reference_storage_ref") or c.args.get("image_storage_ref")
-                        if ref:
-                            matching_el = next((el for el in referenced_elements if el.get("storage_ref") == ref), None)
-                            if matching_el:
-                                target_element_id = matching_el.get("id")
+                        # Check all argument values (e.g. source_image_storage_ref, reference_storage_ref, etc.)
+                        # to see if any match one of our referenced elements OR a previous step's output.
+                        found = False
+                        for arg_val in c.args.values():
+                            vals_to_check = arg_val if isinstance(arg_val, list) else [arg_val]
+                            for val in vals_to_check:
+                                if isinstance(val, str) and val:
+                                    matching_el = next((el for el in referenced_elements if el.get("storage_ref") == val), None)
+                                    if matching_el:
+                                        target_element_id = matching_el.get("id")
+                                        found = True
+                                        break
+                                    elif val in intermediate_ref_to_target_id:
+                                        target_element_id = intermediate_ref_to_target_id[val]
+                                        found = True
+                                        break
+                            if found:
                                 break
+                        if found:
+                            break
 
                 for c in step_result.tool_calls:
                     ref = c.data.get("storage_ref")
                     if c.ok and ref and ref != produced_ref:
+                        if target_element_id:
+                            intermediate_ref_to_target_id[ref] = target_element_id
                         extra_elements.append({
                             "storage_ref": ref,
                             "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
@@ -751,6 +768,8 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
                             **({"target_element_id": last_completed_target_element_id} if locals().get("last_completed_target_element_id") else {})
                         })
                     latest_storage_ref = produced_ref
+                    if target_element_id:
+                        intermediate_ref_to_target_id[produced_ref] = target_element_id
                     latest_tool = produced_tool
                     last_completed_specialist = specialist
                     last_completed_target_element_id = target_element_id
