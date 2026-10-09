@@ -133,6 +133,33 @@ def _auto_placement(image: Image.Image) -> str:
     return best_zone
 
 
+def _get_vibrant_accent(image: Image.Image) -> tuple[int, int, int, int]:
+    """Extracts the most vibrant color from the image to use as an accent text color."""
+    small = image.copy()
+    small.thumbnail((150, 150))
+    hsv = small.convert("HSV")
+    rgb_data = small.load()
+    hsv_data = hsv.load()
+    
+    best_color = (255, 255, 255, 255)
+    max_vibrancy = -1
+    
+    w, h = small.size
+    for y in range(h):
+        for x in range(w):
+            rgba = rgb_data[x, y]
+            _, s, v = hsv_data[x, y]
+            vibrancy = s * v
+            if v < 120: continue # Skip very dark colors
+            if vibrancy > max_vibrancy:
+                max_vibrancy = vibrancy
+                best_color = (rgba[0], rgba[1], rgba[2], 255)
+                
+    if max_vibrancy <= 0:
+        return (255, 255, 255, 255)
+    return best_color
+
+
 _PLACEMENTS = {
     "lower third": lambda w, h, tw, th: ((w - tw) // 2, int(h * 0.85) - th),
     "lower third, centered": lambda w, h, tw, th: ((w - tw) // 2, int(h * 0.85) - th),
@@ -172,7 +199,11 @@ class TextOverlayTool(Tool):
                 "enum": ["Montserrat", "Oswald", "Playfair Display", "Roboto"],
                 "description": "e.g., Montserrat, Oswald, Playfair Display, Roboto"
             },
-            "text_color": {"type": "string", "description": "Hex color code, e.g., #ffffff"},
+            "text_color": {
+                "type": "string", 
+                "default": "auto",
+                "description": "Hex color code, e.g., #ffffff. Use 'auto' to extract a vibrant accent color from the image."
+            },
             "backend": {
                 "type": "string",
                 "enum": ["pillow", "svg"],
@@ -189,17 +220,9 @@ class TextOverlayTool(Tool):
         text = _sanitize_for_default_font(str(args.get("text") or "").strip())
         placement = str(args.get("placement") or "lower third").strip().lower().replace("-", " ")
         font_family = str(args.get("font_family") or "montserrat")
-        text_color_hex = str(args.get("text_color") or "#ffffff").strip()
+        text_color_hex = str(args.get("text_color") or "auto").strip().lower()
         backend = str(args.get("backend") or "svg").strip().lower()
         
-        try:
-            hex_str = text_color_hex.lstrip('#')
-            text_color = tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
-            if len(text_color) == 3:
-                text_color = text_color + (255,)
-        except Exception:
-            text_color = (255, 255, 255, 255)
-
         if not storage_ref or not text:
             return ToolResult(ok=False, data={}, error="storage_ref and text are required")
 
@@ -211,6 +234,18 @@ class TextOverlayTool(Tool):
         with Image.open(io.BytesIO(image_bytes)) as opened:
             base = opened.convert("RGBA")
         width, height = base.size
+
+        if text_color_hex == "auto":
+            text_color = _get_vibrant_accent(base)
+            print(f"Auto-selected text color: {text_color}")
+        else:
+            try:
+                hex_str = text_color_hex.lstrip('#')
+                text_color = tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
+                if len(text_color) == 3:
+                    text_color = text_color + (255,)
+            except Exception:
+                text_color = (255, 255, 255, 255)
 
         if placement == "auto":
             placement = _auto_placement(base)
@@ -225,7 +260,14 @@ class TextOverlayTool(Tool):
         # Use Pillow to accurately measure and wrap text regardless of backend
         dummy_img = Image.new("RGBA", (1, 1))
         dummy_draw = ImageDraw.Draw(dummy_img)
-        max_w = int(width * 0.85)
+        
+        # Constrain max width based on the placement zone to prevent spilling
+        if "left" in placement or "right" in placement:
+            max_w = int(width * 0.45)
+        elif "center" in placement and placement != "lower third, centered":
+            max_w = int(width * 0.55)
+        else:
+            max_w = int(width * 0.85)
 
         def fit_text(text_lines, target_size):
             size = target_size

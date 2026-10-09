@@ -34,9 +34,9 @@ class ImageCropResizeTool(Tool):
             },
             "crop_mode": {
                 "type": "string",
-                "enum": ["cover", "contain", "center_crop"],
-                "default": "cover",
-                "description": "'cover' fills dimensions cropping edges, 'contain' pads background, 'center_crop' crops center.",
+                "enum": ["auto_subject", "cover", "contain", "center_crop"],
+                "default": "auto_subject",
+                "description": "'auto_subject' crops around the main subject using edge detection, 'cover' center-crops, 'contain' pads.",
             },
         },
         "required": ["storage_ref", "target_width", "target_height"],
@@ -62,12 +62,33 @@ class ImageCropResizeTool(Tool):
         image_bytes, _ = loaded
 
         try:
+            from PIL import ImageFilter
             with Image.open(io.BytesIO(image_bytes)) as opened:
                 img = opened.convert("RGB")
 
             if crop_mode == "contain":
                 padded = ImageOps.pad(img, (target_w, target_h), color=(0, 0, 0))
                 out_img = padded
+            elif crop_mode == "auto_subject":
+                # Find center of mass of the subject using edge detection
+                edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
+                edges.thumbnail((256, 256), Image.NEAREST)
+                ew, eh = edges.size
+                total_weight = 0
+                cx, cy = 0, 0
+                for y in range(eh):
+                    for x in range(ew):
+                        w_val = edges.getpixel((x, y))
+                        total_weight += w_val
+                        cx += x * w_val
+                        cy += y * w_val
+                if total_weight > 0:
+                    center_x = (cx / total_weight) / ew
+                    center_y = (cy / total_weight) / eh
+                else:
+                    center_x, center_y = 0.5, 0.5
+                fitted = ImageOps.fit(img, (target_w, target_h), method=Image.LANCZOS, centering=(center_x, center_y))
+                out_img = fitted
             else:
                 # "cover" or "center_crop"
                 fitted = ImageOps.fit(img, (target_w, target_h), method=Image.LANCZOS, centering=(0.5, 0.5))
