@@ -1195,9 +1195,14 @@ class SessionService:
                         product_name=resolved_product_name, parent_element_id=resolved_parent_element_id,
                     )).id
             else:
+                target_element_id = result.get("target_element_id")
+                target_el = next((e for e in referenced_elements if e.id == target_element_id), None) if target_element_id else None
+                
                 element_id = (await self._add_new_element(
-                    session.id, result, product_id=resolved_product_id,
-                    product_name=resolved_product_name, parent_element_id=resolved_parent_element_id,
+                    session.id, result, 
+                    product_id=target_el.product_id if target_el else resolved_product_id,
+                    product_name=resolved_product_name, 
+                    parent_element_id=target_el.id if target_el else resolved_parent_element_id,
                 )).id
                 # Real intermediate artifacts this turn genuinely produced beyond the main result
                 # (2026-09-22) — a scene's starting still, a raw pre-stitch clip, a standalone
@@ -1208,6 +1213,8 @@ class SessionService:
                 # architecture's intent: these are byproducts of a fresh GENERATION, not of an
                 # in-place EDIT to something that already exists.
                 for extra in result.get("extra_elements") or []:
+                    extra_target_id = extra.get("target_element_id")
+                    extra_target_el = next((e for e in referenced_elements if e.id == extra_target_id), None) if extra_target_id else None
                     # An honest "not checked" (the same disclosed meaning `compliance_status:
                     # "disabled"` already carries when the QA gate is turned off entirely) — the
                     # compliance gate only ever runs against the turn's MAIN result, never these
@@ -1218,8 +1225,9 @@ class SessionService:
                     # video it's part of, never falls out of it silently.
                     await self._add_new_element(
                         session.id, extra, compliance_status="disabled",
-                        product_id=resolved_product_id, product_name=resolved_product_name,
-                        parent_element_id=resolved_parent_element_id,
+                        product_id=extra_target_el.product_id if extra_target_el else resolved_product_id, 
+                        product_name=resolved_product_name,
+                        parent_element_id=extra_target_el.id if extra_target_el else resolved_parent_element_id,
                     )
 
             if edit_staged_not_applied:

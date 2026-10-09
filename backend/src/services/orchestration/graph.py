@@ -718,6 +718,18 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
                 specialist = plan[gi].get("specialist")
                 produced_ref, produced_tool = _produced_ref(step_result)
 
+                # Determine the specific target element ID this step operated on, if any.
+                # (Fixes the "generated images all go to the first product" bug when editing multiple elements)
+                target_element_id = None
+                if referenced_elements:
+                    for c in step_result.tool_calls:
+                        ref = c.args.get("storage_ref") or c.args.get("reference_storage_ref") or c.args.get("image_storage_ref")
+                        if ref:
+                            matching_el = next((el for el in referenced_elements if el.get("storage_ref") == ref), None)
+                            if matching_el:
+                                target_element_id = matching_el.get("id")
+                                break
+
                 for c in step_result.tool_calls:
                     ref = c.data.get("storage_ref")
                     if c.ok and ref and ref != produced_ref:
@@ -726,6 +738,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
                             "element_type": _ELEMENT_TYPE_BY_TOOL.get(c.tool_name, "text"),
                             "produced_by_specialist": specialist,
                             "metadata": {"dynamic_plan_step": True, "tool_used": c.tool_name},
+                            **({"target_element_id": target_element_id} if target_element_id else {})
                         })
 
                 if produced_ref:
@@ -735,10 +748,12 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
                             "element_type": _ELEMENT_TYPE_BY_TOOL.get(latest_tool, brief.get("latest_element_type", "image")),
                             "produced_by_specialist": last_completed_specialist,
                             "metadata": {"dynamic_plan_step": True, "tool_used": latest_tool},
+                            **({"target_element_id": last_completed_target_element_id} if locals().get("last_completed_target_element_id") else {})
                         })
                     latest_storage_ref = produced_ref
                     latest_tool = produced_tool
                     last_completed_specialist = specialist
+                    last_completed_target_element_id = target_element_id
                 elif specialist in generating_specialists:
                     # Real, live-found bug (2026-10-07, Monster Energy "SALE" overlay complaint):
                     # a generating specialist (illustrator here) can exhaust its retry
@@ -907,6 +922,7 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         ),
         "metadata": {"dynamic_plan": True, "tool_used": latest_tool, **all_metadata},
         "extra_elements": extra_elements,
+        **({"target_element_id": locals().get("last_completed_target_element_id")} if locals().get("last_completed_target_element_id") else {})
     }
     
     # If this was an edit plan on an existing element, update it. If it generated something new, don't.
