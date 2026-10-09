@@ -593,10 +593,14 @@ class SessionService:
         latest_element = existing_elements[-1] if len(existing_elements) == 1 else None
         referenced_elements = []
         if referenced_element_ids:
-            for rid in referenced_element_ids:
+            first_product_id = None
+            for rid in referenced_element_ids[:2]:  # Enforce max 2 references
                 ref = next((e for e in existing_elements if e.id == rid), None)
                 if ref is not None:
-                    referenced_elements.append(ref)
+                    if first_product_id is None:
+                        first_product_id = ref.product_id
+                    if ref.product_id == first_product_id:  # Enforce single product
+                        referenced_elements.append(ref)
             if referenced_elements:
                 latest_element = referenced_elements[-1]
 
