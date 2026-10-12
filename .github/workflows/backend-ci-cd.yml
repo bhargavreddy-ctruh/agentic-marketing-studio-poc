@@ -25,6 +25,18 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Real, live-found CI failure (2026-10-12: "No space left on device" mid-install). torch is
+      # only a transitive dependency here (sentence-transformers/faster-whisper/kokoro/laya/
+      # curated-transformers), never pinned directly in pyproject.toml — so pip's default Linux
+      # wheel pulled in the full CUDA runtime (nvidia-cublas/cudnn/cusolver/cusparselt/nccl, several
+      # GB combined), which is dead weight on this CPU-only, disk-constrained GitHub-hosted runner.
+      # Installing the CPU-only build FIRST means the later full install finds torch already
+      # satisfied and never reaches for the CUDA wheel. Has no effect on local dev (e.g. Apple
+      # Silicon already resolves its own non-CUDA build) or on the EC2 deploy (a separate Docker
+      # build, not this job).
+      - name: Install CPU-only torch (avoid the multi-GB CUDA wheel on this runner)
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install backend (with dev deps)
         working-directory: backend
         run: pip install -e ".[dev]"
