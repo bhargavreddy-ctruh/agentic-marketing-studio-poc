@@ -28,6 +28,10 @@ First build: 5–10 min — this also pre-downloads the embedding/whisper/Laya m
 and, on first start only, the crawler's Ollama model (both fully automatic now, no manual pull
 step). After that: `docker compose up -d` (seconds).
 
+`rembg`/`onnxruntime`/`opencv-python-headless` (2026-10-12, for `text_overlay`'s mask-aware "auto"
+placement) are now declared dependencies in `backend/pyproject.toml`, built into the image the same
+way as everything else above — no separate setup step.
+
 ### 3. Open
 http://localhost:3000
 

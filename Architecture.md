@@ -144,6 +144,12 @@ conversational flow, not a separate upload form.
   approval gate. See Memory.md's "Plan Preview for Every Route" entry for the two real bugs this
   surfaced (a missing DB migration entry, a `GraphState` field that didn't survive LangGraph's
   node-to-node state merging) and how they were found.
+- **`text_overlay`'s "auto" placement mode is now mask-aware, not edge-density-guessed**
+  (2026-10-12) — a new `rembg_provider.py` (CPU-only U2-NetP background removal, zero external
+  cost) plus a new `services/canvas/smart_text_placement.py` (a pure largest-empty-rectangle search
+  over the resulting mask, with auto-wrap/auto-size layout, zero LLM involved) together let the
+  tool find real empty background space instead of risking text landing on the product. Falls back
+  to the old heuristic if segmentation is unavailable. See Memory.md's matching entry.
 
 ## 2. Folder and file structure
 

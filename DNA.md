@@ -52,3 +52,10 @@ These inputs are synchronized via `PUT /api/v1/sessions/{session_id}/dna` and ar
 - Full root-cause detail (the SSE-drop bug, the concurrent-crawl race, and the Strict Mode UI bug
   found along the way) is in `Memory.md`'s "Brand/Product DNA Scraping" entry, not repeated here.
 
+## Engineering note (2026-10-12)
+
+Unrelated to DNA input structure itself, but adjacent: the `text_overlay` tool that draws price/
+discount text bound from this DNA data now places that text using a mask-aware layout (real product
+segmentation, not a heuristic) so overlay text no longer risks landing on the product. See
+`Memory.md`'s "Mask-aware text placement" entry.
+

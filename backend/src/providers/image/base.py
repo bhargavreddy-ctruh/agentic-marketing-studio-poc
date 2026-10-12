@@ -47,3 +47,16 @@ class ImageEditProvider(Protocol):
         mask_bytes: bytes | None = None,
         mask_mime_type: str | None = None,
     ) -> ImageResult: ...
+
+
+@dataclass
+class SegmentationResult:
+    """Our own result type — never the vendor's raw response object."""
+
+    mask_bytes: bytes  # single-channel (L-mode) PNG; 255 = product/foreground, 0 = background
+    mime_type: str
+    provider_name: str
+
+
+class BackgroundRemovalProvider(Protocol):
+    async def remove_background(self, *, image_bytes: bytes, mime_type: str) -> SegmentationResult: ...

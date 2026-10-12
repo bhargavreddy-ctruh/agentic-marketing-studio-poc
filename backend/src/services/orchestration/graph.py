@@ -825,6 +825,27 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
             extra={"_extra_error": exc.message, "_extra_partial_ref": latest_storage_ref},
         )
         if not latest_storage_ref:
+            # Real, live-found gap (2026-10-12, per a real live failure: a rate-limited LLM call
+            # mid-plan hit this branch, and "Try again" silently restarted the ENTIRE plan from
+            # step 1 instead of retrying just the failed step — re-running (and re-billing) every
+            # step that had already succeeded). Stashing a `paused_plan` here, in the exact same
+            # shape `SpecialistNeedsClarification` below already uses, means the resume dispatcher
+            # in `session_service.py` (which already handles this `"route": "dynamic"` shape) picks
+            # this up for free — "Try again" resumes from `next_step_index`, not step 1.
+            failed_group_indices = locals().get("group_indices")
+            next_step_index = min(failed_group_indices) if failed_group_indices else 0
+            state["paused_plan"] = {
+                "route": "dynamic",
+                "plan": plan,
+                "next_step_index": next_step_index,
+                "completed_results": {
+                    "all_metadata": all_metadata,
+                    "latest_storage_ref": latest_storage_ref,
+                    "latest_tool": latest_tool,
+                    "last_completed_specialist": last_completed_specialist,
+                    "extra_elements": extra_elements,
+                },
+            }
             state["result"] = {
                 "message": f"Ran into an issue while executing the plan: {exc.message}. How should we proceed?",
                 "options": [
@@ -883,6 +904,22 @@ async def _dynamic_executor_node(state: GraphState) -> GraphState:
         # defense-in-depth backstop — the same "never a raw crash, always a real disclosed message"
         # principle every other Lead/direct_fix path in this file already follows.
         log.error("dynamic_plan_unknown_specialist", extra={"_extra_error": str(exc)})
+        # Same resumable-pause treatment as the SpecialistFailed branch above (2026-10-12) — a
+        # defense-in-depth backstop should degrade the same way a normal failure does, not worse.
+        failed_group_indices = locals().get("group_indices")
+        next_step_index = min(failed_group_indices) if failed_group_indices else 0
+        state["paused_plan"] = {
+            "route": "dynamic",
+            "plan": plan,
+            "next_step_index": next_step_index,
+            "completed_results": {
+                "all_metadata": all_metadata,
+                "latest_storage_ref": latest_storage_ref,
+                "latest_tool": latest_tool,
+                "last_completed_specialist": last_completed_specialist,
+                "extra_elements": extra_elements,
+            },
+        }
         state["result"] = {
             "message": f"The plan named a specialist that doesn't exist ({exc}). How should we proceed?",
             "options": [
@@ -982,6 +1019,15 @@ def build_graph():
         {
             "approval_required": END,
             "plan_approval": END,
+            # Real, live-found bug (2026-10-12, "Internal Server Error (HTTP 500)" on a Kannada
+            # Rajyotsava post, reproduced live): orchestrator.py's own element-disambiguation pause
+            # (2+ existing canvas elements, no clear reference) sets `state["route"] =
+            # "element_disambiguation"` and a correct paused_plan/result — but this mapping dict
+            # never had a matching entry, so LangGraph raised `KeyError: 'element_disambiguation'`
+            # the instant that route fired, surfaced to the user as a raw 500 before the question
+            # ever got asked. `session_service.py`'s resume handler for this exact route already
+            # existed and works — only this one routing-table entry was missing.
+            "element_disambiguation": END,
             "dynamic": "dynamic_executor",
             "direct_fix": "direct_fix",
         },

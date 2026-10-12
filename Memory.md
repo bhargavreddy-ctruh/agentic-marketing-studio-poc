@@ -5640,3 +5640,33 @@ Initiated a major architectural pivot to convert the existing static pipeline in
 4. **Strict Guardrails:** Max recursion depth of 3, max retries of 2, cycle-detection to prevent infinite ping-pong between agents, and a 5-tool-use limit per turn.
 
 **Status:** Branch created, plan documented in `agentic_platform_transformation_plan.md`. Next step is implementing Phase 1 (the `delegate_task` tool).
+
+## Mask-aware text placement for `text_overlay`'s "auto" mode (2026-10-12)
+
+`text_overlay`'s "auto" placement used to pick from 6 fixed zones via a crude edge-density
+heuristic (`_auto_placement`), with no real awareness of where the product actually is in the
+image — it could place text directly on top of the product. Fixed with two new, zero-LLM modules:
+
+- **`providers/image/rembg_provider.py`** (new) — the only file that imports the `rembg` SDK.
+  `RembgProvider.remove_background(image_bytes, mime_type) -> SegmentationResult` runs U2-NetP
+  (a tiny background-removal ONNX model) entirely on CPU, zero external API cost, segmenting a
+  product photo into a foreground/background alpha mask. `get_background_removal_provider()` is
+  the singleton getter. `providers/image/base.py` gained the `SegmentationResult` dataclass and a
+  `BackgroundRemovalProvider` Protocol to match.
+- **`services/canvas/smart_text_placement.py`** (new) — a pure-algorithm service (no I/O, no
+  vendor SDK) implementing the classic "largest empty rectangle in a binary matrix" search
+  (per-row histogram + stack), non-max-suppressed for candidate diversity, over the product's
+  alpha mask, plus auto-wrap/auto-size text layout. `choose_best_layout()` returns a `TextLayout`
+  (rect, wrapped headline/subhead lines, font sizes) guaranteed not to overlap the product.
+
+`text_overlay.py` gained `_smart_auto_layout()`, calling the provider + service above; it falls
+back cleanly to the old `_auto_placement()` heuristic if segmentation is unavailable or no good
+rectangle exists. Both the SVG and Pillow rendering backends use the new layout when available.
+Explicit (non-"auto") placements are completely unchanged. Output metadata now includes
+`mask_aware_placement: bool` for observability. `backend/pyproject.toml` gained `rembg`,
+`onnxruntime`, `opencv-python-headless`, and an explicit `numpy` as declared dependencies
+(`rembg`/`onnxruntime` were previously only installed ad hoc, never declared).
+
+No API routes, schemas, or the tool registry/orchestrator needed changes — `text_overlay` was
+already wired in everywhere it needs to be; this was purely an internal upgrade to one tool's
+"auto" mode plus two new supporting modules.

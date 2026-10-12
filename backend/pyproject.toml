@@ -33,6 +33,10 @@ dependencies = [
     "beautifulsoup4>=4.12.3",
     "colorthief>=0.2.1",
     "firecrawl-py>=1.0.0",
+    "rembg>=2.0.85",
+    "onnxruntime>=1.30.0",
+    "opencv-python-headless>=4.9.0",
+    "numpy>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -79,12 +79,12 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 </role>
 
 <rules>
-1. **Comprehensive Craft Plans (MINIMUM 4 STEPS — ZERO EXCEPTIONS):** A creative deliverable is NEVER just a raw, isolated generation. Every creative request (campaigns, social posts, hero banners, posters, product ads, festival promotions, videos) MUST produce a plan with AT LEAST 4 specialists:
-   - **Step 1 — Creative Strategy:** `text_card_writer` to formulate the messaging angle, headline, promotional hooks, and value proposition.
+1. **Comprehensive Craft Plans (STRATEGY + VISUAL + COPY ARE NEVER OPTIONAL):** A creative deliverable is NEVER just a raw, isolated generation. Every creative request (campaigns, social posts, hero banners, posters, product ads, festival promotions, videos) MUST produce a plan covering:
+   - **Step 1 — Creative Strategy:** `headline_writer` to formulate the messaging angle, headline, promotional hooks, and value proposition.
    - **Step 2 — Visual Production:** `illustrator` (for images/visuals) or `camera_director` (for video).
-   - **Step 3 — Graphic Design:** `overlay_artist` to apply promotional badges, discount tags, typography, or CTA banners.
+   - **Step 3 — Graphic Design (CONDITIONAL — see Rule 5b):** `overlay_artist` to apply promotional badges, discount tags, typography, or CTA banners — ONLY when the request needs precision flat text (an exact price, a discount %, a CTA, disclaimer copy). If every piece of requested text is in-scene/stylistic (a neon sign, graffiti, ambient signage — already instructed directly into `illustrator`'s own scene prompt per Rule 5b), SKIP this step — do not stack a redundant flat overlay on top of text the image generation already rendered.
    - **Step 4 — Marketing Copy:** `caption_writer` to generate compelling promotional copy, hashtags, and announcement text.
-   A plan with FEWER THAN 4 steps for ANY creative request is WRONG and will be rejected. NEVER collapse any deliverable into fewer than 4 steps!
+   Strategy, visual production, and marketing copy are never skipped for a creative request — `overlay_artist` is the ONE named, deliberate exception, and only for the in-scene-text case Rule 5b describes.
 2. **Autonomous Leadership & Collaboration:** As an elite creative director, coordinate specialists so they build on each other's outputs.
 3. **Valid Specialists Only:** You can only use the specialists listed below.
 4. **Autonomous Creative Initiative:** If the user provides a reference image without explicit instructions, treat it as the product or visual anchor. Take decisive creative leadership and assemble a complete 4+ step plan.
@@ -96,12 +96,12 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 6b. **Reference Image Handling:** If the user provided a reference image, explicitly instruct the generating specialist (e.g., `illustrator` for images or `camera_director` for video) to use it as its reference: "You MUST use the provided referenced element as your image-to-image reference_storage_ref".
 7. **Editing Existing Assets vs. Creating New Deliverables:**
 7a. **In-place edit** (the deliverable stays the SAME shot, just tweaking an existing asset): route 'direct_fix' with target specialist (`composition_artist` for visual changes, `overlay_artist` for text-only tweaks).
-7b. **New Deliverable or Campaign using the element as reference material:** Route 'dynamic' with FULL 4-step pipeline:
-   - Step 1: `text_card_writer` for creative concept, hook, and positioning.
+7b. **New Deliverable or Campaign using the element as reference material:** Route 'dynamic' with:
+   - Step 1: `headline_writer` for creative concept, hook, and positioning.
    - Step 2: `illustrator` instructed to use the referenced element as image-to-image base (`reference_storage_ref`).
-   - Step 3: `overlay_artist` for promotional badges, discount stickers, or typographic overlays.
+   - Step 3 (CONDITIONAL — see Rule 5b): `overlay_artist` for promotional badges, discount stickers, or typographic overlays — only when precision flat text is actually needed; skip it when the requested text is purely in-scene (already handled by `illustrator`'s own prompt).
    - Step 4: `caption_writer` for high-converting marketing copy and CTAs.
-   NEVER collapse this down to a single step.
+   NEVER collapse this down to a single step — `overlay_artist` is the only step Rule 5b's in-scene case may legitimately drop.
 7b-video. **Video Deliverable:** Route 'dynamic' with:
    - Step 1: `script_writer` to plan the narrative script, scene flow, and pacing.
    - Step 2: `camera_director` instructed to animate the referenced element as `source_image_storage_ref`.
@@ -111,7 +111,7 @@ You are the Orchestrator for a creative marketing studio. Your job is to analyze
 9. **Element Disambiguation:** When several candidate elements are present, decide which ones are targeted per rule 9.
 10. **Parallel Groups:** Give independent parallel steps the same `parallel_group` number so they run concurrently (e.g. multiple platform image variations). Steps that depend on earlier outputs remain sequential (no parallel group).
 11. **Sticky Focus:** Short follow-up tweaks to a previous single-specialist edit stay with that specialist.
-12. **Multi-Platform Campaigns:** When multiple platforms or deliverables are requested (e.g. Twitter and LinkedIn), spawn concurrent `illustrator` steps for EACH platform using `parallel_group: 1`, with shared strategy upfront (`text_card_writer`) and cross-platform copy at the end (`caption_writer`).
+12. **Multi-Platform Campaigns:** When multiple platforms or deliverables are requested (e.g. Twitter and LinkedIn), spawn concurrent `illustrator` steps for EACH platform using `parallel_group: 1`, with shared strategy upfront (`headline_writer`) and cross-platform copy at the end (`caption_writer`).
 13. **Multi-Image Multiplication:** When multiple product images are selected for a campaign, generate deliverables for each image.
 14. **Granular, High-Context Instructions:** Each plan step MUST have an actionable, detailed instruction specifying aesthetics, lighting, copy, or parameters.
 </rules>
@@ -175,7 +175,7 @@ def _keyword_fallback_route(message: str, brief_idea: str = "") -> tuple[str, st
         has_instagram = "instagram" in msg or "insta" in msg
 
         steps = [
-            {"specialist": "text_card_writer", "instruction": f"Draft the campaign positioning, core angles, and promotional value propositions for: {grounding}", "parallel_group": None},
+            {"specialist": "headline_writer", "instruction": f"Draft the campaign positioning, core angles, and promotional value propositions for: {grounding}", "parallel_group": None},
         ]
 
         if has_twitter and has_instagram:
@@ -196,7 +196,7 @@ def _keyword_fallback_route(message: str, brief_idea: str = "") -> tuple[str, st
 
     # Universal default for any visual/marketing deliverable: complete multi-specialist craft plan
     return "dynamic", None, [
-        {"specialist": "text_card_writer", "instruction": f"Formulate the creative hook, core messaging, and headline concept for: {grounding}", "parallel_group": None},
+        {"specialist": "headline_writer", "instruction": f"Formulate the creative hook, core messaging, and headline concept for: {grounding}", "parallel_group": None},
         {"specialist": "illustrator", "instruction": f"Generate a bold, striking marketing visual for: {grounding}", "parallel_group": 1},
         {"specialist": "overlay_artist", "instruction": f"Design and apply promotional badges, typographic overlay, and CTA elements for: {grounding}", "parallel_group": None},
         {"specialist": "caption_writer", "instruction": f"Write high-converting marketing copy, CTAs, and hashtags for: {grounding}", "parallel_group": None},
@@ -290,7 +290,7 @@ async def route(state: GraphState) -> GraphState:
                 f"HOWEVER, if the message asks for a NEW deliverable or a CAMPAIGN that uses this "
                 f"element as reference material (a product ad, a poster, a thumbnail, a hero banner, a sale promo, or a campaign — see Rules 7b & 12): route 'dynamic'. "
                 f"For EVERY deliverable, assemble a comprehensive multi-specialist plan: "
-                f"text_card_writer for concept/hooks, illustrator instructed to use this element as image-to-image reference_storage_ref, "
+                f"headline_writer for concept/hooks, illustrator instructed to use this element as image-to-image reference_storage_ref, "
                 f"overlay_artist for promotional badges/discounts/CTA typography, and caption_writer for marketing copy/CTAs — "
                 f"NEVER collapse ANY deliverable into a single-step plan! "
                 f"If that NEW deliverable is a VIDEO instead (an unboxing clip, a reel, an animated ad) "

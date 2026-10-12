@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -13,6 +14,17 @@ from ...core.middleware.logging import get_logger
 from .base import LLMProvider, LLMResult, ModelTier
 
 log = get_logger(__name__)
+
+# Real, live-found bug (2026-10-12, confirmed live: a Gemini classification call hung forever —
+# the last log line before the entire backend became unresponsive to EVERY request, including
+# unrelated static routes, was the google-genai SDK's own "AFC is enabled" line, then nothing,
+# for minutes). Unlike `_openai_compatible.py` (Groq's provider), which already wraps its own
+# outbound call in a real `httpx` timeout, this provider's `client.aio.models.generate_content*`
+# call had no timeout at all — a stuck/dropped connection on Google's SDK transport blocks the
+# `await` indefinitely, and since this whole app runs as a single-process/single-event-loop
+# server, one stuck turn's background task can starve every other request behind it. Same 60s
+# convention as `_openai_compatible.py`'s own `httpx.AsyncClient(timeout=60)`.
+_REQUEST_TIMEOUT_S = 60
 
 
 class GeminiProvider(LLMProvider):
@@ -118,42 +130,48 @@ class GeminiProvider(LLMProvider):
             )
 
             if on_delta:
-                response = await client.aio.models.generate_content_stream(
-                    model=model,
-                    contents=contents,
-                    config=config
-                )
-                full_text = []
-                tool_calls = []
-                
-                async for chunk in response:
-                    if chunk.text:
-                        full_text.append(chunk.text)
-                        on_delta(chunk.text)
-                    
-                    if chunk.function_calls:
-                        for fc in chunk.function_calls:
-                            tool_calls.append({
-                                "id": f"call_{fc.name}",
-                                "type": "function",
-                                "function": {
-                                    "name": fc.name,
-                                    "arguments": json.dumps(fc.args) if fc.args else "{}"
-                                }
-                            })
-                
-                return LLMResult(
-                    text="".join(full_text),
-                    model=model,
-                    tool_calls=tool_calls
-                )
+                async def _stream() -> LLMResult:
+                    response = await client.aio.models.generate_content_stream(
+                        model=model,
+                        contents=contents,
+                        config=config
+                    )
+                    full_text = []
+                    tool_calls = []
+
+                    async for chunk in response:
+                        if chunk.text:
+                            full_text.append(chunk.text)
+                            on_delta(chunk.text)
+
+                        if chunk.function_calls:
+                            for fc in chunk.function_calls:
+                                tool_calls.append({
+                                    "id": f"call_{fc.name}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": fc.name,
+                                        "arguments": json.dumps(fc.args) if fc.args else "{}"
+                                    }
+                                })
+
+                    return LLMResult(
+                        text="".join(full_text),
+                        model=model,
+                        tool_calls=tool_calls
+                    )
+
+                return await asyncio.wait_for(_stream(), timeout=_REQUEST_TIMEOUT_S)
             else:
-                response = await client.aio.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=config
+                response = await asyncio.wait_for(
+                    client.aio.models.generate_content(
+                        model=model,
+                        contents=contents,
+                        config=config
+                    ),
+                    timeout=_REQUEST_TIMEOUT_S,
                 )
-                
+
                 content = response.text or ""
                 tool_calls = []
                 if response.function_calls:

@@ -1,6 +1,7 @@
 """A conversation/ideation session — one per user's creative-partner interaction."""
 from __future__ import annotations
 
+# pyrefly: ignore [missing-import]
 from sqlalchemy import JSON, Boolean, String
 from sqlalchemy.orm import Mapped, mapped_column
 

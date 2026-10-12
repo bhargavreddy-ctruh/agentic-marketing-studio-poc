@@ -153,6 +153,13 @@ Data survives restarts and redeploys: the Postgres DB (Supabase) and generated a
 live in the named `ollama_data` volume. Back up `backend/poc.db` and `backend/var/` periodically —
 nothing here does that automatically.
 
+`backend/pyproject.toml` also declares `rembg`, `onnxruntime`, `opencv-python-headless`, and
+`numpy` (used by `text_overlay`'s mask-aware auto text placement, via
+`backend/src/providers/image/rembg_provider.py`). These are pure-Python/wheel-only packages — no
+extra system packages are needed beyond what the Dockerfile already installs for `cairosvg`
+(`libcairo2` etc.). Specifically, `opencv-python-headless` (unlike plain `opencv-python`) needs no
+system `libGL`, so it's safe in a headless/slim container as-is.
+
 All required models are downloaded automatically — no manual step, ever:
 - The embedding, Whisper, and Laya models are pre-baked into the backend image at **build** time
   (see `backend/Dockerfile`), so the first real request after a deploy isn't slowed down by a

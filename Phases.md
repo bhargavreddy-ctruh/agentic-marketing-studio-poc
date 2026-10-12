@@ -50,3 +50,7 @@ Baseline only, meant to be revised once Phase 1's real LangSmith data comes in:
   marked done on assumption defeats the point of tracking phases at all.
 - Update `Memory.md` continuously during a phase; write a `Checkpoint.md` entry at the end of each
   phase (or any natural pause point).
+- Post-Phase-5 maintenance (2026-10-12): `text_overlay`'s "auto" placement mode became mask-aware
+  (real product segmentation via a new `rembg_provider.py` + largest-empty-rectangle search in
+  `services/canvas/smart_text_placement.py`), replacing the old edge-density heuristic. See
+  `Checkpoint.md`/`Memory.md` for detail.

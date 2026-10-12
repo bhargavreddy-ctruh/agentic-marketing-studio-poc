@@ -830,6 +830,18 @@ class SessionService:
         # `product_photo_storage_ref` injection below, so both correctly reflect the product THIS
         # turn is actually about — not one turn late. This is a reordering, not new logic; every
         # piece was already computed, just too late to matter for the turn that needed it.
+        # Real, live-found gap (2026-10-12, Apple Watch Series 12 facts leaking into an unrelated
+        # Ctruh/Kannada Rajyotsava festival post): this turn's own chat-driven product detection
+        # ALREADY judges whether the message is about a product at all (`upsert_product_from_chat`'s
+        # own `is_product_related` check) — but that verdict was only ever used to decide whether
+        # to upsert a product, then thrown away. A single-product session (the common case, so
+        # "2+ products" alone can't catch this) still blindly fell back to that one known product
+        # for ANY later, unrelated message — this turn's own explicit "no, this isn't about that"
+        # judgment never suppressed it. `this_turn_confirmed_off_topic` captures that judgment so
+        # the fallback below can actually use it: True only when a real, substantive message was
+        # checked and genuinely resolved to no product — never for a short/approve/cancel message,
+        # where there's no new signal either way and inheriting the existing product stays correct.
+        this_turn_confirmed_off_topic = False
         stripped_message = user_message.strip()
         if stripped_message and len(stripped_message) >= 12 and not is_approval(stripped_message) and not is_cancel(stripped_message):
             from ...core.exceptions import SpecialistFailed
@@ -851,6 +863,7 @@ class SessionService:
                         existing_products=existing_products,
                         raw_text=stripped_message,
                     )
+                this_turn_confirmed_off_topic = product is None
                 if product is not None:
                     if product.id not in linked_ids:
                         linked_ids.append(product.id)
@@ -902,7 +915,38 @@ class SessionService:
         # element belongs to a specific product (`resolved_product_id` already set above from the
         # parent's own product_id), prefer THAT product's photo first. Fall back to the
         # session-level product only when the reference has no product assignment.
-        photo_product_id = resolved_product_id or (session.product_profile_id if not start_new_product else None)
+        #
+        # Real, live-found gap in that same fix (2026-10-12, "Internal Server Error... backend the
+        # image is generated, but its stuck here" complaint traced to Apple Watch Series 12 facts
+        # leaking into an unrelated Ctruh/Kannada Rajyotsava festival post in the same session):
+        # the 2026-10-03 fix above only closed this for a request that explicitly REFERENCES an
+        # existing element — a brand-new, product-less request (no reference, no product mention)
+        # still fell through to `session.product_profile_id`, the stale "last touched" product,
+        # with no check for whether the session even has just the one unambiguous product. In a
+        # session that has ever linked 2+ DISTINCT products, silently guessing "the last one" is
+        # the exact same contamination bug — `product_lookup`/guardrails/compliance all grounded
+        # against a product this turn never mentioned. Only trust the session-level fallback when
+        # the session has at most one product ever linked (genuinely unambiguous — the common,
+        # single-product-session convenience case this fallback exists for); with 2+, require an
+        # explicit signal from THIS turn (target_product_id / parent element / chat-detection
+        # above) instead of guessing. Separately — and this is what actually closes the single-
+        # product-session case above (2+ products was never the only way to be wrong) —
+        # `this_turn_confirmed_off_topic` (computed above) means THIS turn's own chat-detection
+        # already looked at this exact message and confirmed it has nothing to do with the known
+        # product; trusting the fallback anyway would directly contradict a judgment this same
+        # turn already made.
+        known_product_ids = session.brief.get("product_profile_ids") or (
+            [session.product_profile_id] if session.product_profile_id else []
+        )
+        session_product_unambiguous = len(set(known_product_ids)) <= 1
+        photo_product_id = resolved_product_id or (
+            session.product_profile_id
+            if (
+                not start_new_product
+                and session_product_unambiguous
+                and not this_turn_confirmed_off_topic
+            ) else None
+        )
         if photo_product_id:
             async with async_session_factory() as db:
                 from ...repositories.postgres.postgres_product_repository import (
@@ -1141,6 +1185,26 @@ class SessionService:
 
                 from .graph import _motion_lead_node
                 result_state = await _motion_lead_node(resume_state)
+            elif is_cancel(user_message):
+                # Real, live-found gap (2026-10-12): this catch-all branch (the resume path for
+                # both a genuine mid-plan question AND, as of this session, a hard specialist
+                # failure stashed the same way) never checked for Cancel at all — clicking the
+                # "Cancel" button offered right alongside "Try again" just fed the literal word
+                # "Cancel" into `_dynamic_executor_node` as if it were the clarification answer,
+                # continuing the plan instead of stopping it. Same shape as `plan_approval`'s own
+                # cancel handling just above.
+                session.brief = {k: v for k, v in session.brief.items() if k != "paused_plan"}
+                completed = paused_plan.get("completed_results") or {}
+                kept_ref = completed.get("latest_storage_ref")
+                result_state = {
+                    "brief": resume_brief,
+                    "result": {
+                        "message": (
+                            "Cancelled — discarded, nothing further was generated."
+                            + (" Anything already produced stays on the canvas." if kept_ref else "")
+                        ),
+                    },
+                }
             else:
                 emit("ideation_started")
                 emit("ideation_completed", ready=True)

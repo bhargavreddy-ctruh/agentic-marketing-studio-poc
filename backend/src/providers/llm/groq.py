@@ -78,14 +78,22 @@ class GroqProvider(LLMProvider):
                         messages=full_messages,
                         tools=tools,
                         max_tokens=max_tokens,
-                        retries=0,  # fail fast per user request to shift to fallback rather than retrying multiple times
+                        # 2026-10-12: was retries=0 ("fail fast... to shift to fallback") back when
+                        # Grok (xAI) sat between Groq and total failure — that middle fallback was
+                        # removed this session, so Groq is now the LAST provider in the chain with
+                        # nowhere left to "shift to." A single retry against the already-proven
+                        # backoff loop in `_openai_compatible.py` (which already handles both a 429
+                        # and a transient malformed-tool-call-JSON stream error identically) is cheap
+                        # and gives a real second chance before the whole specialist call fails.
+                        retries=1,
                         on_delta=on_delta,
                         strip_images=True,
                     )
                 except ProviderUnavailable as exc:
                     last_error = exc
                     # If it's a rate limit, the API key is exhausted. We can try the next key.
-                    # But if we exhaust all keys, it raises last_error quickly without internal backoff loops.
+                    # Each key already gets one internal retry-with-backoff (see retries=1 above)
+                    # before raising; if every key still fails, this raises last_error.
                     if "rate limited" in exc.message:
                         mark_rate_limited(key)
                     continue
